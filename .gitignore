@@ -219,3 +219,9 @@ __marimo__/
 
 # Milestone
 /Milestone/
+
+#.vscode/
+/.vscode/
+
+# captures
+/captures/
