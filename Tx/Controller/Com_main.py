@@ -12,6 +12,7 @@ from tkinter import ttk,messagebox
 from PIL import Image,ImageTk
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from Tx.Controller.network_client import Network
+from Tx.Controller.servo_panel import ServoPanel
 
 class App:
     def __init__(self,root,args):
@@ -20,15 +21,18 @@ class App:
         self.mark=time.monotonic();self.previous=0;self.fps=0;self.size=None
         self.out.mkdir(parents=True,exist_ok=True)
         self.logpath=self.out/('events_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'.jsonl')
-        root.title('Dynamic OWPT — M1-1');root.geometry('1050x780')
+        root.title('Dynamic OWPT — M1-1 / M1-2');root.geometry('1150x850')
         root.protocol('WM_DELETE_WINDOW',self.close)
-        row=ttk.Frame(root,padding=10);row.pack(fill='x');self.values={}
+        tabs=ttk.Notebook(root);tabs.pack(fill='x')
+        camera_tab=ttk.Frame(tabs);tabs.add(camera_tab,text='M1-1 Camera')
+        self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='M1-2 Pan / Tilt')
+        row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','640'),('height','480'),('fps','10'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
             var=tk.StringVar(value=value);self.values[name]=var
             ttk.Entry(row,textvariable=var,width=14).grid(row=1,column=i)
-        ttk.Label(root,text='노출(µs)·gain 모두 공란 = 자동 / fps = 전송 목표 상한').pack()
-        row=ttk.Frame(root,padding=8);row.pack(fill='x')
+        ttk.Label(camera_tab,text='노출(µs)·gain 모두 공란 = 자동 / fps = 전송 목표 상한').pack()
+        row=ttk.Frame(camera_tab,padding=8);row.pack(fill='x')
         for label,fn in [('Start / Apply',self.start),('Stop',lambda:self.send(dict(cmd='preview',enable=False))),
                          ('Save JPEG + JSON',self.save),('IR LOW',lambda:self.send(dict(cmd='ir_cut',level=0))),
                          ('IR HIGH',lambda:self.send(dict(cmd='ir_cut',level=1))),('Ping RTT',self.ping)]:
@@ -44,8 +48,10 @@ class App:
         self.log.insert('end',json.dumps(event,ensure_ascii=False)+'\n');self.log.see('end')
         if int(self.log.index('end-1c').split('.')[0])>120:self.log.delete('1.0','40.0')
     def send(self,cmd):
-        try:self.net.send(cmd);self.record(dict(event='command',command=cmd))
-        except OSError as exc:messagebox.showerror('Connection',str(exc))
+        try:
+            self.net.send(cmd);self.record(dict(event='command',command=cmd));return True
+        except OSError as exc:
+            messagebox.showerror('Connection',str(exc));return False
     def start(self):
         try:
             cfg={k:int(self.values[k].get()) for k in ('width','height','fps','quality')}
@@ -64,13 +70,15 @@ class App:
         name='frame_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         path=self.out/(name+'.jpg');path.write_bytes(data)
         meta=dict(meta,actual_image_size=self.size,gui_receive_unix_ns=wall,gui_receive_fps=self.fps,
-                  note='requested controls are not actual sensor metadata; clocks are not synchronized')
+                  m1_2=self.servo.context(),
+                  note='requested controls and servo commands are not measurements; clocks are not synchronized')
         path.with_suffix('.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf-8')
-        self.record(dict(event='saved',file=str(path)))
+        self.record(dict(event='saved',file=str(path),m1_2=self.servo.context()))
     def poll(self):
         try:
             for _ in range(100):
                 event=self.net.events.get_nowait();kind=event.get('event')
+                self.servo.event(event)
                 if kind=='network':self.links[str(event['port'])]=event['state']
                 if kind in ('hello','agent'):self.links['Pi']=event.get('agent_state',event.get('state'))
                 if kind=='pong':
@@ -79,6 +87,7 @@ class App:
                 self.connection.set(' | '.join(f'{k}: {v}' for k,v in self.links.items()))
                 self.record(event)
         except queue.Empty:pass
+        self.servo.tick()
         frame,count=self.net.pop();now=time.monotonic()
         if now-self.mark>=1:
             self.fps=(count-self.previous)/(now-self.mark);self.previous=count;self.mark=now
@@ -100,6 +109,6 @@ class App:
         self.net.close();self.root.destroy()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures/m1_1')
+    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures/m1_2')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()

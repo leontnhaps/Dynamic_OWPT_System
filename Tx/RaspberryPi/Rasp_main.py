@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from common.protocol import messages, send_json, send_frame
+from common.servo import Servo
 
 class Agent:
     def __init__(self,args):
@@ -22,6 +23,7 @@ class Agent:
         self.session=uuid.uuid4().hex
         self.gpio=None
         self.ir_level=None
+        self.servo=Servo(getattr(args, "servo_port", None), args.simulate)
     def event(self,**obj):
         with self.output_lock:
             send_json(self.ctrl,obj)
@@ -29,7 +31,17 @@ class Agent:
         try:
             for cmd in messages(self.ctrl):
                 try:
-                    if cmd.get('cmd')=='preview':
+                    if cmd.get('cmd') in ('servo_status', 'servo_config', 'move'):
+                        action=cmd['cmd']
+                        with self.lock:
+                            if action=='servo_config':
+                                result=self.servo.configure(cmd)
+                            elif action=='move':
+                                result=self.servo.move(cmd)
+                            else:
+                                result=self.servo.status()
+                        self.event(event='servo',operation=action,request_id=cmd.get('request_id'),**result)
+                    elif cmd.get('cmd')=='preview':
                         cfg=None
                         if cmd.get('enable',True):
                             cfg={k:int(cmd.get(k,v)) for k,v in dict(width=640,height=480,fps=10,quality=80).items()}
@@ -57,15 +69,17 @@ class Agent:
                     elif cmd.get('cmd')=='ping':
                         self.event(event='pong',token=cmd.get('token'))
                     else:
-                        raise ValueError('Unsupported M1-1 command')
-                except (ValueError,TypeError) as exc:
-                    self.event(event='error',message=str(exc))
+                        raise ValueError('Unsupported command')
+                except (ValueError,TypeError,OSError,ImportError) as exc:
+                    self.event(event='error',operation=cmd.get('cmd'),request_id=cmd.get('request_id'),message=str(exc))
         except (OSError,ValueError):
             pass
         finally:
             self.stop.set()
     def connection(self):
         self.cfg=None
+        self.servo.limits=None
+        self.servo.last=None
         self.stop.clear()
         with socket.create_connection((self.args.server,7500),timeout=5) as ctrl, socket.create_connection((self.args.server,7501),timeout=5) as images:
             self.ctrl=ctrl
@@ -76,7 +90,7 @@ class Agent:
             camera=None
             active=None
             try:
-                self.event(event='ready',simulated=self.args.simulate)
+                self.event(event='ready',simulated=self.args.simulate,capabilities=['servo_status','servo_config','move'])
                 while not self.stop.is_set():
                     with self.lock:
                         cfg=self.cfg.copy() if self.cfg else None
@@ -98,6 +112,8 @@ class Agent:
                         self.stop.wait(.05)
                         continue
                     begin=time.monotonic()
+                    with self.lock:
+                        servo_at_capture=self.servo.status()
                     with io.BytesIO() as bio:
                         if self.args.simulate:
                             from PIL import Image,ImageDraw
@@ -110,7 +126,7 @@ class Agent:
                     self.seq+=1
                     meta=dict(session=self.session,seq=self.seq,simulated=self.args.simulate,requested=cfg,
                               capture_done_unix_ns=time.time_ns(),capture_call_ms=(time.monotonic()-begin)*1000,
-                              ir_gpio_level=self.ir_level)
+                              ir_gpio_level=self.ir_level,servo_at_capture_start=servo_at_capture)
                     send_frame(images,'_preview_'+json.dumps(meta,separators=(',',':')),jpeg)
                     self.stop.wait(max(0,1/cfg['fps']-(time.monotonic()-begin)))
             except Exception as exc:
@@ -137,6 +153,7 @@ def main():
     parser.add_argument('--server',required=True)
     parser.add_argument('--simulate',action='store_true')
     parser.add_argument('--ir-pin',type=int)
+    parser.add_argument('--servo-port',help='ESP32 serial device, e.g. /dev/ttyUSB0; no auto movement')
     args=parser.parse_args()
     if args.simulate and args.ir_pin is not None:
         parser.error('Simulation cannot operate GPIO')
@@ -157,6 +174,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        agent.servo.close()
         if agent.gpio:
             agent.gpio.cleanup(args.ir_pin)
 if __name__=='__main__':
