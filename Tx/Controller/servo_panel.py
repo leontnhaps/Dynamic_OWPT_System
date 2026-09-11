@@ -35,7 +35,7 @@ class ServoPanel(ttk.Frame):
         actions.grid(row=3, column=0, columnspan=8, sticky='w', pady=5)
         for label, fn in [('상태 조회', self.refresh), ('운용 범위 적용', self.configure_limits),
                           ('입력 각도로 이동', self.absolute), ('직전 명령을 기준 자세로 저장', self.set_reference),
-                          ('기준 자세 복귀', self.go_reference)]:
+                          ('기준 자세 복귀', self.go_reference), ('LED OFF', self.led_off)]:
             button = ttk.Button(actions, text=label, command=lambda f=fn:self.guard(f))
             button.pack(side='left', padx=2)
             self.buttons.append(button)
@@ -93,6 +93,9 @@ class ServoPanel(ttk.Frame):
 
     def refresh(self):
         self.request(dict(cmd='servo_status'))
+
+    def led_off(self):
+        self.request(dict(cmd='led_off'))
 
     def configure_limits(self):
         self.request(dict(cmd='servo_config',**limits_from(self.values())))
@@ -166,6 +169,8 @@ class ServoPanel(ttk.Frame):
         self.simulated=event.get('simulated')
         prefix='SIMULATION | ' if self.simulated else ''
         self.state.set(prefix + f"직전 전송 명령: {self.last or '없음'} · 실제각/도달 미측정")
+        if event.get('operation')=='led_off':
+            self.state.set(prefix + 'LED OFF 명령 전송 완료 · 실제 소등은 육안 확인 (레이저 OFF와 별개)')
         if event.get('operation')=='move' and self.last:
             for a in ('pan','tilt'):
                 self.vars[a].set(str(self.last[a]))

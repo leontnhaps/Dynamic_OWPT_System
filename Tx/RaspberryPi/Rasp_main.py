@@ -31,11 +31,13 @@ class Agent:
         try:
             for cmd in messages(self.ctrl):
                 try:
-                    if cmd.get('cmd') in ('servo_status', 'servo_config', 'move'):
+                    if cmd.get('cmd') in ('servo_status', 'servo_config', 'move', 'led_off'):
                         action=cmd['cmd']
                         with self.lock:
                             if action=='servo_config':
                                 result=self.servo.configure(cmd)
+                            elif action=='led_off':
+                                result=self.servo.led_off()
                             elif action=='move':
                                 result=self.servo.move(cmd)
                             else:
@@ -90,7 +92,7 @@ class Agent:
             camera=None
             active=None
             try:
-                self.event(event='ready',simulated=self.args.simulate,capabilities=['servo_status','servo_config','move'])
+                self.event(event='ready',simulated=self.args.simulate,capabilities=['servo_status','servo_config','move','led_off'])
                 while not self.stop.is_set():
                     with self.lock:
                         cfg=self.cfg.copy() if self.cfg else None

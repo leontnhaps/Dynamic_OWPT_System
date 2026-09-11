@@ -45,6 +45,10 @@ class RelayTest(unittest.TestCase):
             def request(cmd,token):
                 send_json(ctrl,dict(cmd,request_id=token))
                 return until(lambda e:e.get('request_id')==token)
+            event=request(dict(cmd='led_off'),'led')
+            self.assertEqual(event['operation'],'led_off')
+            self.assertEqual(event['packet'],dict(T=132,IO4=0,IO5=0))
+            self.assertIsNone(event['commanded'])
             event=request(dict(cmd='move',pan=0,tilt=0,speed=100,acc=1),'before')
             self.assertEqual(event['event'],'error')
             event=request(dict(cmd='servo_config',pan_min=-10,pan_max=10,tilt_min=-5,tilt_max=5),'cfg')

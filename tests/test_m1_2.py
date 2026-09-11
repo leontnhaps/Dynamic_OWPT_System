@@ -58,6 +58,24 @@ class Commands(unittest.TestCase):
         servo=Servo();servo.configure(LIMITS)
         with self.assertRaises(ValueError):servo.move(MOVE)
 
+    def test_led_off_without_limits_and_preserves_position(self):
+        serial=Serial();servo=Servo(transport=serial)
+        result=servo.led_off()
+        self.assertEqual(json.loads(serial.raw),dict(T=132,IO4=0,IO5=0))
+        self.assertTrue(serial.raw.endswith(b'\n'))
+        self.assertIsNone(result['commanded'])
+        servo.configure(LIMITS);servo.move(MOVE)
+        before=dict(servo.last)
+        servo.led_off()
+        self.assertEqual(servo.last,before)
+        self.assertEqual(servo.limits,LIMITS)
+
+    def test_led_off_disabled_and_failed_write(self):
+        with self.assertRaises(ValueError):Servo().led_off()
+        serial=Serial(fail=True)
+        with self.assertRaises(OSError):Servo(transport=serial).led_off()
+        self.assertTrue(serial.closed)
+
     def panel(self):
         panel=ServoPanel.__new__(ServoPanel)
         panel.last=dict(pan=2,tilt=3)

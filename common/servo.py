@@ -70,6 +70,19 @@ class Servo:
         move = move_from(data, self.limits)
         packet = dict(T=133, X=move['pan'], Y=move['tilt'],
                       SPD=move['speed'], ACC=move['acc'])
+        self.write_packet(packet)
+        self.last = dict(move, command_id=data.get('request_id'))
+        return dict(self.status(), packet=packet,
+                    state='simulated' if self.simulate else 'serial_written')
+
+    def led_off(self):
+        """Existing DLC LED command; independent of motion limits. Not laser GPIO."""
+        packet = dict(T=132, IO4=0, IO5=0)
+        self.write_packet(packet)
+        return dict(self.status(), packet=packet, led_value=0,
+                    state='simulated' if self.simulate else 'serial_written')
+
+    def write_packet(self, packet):
         if not self.simulate:
             if self.serial is None:
                 if not self.port:
@@ -85,9 +98,6 @@ class Servo:
                 self.last = None
                 self.close()
                 raise
-        self.last = dict(move, command_id=data.get('request_id'))
-        return dict(self.status(), packet=packet,
-                    state='simulated' if self.simulate else 'serial_written')
 
     def close(self):
         if self.serial is not None:

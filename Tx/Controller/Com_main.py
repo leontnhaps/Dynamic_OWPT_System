@@ -39,18 +39,40 @@ class App:
             ttk.Button(row,text=label,command=fn).pack(side='left',padx=3)
         self.connection=tk.StringVar(value='Connecting…');ttk.Label(root,textvariable=self.connection).pack()
         self.status=tk.StringVar(value='Waiting for frames');ttk.Label(root,textvariable=self.status).pack()
+        logs=ttk.Panedwindow(root,orient='horizontal')
+        logs.pack(side='bottom',fill='x',padx=6,pady=6)
+        self.event_log=self.make_log(logs,'명령 · 응답 · 연결 · 오류')
+        self.stats_log=self.make_log(logs,'실시간 수신 통계 (receive_stats)')
         self.preview=ttk.Label(root,anchor='center');self.preview.pack(expand=True,fill='both')
-        self.log=tk.Text(root,height=6);self.log.pack(fill='x')
         root.after(30,self.poll)
+    def make_log(self,parent,title):
+        panel=ttk.LabelFrame(parent,text=title,padding=4)
+        parent.add(panel,weight=1)
+        follow=tk.BooleanVar(value=True)
+        ttk.Checkbutton(panel,text='자동 스크롤',variable=follow).pack(anchor='w')
+        body=ttk.Frame(panel);body.pack(fill='both',expand=True)
+        widget=tk.Text(body,height=8,width=45,wrap='word',state='disabled')
+        scroll=ttk.Scrollbar(body,orient='vertical',command=widget.yview)
+        widget.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right',fill='y');widget.pack(fill='both',expand=True)
+        return widget,follow
+
     def record(self,event):
         event=dict(event,gui_unix_ns=time.time_ns())
-        with self.logpath.open('a',encoding='utf-8') as f:f.write(json.dumps(event,ensure_ascii=False)+'\n')
-        self.log.insert('end',json.dumps(event,ensure_ascii=False)+'\n');self.log.see('end')
-        if int(self.log.index('end-1c').split('.')[0])>120:self.log.delete('1.0','40.0')
+        line=json.dumps(event,ensure_ascii=False)+'\n'
+        # Preserve the complete chronological evidence file, regardless of UI routing.
+        with self.logpath.open('a',encoding='utf-8') as f:f.write(line)
+        widget,follow=self.stats_log if event.get('event')=='receive_stats' else self.event_log
+        widget.configure(state='normal')
+        widget.insert('end',line)
+        if int(widget.index('end-1c').split('.')[0])>500:widget.delete('1.0','101.0')
+        if follow.get():widget.see('end')
+        widget.configure(state='disabled')
     def send(self,cmd):
         try:
             self.net.send(cmd);self.record(dict(event='command',command=cmd));return True
         except OSError as exc:
+            self.record(dict(event='send_error',command=cmd,message=str(exc)))
             messagebox.showerror('Connection',str(exc));return False
     def start(self):
         try:
