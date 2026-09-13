@@ -6,6 +6,7 @@ import socketserver
 import threading
 import time
 import select
+from collections import deque
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -17,6 +18,7 @@ gui = None
 condition = threading.Condition()
 latest = None
 version = 0
+snapshots = deque()
 
 class Control(socketserver.BaseRequestHandler):
     def setup(self):
@@ -84,7 +86,7 @@ class GuiControl(Control):
                 target = agent
             if target:
                 try:
-                    target.send({'cmd':'preview','enable':False})
+                    target.send({'cmd':'outputs_off'})
                 except OSError:
                     pass
 
@@ -95,8 +97,15 @@ class PiImages(socketserver.BaseRequestHandler):
             while True:
                 frame = receive_frame(self.request)
                 with condition:
-                    latest = frame
-                    version += 1
+                    if frame[0].startswith('_capture_'):
+                        # Stills must not be overwritten by the latest-preview slot.
+                        if len(snapshots) >= 8:
+                            notify({'event':'error','operation':'snap','message':'Capture relay queue full; recover Pi backup'})
+                        else:
+                            snapshots.append(frame)
+                    else:
+                        latest = frame
+                        version += 1
                     condition.notify_all()
         except (OSError, EOFError, ValueError):
             pass
@@ -109,14 +118,22 @@ class GuiImages(socketserver.BaseRequestHandler):
         try:
             while True:
                 with condition:
-                    condition.wait_for(lambda: version != seen, timeout=1)
-                    if version == seen:
+                    condition.wait_for(lambda: snapshots or version != seen, timeout=1)
+                    if not snapshots and version == seen:
                         if select.select([self.request], [], [], 0)[0] and not self.request.recv(1):
                             return
                         continue
-                    seen = version
-                    frame = latest
+                    still = bool(snapshots)
+                    if still:
+                        frame = snapshots[0]
+                    else:
+                        seen = version
+                        frame = latest
                 send_frame(self.request, *frame)
+                if still:
+                    with condition:
+                        if snapshots and snapshots[0] is frame:
+                            snapshots.popleft()
         except OSError:
             pass
 
@@ -142,3 +159,4 @@ def main():
             srv.server_close()
 if __name__ == '__main__':
     main()
+

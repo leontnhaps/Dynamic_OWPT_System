@@ -9,7 +9,7 @@ from common.protocol import messages,receive_frame,send_json
 class Network:
     def __init__(self,host):
         self.host=host;self.lock=threading.Lock();self.output_lock=threading.Lock()
-        self.events=queue.Queue();self.latest=None;self.count=0;self.ctrl=None
+        self.captures=queue.Queue(maxsize=8);self.events=queue.Queue();self.latest=None;self.count=0;self.ctrl=None
         self.sockets=set();self.stop=threading.Event()
         self.threads=[threading.Thread(target=self.worker,args=(p,),daemon=True) for p in (7600,7601)]
         for t in self.threads:t.start()
@@ -27,6 +27,16 @@ class Network:
                 else:
                     while not self.stop.is_set():
                         name,data=receive_frame(sock)
+                        if name.startswith('_capture_'):
+                            meta=json.loads(name[len('_capture_'):])
+                            try:
+                                self.captures.put_nowait((data,meta,time.monotonic(),time.time_ns()))
+                            except queue.Full:
+                                self.events.put(dict(event='error',operation='snap',request_id=meta.get('request_id'),
+                                                     message='Capture receive queue full; recover Pi backup'))
+                            continue
+                        if not name.startswith('_preview_'):
+                            raise ValueError('Unknown frame type')
                         meta=json.loads(name.removeprefix('_preview_'))
                         with self.lock:
                             self.latest=(data,meta,time.monotonic(),time.time_ns())
@@ -57,3 +67,4 @@ class Network:
             except OSError:pass
             s.close()
         for t in self.threads:t.join(timeout=.5)
+

@@ -13,6 +13,7 @@ from PIL import Image,ImageTk
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from Tx.Controller.network_client import Network
 from Tx.Controller.servo_panel import ServoPanel
+from Tx.Controller.capture_panel import CapturePanel
 
 class App:
     def __init__(self,root,args):
@@ -21,11 +22,12 @@ class App:
         self.mark=time.monotonic();self.previous=0;self.fps=0;self.size=None
         self.out.mkdir(parents=True,exist_ok=True)
         self.logpath=self.out/('events_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'.jsonl')
-        root.title('Dynamic OWPT — M1-1 / M1-2');root.geometry('1150x850')
+        root.title('Dynamic OWPT — M2 Calibration Capture');root.geometry('1250x950')
         root.protocol('WM_DELETE_WINDOW',self.close)
         tabs=ttk.Notebook(root);tabs.pack(fill='x')
         camera_tab=ttk.Frame(tabs);tabs.add(camera_tab,text='M1-1 Camera')
-        self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='M1-2 Pan / Tilt')
+        self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='Pan / Tilt')
+        self.capture=CapturePanel(tabs,self);tabs.add(self.capture,text='M2 사진 · Calibration')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','640'),('height','480'),('fps','10'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -101,6 +103,7 @@ class App:
             for _ in range(100):
                 event=self.net.events.get_nowait();kind=event.get('event')
                 self.servo.event(event)
+                self.capture.event(event)
                 if kind=='network':self.links[str(event['port'])]=event['state']
                 if kind in ('hello','agent'):self.links['Pi']=event.get('agent_state',event.get('state'))
                 if kind=='pong':
@@ -110,6 +113,7 @@ class App:
                 self.record(event)
         except queue.Empty:pass
         self.servo.tick()
+        self.capture.poll()
         frame,count=self.net.pop();now=time.monotonic()
         if now-self.mark>=1:
             self.fps=(count-self.previous)/(now-self.mark);self.previous=count;self.mark=now
@@ -126,11 +130,12 @@ class App:
             self.status.set(f'{"SIMULATION | " if meta["simulated"] else ""}Frame {meta["seq"]} | {self.size} | receive {self.fps:.1f} fps | last receive {age:.2f}s ago'+(' — STALE / STOPPED' if age>2 else ''))
         self.root.after(30,self.poll)
     def close(self):
-        try:self.net.send(dict(cmd='preview',enable=False))
+        try:self.net.send(dict(cmd='outputs_off'))
         except OSError:pass
         self.net.close();self.root.destroy()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures/m1_2')
+    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures/m2')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()
+

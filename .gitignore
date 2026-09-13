@@ -225,3 +225,7 @@ __marimo__/
 
 # captures
 /captures/
+
+
+# Local acquisition data (Pi backups and controller samples)
+captures/
