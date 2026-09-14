@@ -47,6 +47,8 @@ class CapturePanel(ttk.Frame):
         ttk.Button(row,text='마지막 촬영 사진 · 중심 표시',command=lambda:self.guard(self.annotate)).pack(side='left',padx=4)
         ttk.Button(row,text='기존 촬영 사진 열기',command=lambda:self.guard(self.open_image)).pack(side='left',padx=3)
         ttk.Button(row,text='좌표 포함 CSV 내보내기',command=lambda:self.guard(self.export)).pack(side='left',padx=3)
+        from calibration.laser_center import open_window
+        ttk.Button(self,text='수동 레이저 좌표 평균',command=lambda:open_window(self.app.root,self.app.out)).pack(anchor='w')
         ttk.Label(self,textvariable=self.state).pack(anchor='w')
         row=ttk.Frame(self);row.pack(fill='x',pady=4)
         for label,cmd in [('IR 통과 ON (night)',dict(cmd='ir_cut',level=1)),
