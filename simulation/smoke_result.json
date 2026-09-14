@@ -1,0 +1,112 @@
+{
+  "simulation_only": true,
+  "model": "simulation/runs/smoke/model.zip",
+  "stress": false,
+  "episodes": 5,
+  "seed_start": 10000,
+  "scenario": "seeded mixture",
+  "metrics_source": "simulator ground truth for evaluation; not policy input",
+  "summary": {
+    "B0": {
+      "pointing_rms_px": {
+        "mean": 194.75212310170068,
+        "std": 26.098739592709798
+      },
+      "pointing_p95_px": {
+        "mean": 260.6375226204681,
+        "std": 46.471135320140675
+      },
+      "command_variation": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "max_command_step_deg": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "visible_fraction": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "within_engineering_threshold_fraction": {
+        "mean": 0.005333333333333333,
+        "std": 0.007673909622147559
+      },
+      "episode_return": {
+        "mean": -385.8787533440421,
+        "std": 117.9209988476287
+      }
+    },
+    "B1": {
+      "pointing_rms_px": {
+        "mean": 24.059211400727598,
+        "std": 3.5888929581521256
+      },
+      "pointing_p95_px": {
+        "mean": 21.074430532073,
+        "std": 4.45783714491775
+      },
+      "command_variation": {
+        "mean": 8.846207367189608e-05,
+        "std": 2.323801926211473e-05
+      },
+      "max_command_step_deg": {
+        "mean": 0.2000000000000001,
+        "std": 5.003707553108401e-17
+      },
+      "visible_fraction": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "within_engineering_threshold_fraction": {
+        "mean": 0.8493333333333334,
+        "std": 0.18966930285221287
+      },
+      "episode_return": {
+        "mean": -7.9214920766514965,
+        "std": 2.1489368031899008
+      }
+    },
+    "SAC": {
+      "pointing_rms_px": {
+        "mean": 62.00766167885939,
+        "std": 7.275134018925178
+      },
+      "pointing_p95_px": {
+        "mean": 94.03703752246817,
+        "std": 11.44648640462919
+      },
+      "command_variation": {
+        "mean": 0.0004168256649979609,
+        "std": 1.410090603783338e-05
+      },
+      "max_command_step_deg": {
+        "mean": 0.20000000000000018,
+        "std": 0.0
+      },
+      "visible_fraction": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "within_engineering_threshold_fraction": {
+        "mean": 0.078,
+        "std": 0.022186081723058314
+      },
+      "episode_return": {
+        "mean": -42.31078461555406,
+        "std": 8.289822465381183
+      }
+    }
+  },
+  "purpose": "Execution smoke test only; not a converged policy or hardware validation",
+  "training_steps": 3000,
+  "training_seed": 42,
+  "unit_tests_passed": 8,
+  "resume_check_additional_steps": 16,
+  "training_versions": {
+    "numpy": "1.26.4",
+    "torch": "2.5.1+cpu",
+    "gymnasium": "1.0.0",
+    "stable-baselines3": "2.4.1"
+  }
+}
