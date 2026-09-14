@@ -2,12 +2,22 @@
 import numpy as np
 
 
+def angle_scale(cfg):
+    low, high = np.array(cfg.angle_low), np.array(cfg.angle_high)
+    return (high-low)/2, (high+low)/2
+
+
+def action_for_angles(angles, cfg):
+    scale, midpoint = angle_scale(cfg)
+    return np.clip((np.asarray(angles)-midpoint)/scale, -1, 1)
+
+
 def encode_observation(error, previous_error, previous_command, cfg):
     """M0의 Tx 관측 6개. Δe는 프레임 차분이며 시간 미분이 아니다."""
     scale = np.array([cfg.width/2, cfg.height/2])
     return np.concatenate((np.asarray(error)/scale,
                            (np.asarray(error)-previous_error)/scale,
-                           np.asarray(previous_command)/cfg.angle_limit_deg)).astype(np.float32)
+                           action_for_angles(previous_command, cfg))).astype(np.float32)
 
 
 def absolute_command(action, previous_command, cfg):
@@ -15,18 +25,20 @@ def absolute_command(action, previous_command, cfg):
     action = np.asarray(action, dtype=float)
     if action.shape != (2,) or not np.all(np.isfinite(action)):
         raise ValueError("action must contain two finite values")
-    desired = np.clip(action, -1, 1) * cfg.angle_limit_deg
+    scale, midpoint = angle_scale(cfg)
+    desired = np.clip(action, -1, 1) * scale + midpoint
     maximum_delta = cfg.slew_deg_s * cfg.dt
     return np.clip(previous_command + np.clip(desired-previous_command, -maximum_delta, maximum_delta),
-                   -cfg.angle_limit_deg, cfg.angle_limit_deg)
+                   cfg.angle_low, cfg.angle_high)
 
 
 def proportional_action(observation, cfg, pixels_per_degree):
     """M0 B1: 영상 오차에서 목표 절대각을 생성. simulator GT를 읽지 않는다."""
     e = observation[:2] * np.array([cfg.width/2, cfg.height/2])
-    previous = observation[4:6] * cfg.angle_limit_deg
+    scale, midpoint = angle_scale(cfg)
+    previous = observation[4:6] * scale + midpoint
     signed_gain = np.array([cfg.pan_sign, -cfg.tilt_sign]) * cfg.p_gain / pixels_per_degree
-    return np.clip((previous + signed_gain * e) / cfg.angle_limit_deg, -1, 1)
+    return action_for_angles(previous + signed_gain * e, cfg)
 
 
 def reward_terms(next_error, command, previous_command, cfg):

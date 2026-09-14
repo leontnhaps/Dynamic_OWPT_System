@@ -2,6 +2,20 @@
 
 이 폴더는 **5 m 부근에서 PV 중심을 레이저 기준점에 맞추는 Tx Pan/Tilt 사전학습용 코드**다. 카메라나 Raspberry Pi, 서버 연결 없이 PC에서 실행한다. 사진 자체를 학습시키는 YOLO 코드가 아니라, 사진에서 측정한 좌표 배율을 이용하는 좌표 기반 제어 시뮬레이터다. 이번 구현은 M0 완료 판정이나 실기 검증을 대신하지 않는다.
 
+
+### 변경된 기본 학습: 한 방향 지속 이동
+
+기존 ±6° 모델을 새 범위에 그대로 이어 학습하지 말고 새 출력 폴더에서 처음부터 학습한다. `--resume`은 저장된 설정을 유지하므로 이전 모델을 지정하면 이전 ±6°/왕복 환경으로 이어진다. 구 config의 `angle_limit_deg`는 호환용으로만 보존한다.
+
+```bash
+python -m simulation.train --steps 100000 --device cuda --out captures/M3/sac_straight_gpu
+python -m simulation.evaluate --model captures/M3/sac_straight_gpu/model.zip --episodes 20 --out captures/M3/eval_straight
+```
+
+30초에 총 3.6 m를 이동하므로 카메라가 고정되어 있으면 PV가 화면 밖으로 나간다. B1과 SAC는 영상 오차를 이용해 따라가야 한다. 아래로 가는 궤적은 Tilt -15°에 도달하면 더 따라갈 수 없지만 PV는 같은 방향으로 계속 이동한다. 이는 제어 실패와 구분해서 해석할 물리 범위 한계다. 등속 직선 이동이라고 Pan/Tilt 각속도까지 일정한 것은 아니다. 세계 Z=5 m의 전방 평면 궤적은 Pan ±180° 전체를 훈련하지 않으며, 전 범위 대응 성능을 주장하지 않는다.
+
+명령 속도 제한은 기존 2°/s를 유지한다. 범위 확대에 따른 SAC 탐색/수렴은 별도로 평가해야 하며 100,000 step을 성능 보장 횟수로 해석하지 않는다. `smoke_result.json`의 과거 수치는 이전 국소 환경 기록이다.
+
 ### 1. M0와 이번 구현의 관계
 
 근거는 첨부된 M0-1 연구 시나리오, M0-2 구조, M0-3 변수/정보 흐름(DRAFT), M0-4 RL 관측/행동/보상, M0-5 baseline, M0-6 지표, M0-7 하드웨어 제약이다. 제목에 DRAFT가 있는 문서는 최종 확정본으로 승격하지 않는다. 이번 README는 구현 설명이며 새로운 최종 마일스톤 문서가 아니다.
@@ -44,7 +58,7 @@ PV 검출기가 제공할 위치로 영상 오차를 구한다. 초기 환경은
 
 $$ e_{u,t}=u_{PV,t}-u_L,\qquad e_{v,t}=v_{PV,t}-v_L,\qquad \Delta e_t=e_t-e_{t-1} $$
 
-$$ o_t=(e_{u,t}/E_u,e_{v,t}/E_v,\Delta e_{u,t}/E_u,\Delta e_{v,t}/E_v,\theta_{pan,t-1}/6,\theta_{tilt,t-1}/6) $$
+$$ o_t=(e_{u,t}/E_u,e_{v,t}/E_v,\Delta e_{u,t}/E_u,\Delta e_{v,t}/E_v,(\theta_{pan,t-1}-m_{pan})/s_{pan},(\theta_{tilt,t-1}-m_{tilt})/s_{tilt}) $$
 
 기본 `Eu=648`, `Ev=486`, 각도는 degree다. Δe는 시간으로 나누지 않는 프레임 차분이며 episode 시작에는 0이다. 직전 각도는 **제한 후 전송한 명령값**이다. 실제 각도 피드백, 깊이, 세계 위치, 타깃 속도는 정책 입력에 없다.
 
@@ -52,7 +66,7 @@ SAC의 `a`는 M0처럼 **절대 목표각**을 지정한다. 변화량을 직접
 
 $$ \theta^*_{j,t}=\frac{\theta_{j,max}-\theta_{j,min}}{2}a_{j,t}+\frac{\theta_{j,max}+\theta_{j,min}}{2},\qquad a_{j,t}\in[-1,1] $$
 
-초기 국소 범위는 두 축 모두 [-6°,6°]이다. 하드웨어 최대 범위나 검증된 안전 범위라는 의미는 아니다. 명령 전달 전 다음 소프트웨어 제한을 적용한다.
+사용자 지정 범위는 Pan [-180°,180°], Tilt [-15°,40°]이다. 매 episode의 시작 명령과 가상 실제각은 (0°,0°)이다. 정규화의 s는 축별 반범위 (180°,27.5°), m은 중간값 (0°,12.5°)이다. 따라서 정규화 action (0,0)은 절대각 (0°,12.5°)이며 B0는 별도 역변환으로 (0°,0°)를 유지한다. 이 범위의 실제 하드웨어 응답을 검증했다는 의미는 아니다. 명령 전달 전 다음 소프트웨어 제한을 적용한다.
 
 $$ \theta_{j,t}=\theta_{j,t-1}+\operatorname{clip}(\theta^*_{j,t}-\theta_{j,t-1},-\dot\theta_{lim}\Delta t,+\dot\theta_{lim}\Delta t) $$
 
@@ -64,7 +78,7 @@ $$ r_t=w_{point}r_{point,t}-w_{cmd}r_{cmd,t} $$
 
 M0의 조준/명령 변화 비용을 그대로 사용하며, 이번 Tx 단계에서는 입사각 항을 생략했다. 초기 가중치 `w_point=10`, `w_cmd=0.02`, `Δθ_ref=0.2°`는 조정 가능한 구현 기본값이다. 정답으로 확정한 실험 결과가 아니다.
 
-가시 영역 안에서는 노이즈를 포함한 측정 오차로 보상을 계산한다. 화면 밖에서는 정책에 마지막 측정값만 유지하고, 학습 보상만 내부 GT 오차로 계속 계산한다. 이것은 **미검출 상태의 임시 학습 처리**다. 고정 길이 300 step(30 s)까지 유지해 화면 이탈 후 조기 종료로 음의 보상을 회피하지 못하게 한다. 실제 미검출/재탐색과 온라인 보상 처리는 별도 구현이 필요하다.
+가시 영역 안에서는 노이즈를 포함한 측정 오차로 보상을 계산한다. 후방/투영 특이점은 미검출로 처리하고, 화면 밖 보상 오차는 축당 ±10×영상 너비로 제한해 유한하게 유지한다. 후방의 영상 GT 좌표는 NaN으로 기록되며 해당 영상 RMS는 정의되지 않는다. 화면 밖에서는 정책에 마지막 측정값만 유지하고, 학습 보상만 내부 GT 오차로 계속 계산한다. 이것은 **미검출 상태의 임시 학습 처리**다. 고정 길이 300 step(30 s)까지 유지해 화면 이탈 후 조기 종료로 음의 보상을 회피하지 못하게 한다. 실제 미검출/재탐색과 온라인 보상 처리는 별도 구현이 필요하다.
 
 ### 4. 왜 SAC인가
 
@@ -87,28 +101,28 @@ python -m pip install -r simulation/requirements.txt
 python -m simulation.calibration
 
 # 실제 학습이 가능한지 짧게 확인 (성능 검증용 학습량 아님)
-python -m simulation.train --steps 3000 --out simulation/runs/smoke
+python -m simulation.train --steps 3000 --out captures/M3/smoke
 
 # 본 학습: 100,000 step은 초기 실행 예산, 수렴 보장 횟수 아님
-python -m simulation.train --steps 100000 --out simulation/runs/sac_5m
+python -m simulation.train --steps 100000 --out captures/M3/sac_straight
 
 # 학습하지 않은 seed들에서 B0/B1/SAC를 같은 조건으로 평가
-python -m simulation.evaluate --model simulation/runs/sac_5m/model.zip --episodes 20 --out simulation/runs/eval_5m
+python -m simulation.evaluate --model captures/M3/sac_straight/model.zip --episodes 20 --out captures/M3/eval_5m
 
 # 세미나용 좌표 애니메이션
-python -m simulation.demo simulation/runs/eval_5m
+python -m simulation.demo captures/M3/eval_5m
 ```
 
-GUI 없는 서버에서는 `demo`에 `--gif simulation/runs/demo.gif`를 붙여 저장한다. 점은 PV 중심을 나타내며 PV 크기나 광학 충전 영역을 표현하지 않는다. `--controller B1`로 비교 제어기도 재생할 수 있다.
+GUI 없는 서버에서는 `demo`에 `--gif captures/M3/demo.gif`를 붙여 저장한다. 점은 PV 중심을 나타내며 PV 크기나 광학 충전 영역을 표현하지 않는다. `--controller B1`로 비교 제어기도 재생할 수 있다.
 
 학습 출력: `model.zip`, `replay_buffer.pkl`, `config.json`, `manifest.json`, `monitor.csv`, `checkpoints/`. 매 10,000 step 모델 체크포인트를 저장하고 종료 시 최신 모델과 replay buffer를 저장한다. 중간 체크포인트는 모델만 있으므로 아래 resume은 최종 `model.zip`과 버퍼 쌍을 대상으로 한다. 신뢰할 수 있는 자체 생성 모델/버퍼만 로드한다.
 
 ```bash
 # 저장한 모델/버퍼에서 추가 학습 (새 결과 폴더 사용)
-python -m simulation.train --resume simulation/runs/sac_5m/model.zip --steps 100000 --out simulation/runs/sac_5m_more
+python -m simulation.train --resume captures/M3/sac_straight/model.zip --steps 100000 --out captures/M3/sac_straight_more
 
 # 미실측 지연 가정을 넣은 별도 스트레스 평가
-python -m simulation.evaluate --model simulation/runs/sac_5m/model.zip --stress --out simulation/runs/eval_stress
+python -m simulation.evaluate --model captures/M3/sac_straight/model.zip --stress --out captures/M3/eval_stress
 ```
 
 resume은 가중치/optimizer/버퍼를 이어서 사용하는 새 실행이다. 환경 episode와 RNG를 다시 초기화하므로 중단 시점에서 bitwise 동일하게 이어지는 실행은 아니다. 설정이 다른 버퍼를 실환경 데이터로 간주해 사용하지 않는다.
@@ -119,7 +133,7 @@ resume은 가중치/optimizer/버퍼를 이어서 사용하는 새 실행이다.
 
 - B0: 0° 고정 조준. B1: M0의 영상 오차 비례 제어. SAC: 학습한 절대각 정책.
 - M0의 B2는 Tx/PV 공동 보정 제어이므로 Tx만 있는 이번 단계에서 별도의 비교군으로 꾸미지 않았다.
-- 두 종류의 운동을 사용한다: 완만한 사인 운동, 일정 속도로 움직이다 경계에서 반사하는 운동. 깊이 5 m 및 PV 자세는 이 단계에서 고정한다. `--scenario stationary`로 고정 PV도 평가할 수 있다.
+- 기본 운동 `straight`는 에피소드 시작에 방향 φ를 [-π,π)에서 균일하게 한 번 뽑고 속도 벡터 0.12(cosφ,sinφ) m/s를 30초 동안 유지한다. X/Y는 초기 위치+속도×시간이며 ±30 cm는 초기 위치 범위일 뿐 이동 경계가 아니다. 반사, 방향 재추첨, 화면 경계에서의 되돌림은 없다. `sine`, `linear`(경계 반사), `mixed`(기존 두 운동 혼합)는 선택 옵션으로 남긴다. 세계 Z=5 m 및 PV 자세는 고정하지만 Tx–PV 직선 거리는 이동에 따라 달라진다. `--scenario stationary`로 고정 PV도 평가할 수 있다.
 - 같은 seed는 제어기와 관계없이 같은 초기 타깃/궤적/focal을 생성한다. 학습 seed 기본42, 평가 episode seed 기본10000부터다. 성능 판단은 여러 독립 학습 seed에서도 반복해야 한다.
 - `frames.csv`: 프레임별 오차/명령/내부 실제각/세계 좌표. GT 필드는 평가·진단용이다.
 - `episodes.csv`: episode별 pointing RMS, p95, 명령 변화, 가시 비율, return.
@@ -128,7 +142,7 @@ resume은 가중치/optimizer/버퍼를 이어서 사용하는 새 실행이다.
 
 최초 실행 검증 수치는 `smoke_result.json`에 있다. 3,000 step만 학습한 모델을 5개 episode로 평가했을 때 평균 RMS는 B0 194.75 px, B1 24.06 px, SAC 62.01 px였다. SAC는 아직 B1보다 오차와 명령 변화가 크므로 이 짧은 학습을 수렴 또는 실기 투입 가능한 결과로 해석하지 않는다. 이 파일은 실행 검증 기록이며 학습 모델 가중치는 포함하지 않는다.
 
-M0의 명령 변화 지표는 다음처럼 전달 명령의 범위 `Rj=12°`로 정규화한다. 실제 모터 각속도나 진동을 측정한 지표가 아니다.
+M0의 명령 변화 지표는 다음처럼 전달 명령의 축별 범위 `Rpan=360°`, `Rtilt=55°`로 정규화한다. 실제 모터 각속도나 진동을 측정한 지표가 아니다.
 
 $$ C_{var}=\frac{1}{T-1}\sum_{t=2}^{T}\sum_j[(\theta_{j,t}-\theta_{j,t-1})/R_j]^2 $$
 

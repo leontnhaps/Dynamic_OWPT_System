@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--steps", type=int, default=100_000, help="이번 실행에서 추가 학습할 step")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--config", help="Config JSON; 생략하면 기본값")
-    parser.add_argument("--out", default="simulation/runs/sac_5m")
+    parser.add_argument("--out", default="captures/M3/sac_straight")
     parser.add_argument("--resume", help="기존 model.zip 경로; 같은 폴더의 config/replay 필요")
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()

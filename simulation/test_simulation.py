@@ -5,14 +5,14 @@ import numpy as np
 from stable_baselines3.common.env_checker import check_env
 from .calibration import fit_scale, SAMPLES
 from .config import Config
-from .control import absolute_command, encode_observation, reward_terms
+from .control import absolute_command, encode_observation, reward_terms, action_for_angles, angle_scale
 from .env import TrackingEnv, project
 from .evaluate import rollout
 
 
 class SimulationTests(unittest.TestCase):
     def setUp(self):
-        self.cfg = replace(Config(), focal_random_fraction=0., measurement_noise_px=0., episode_steps=50)
+        self.cfg = replace(Config(), angle_limit_deg=6., scenario="mixed", focal_random_fraction=0., measurement_noise_px=0., episode_steps=50)
 
     def test_corrected_calibration_and_exclusion(self):
         self.assertEqual([r["x"] for r in SAMPLES if not r["use"]], [.225])
@@ -96,6 +96,46 @@ class SimulationTests(unittest.TestCase):
         self.assertLess(tracking_metrics["pointing_rms_px"], fixed_metrics["pointing_rms_px"])
         self.assertLess(tracking[-1]["error_px"], 1.)
         self.assertLessEqual(tracking_metrics["max_command_step_deg"], .200000001)
+
+
+    def test_straight_constant_velocity_random_direction_and_zero_reset(self):
+        cfg = Config()
+        velocities = []
+        for seed in range(20):
+            env = TrackingEnv(cfg)
+            env.reset(seed=seed)
+            self.assertEqual(env.scenario, "straight")
+            np.testing.assert_array_equal(env.command, [0, 0])
+            np.testing.assert_array_equal(env.actual_angles, [0, 0])
+            points = np.array([env.target_position(t) for t in (0., 10., 20., 30.)])
+            np.testing.assert_allclose(np.diff(points, axis=0), np.tile(np.r_[env.velocity*10, 0], (3, 1)))
+            self.assertAlmostEqual(np.linalg.norm(env.velocity), cfg.target_speed_m_s)
+            velocities.append(env.velocity)
+        self.assertTrue(np.any(np.array(velocities) > 0))
+        self.assertTrue(np.any(np.array(velocities) < 0))
+
+    def test_wide_asymmetric_angles_and_fixed_baseline(self):
+        cfg = replace(Config(), slew_deg_s=10000)
+        np.testing.assert_allclose(absolute_command([-1, -1], np.zeros(2), cfg), [-180, -15])
+        np.testing.assert_allclose(absolute_command([1, 1], np.zeros(2), cfg), [180, 40])
+        np.testing.assert_allclose(absolute_command(action_for_angles([0, 0], cfg), np.zeros(2), cfg), [0, 0])
+        rows, _ = rollout(Config(), 10000, "B0")
+        np.testing.assert_allclose([[r["pan_cmd_deg"], r["tilt_cmd_deg"]] for r in rows], 0)
+        self.assertFalse(rows[-1]["visible"])
+
+    def test_sustained_tracking_beyond_old_limit_and_finite_lost_reward(self):
+        cfg = replace(Config(), measurement_noise_px=0., focal_random_fraction=0.)
+        rows, metrics = rollout(cfg, 10000, "B1")
+        self.assertGreater(max(abs(r["pan_cmd_deg"]) for r in rows), 6)
+        self.assertLessEqual(metrics["max_command_step_deg"], .20000001)
+        self.assertLessEqual(max(r["tilt_cmd_deg"] for r in rows), 40)
+        self.assertGreaterEqual(min(r["tilt_cmd_deg"] for r in rows), -15)
+        env = TrackingEnv(replace(cfg, slew_deg_s=10000))
+        env.reset(seed=2)
+        obs, reward, _, _, info = env.step([1, 0])
+        self.assertFalse(info["visible"])
+        self.assertTrue(np.all(np.isfinite(obs)))
+        self.assertTrue(np.isfinite(reward))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import numpy as np
 from .config import Config
-from .control import proportional_action
+from .control import proportional_action, action_for_angles
 from .env import TrackingEnv
 
 
@@ -16,7 +16,7 @@ def rollout(cfg, seed, controller, model=None, scenario=None):
     rows = []
     for step in range(cfg.episode_steps):
         if controller == "B0":
-            action = np.zeros(2)
+            action = action_for_angles([0., 0.], cfg)
         elif controller == "B1":
             action = proportional_action(obs, cfg, env.nominal_focal*np.pi/180)
         elif controller == "SAC" and model is not None:
@@ -37,7 +37,7 @@ def rollout(cfg, seed, controller, model=None, scenario=None):
     env.close()
     errors = np.array([r["error_px"] for r in rows])
     commands = np.array([[r["pan_cmd_deg"], r["tilt_cmd_deg"]] for r in rows])
-    changes = np.diff(commands, axis=0) / (2*cfg.angle_limit_deg)
+    changes = np.diff(commands, axis=0) / (np.array(cfg.angle_high)-cfg.angle_low)
     summary = dict(controller=controller, seed=seed, scenario=rows[0]["scenario"],
                    pointing_rms_px=float(np.sqrt(np.mean(errors**2))),
                    pointing_p95_px=float(np.percentile(errors, 95)),
@@ -83,9 +83,9 @@ def main():
     parser.add_argument("--config", help="모델 없이 평가할 때 설정")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed-start", type=int, default=10000)
-    parser.add_argument("--scenario", choices=["sine", "linear", "stationary"])
+    parser.add_argument("--scenario", choices=["straight", "sine", "linear", "stationary", "mixed"])
     parser.add_argument("--stress", action="store_true", help="미실측 가정: tau=.15s, 1 step 지연, 3px 노이즈")
-    parser.add_argument("--out", default="simulation/runs/evaluation")
+    parser.add_argument("--out", default="captures/M3/evaluation")
     args = parser.parse_args()
     if args.episodes <= 0:
         parser.error("--episodes must be positive")
@@ -121,7 +121,7 @@ def main():
     write_csv(out / "episodes.csv", episodes)
     cfg.save(out / "config.json")
     result = dict(simulation_only=True, model=args.model, stress=args.stress, episodes=args.episodes,
-                  seed_start=args.seed_start, scenario=args.scenario or "seeded mixture",
+                  seed_start=args.seed_start, scenario=args.scenario or cfg.scenario,
                   metrics_source="simulator ground truth for evaluation; not policy input",
                   summary=summary)
     (out / "summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")

@@ -14,7 +14,12 @@ class Config:
     distance_m: float = 5.0
     dt: float = .1                 # 설계 주기 10 Hz; 실측 수신 FPS와 같다는 뜻은 아님
     episode_steps: int = 300
-    angle_limit_deg: float = 6.0   # 0° 중심의 국소 시뮬레이션 범위; 하드웨어 한계 아님
+    pan_min_deg: float = -180.0
+    pan_max_deg: float = 180.0
+    tilt_min_deg: float = -15.0
+    tilt_max_deg: float = 40.0
+    scenario: str = "straight"  # episode마다 랜덤 방향, 반사 없는 등속 직선
+    angle_limit_deg: float | None = None  # 이전 config/model의 ±6° 표현 호환용
     slew_deg_s: float = 2.0        # 소프트웨어 명령 제한, 물리 서보 속도 추정값 아님
     pan_sign: int = 1              # 양의 명령이 카메라를 오른쪽으로: 실제 부호 미확인
     tilt_sign: int = 1             # 양의 명령이 카메라를 위로: 실제 부호 미확인
@@ -32,7 +37,7 @@ class Config:
 
     def __post_init__(self):
         for name in ("width", "height", "distance_m", "dt", "episode_steps",
-                     "angle_limit_deg", "slew_deg_s", "command_reference_deg",
+                     "slew_deg_s", "command_reference_deg",
                      "target_speed_m_s", "target_radius_m", "engineering_threshold_px"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -49,12 +54,31 @@ class Config:
                 raise ValueError(f"Invalid {name}")
         if not (0 <= self.laser_u < self.width and 0 <= self.laser_v < self.height):
             raise ValueError("Laser reference must be inside the image")
-        if self.angle_limit_deg > 15:
-            raise ValueError("This local geometry model supports at most +/-15 degrees")
+        if self.angle_limit_deg is not None:
+            if not math.isfinite(self.angle_limit_deg) or not 0 < self.angle_limit_deg <= 15:
+                raise ValueError("Invalid legacy angle_limit_deg")
+        for low, high in zip(self.angle_low, self.angle_high):
+            if not (math.isfinite(low) and math.isfinite(high) and low < 0 < high):
+                raise ValueError("Angle limits must be finite and contain zero")
+        if self.scenario not in ("straight", "sine", "linear", "stationary", "mixed"):
+            raise ValueError("Invalid scenario")
+
+    @property
+    def angle_low(self):
+        return (-self.angle_limit_deg,)*2 if self.angle_limit_deg is not None else (self.pan_min_deg, self.tilt_min_deg)
+
+    @property
+    def angle_high(self):
+        return (self.angle_limit_deg,)*2 if self.angle_limit_deg is not None else (self.pan_max_deg, self.tilt_max_deg)
 
     def save(self, path):
         Path(path).write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
 
     @classmethod
     def load(cls, path=None):
-        return cls(**json.loads(Path(path).read_text(encoding="utf-8"))) if path else cls()
+        if not path:
+            return cls()
+        values = json.loads(Path(path).read_text(encoding="utf-8"))
+        if "angle_limit_deg" in values and "scenario" not in values:
+            values["scenario"] = "mixed"  # 구 모델을 새 action 의미로 조용히 바꾸지 않는다.
+        return cls(**values)
