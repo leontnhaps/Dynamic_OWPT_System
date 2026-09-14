@@ -29,6 +29,7 @@ def rollout(cfg, seed, controller, model=None, scenario=None):
                          time_s=info["time_s"], scenario=info["scenario"],
                          u=info["uv"][0], v=info["uv"][1], e_u=eu, e_v=ev,
                          error_px=float(np.hypot(eu, ev)), visible=int(info["visible"]),
+                         projection_valid=int(np.all(np.isfinite(info["uv"]))),
                          pan_cmd_deg=info["command_deg"][0], tilt_cmd_deg=info["command_deg"][1],
                          pan_actual_sim_deg=info["actual_angles_deg"][0],
                          tilt_actual_sim_deg=info["actual_angles_deg"][1],
@@ -36,15 +37,18 @@ def rollout(cfg, seed, controller, model=None, scenario=None):
                          reward=reward))
     env.close()
     errors = np.array([r["error_px"] for r in rows])
+    finite_errors = errors[np.isfinite(errors)]
+    visible = np.array([r["visible"] for r in rows], dtype=bool)
     commands = np.array([[r["pan_cmd_deg"], r["tilt_cmd_deg"]] for r in rows])
     changes = np.diff(commands, axis=0) / (np.array(cfg.angle_high)-cfg.angle_low)
     summary = dict(controller=controller, seed=seed, scenario=rows[0]["scenario"],
-                   pointing_rms_px=float(np.sqrt(np.mean(errors**2))),
-                   pointing_p95_px=float(np.percentile(errors, 95)),
+                   pointing_rms_px=float(np.sqrt(np.mean(finite_errors**2))) if len(finite_errors) else None,
+                   pointing_p95_px=float(np.percentile(finite_errors, 95)) if len(finite_errors) else None,
+                   valid_projection_fraction=float(np.mean(np.isfinite(errors))),
                    command_variation=float(np.mean(np.sum(changes**2, axis=1))) if len(changes) else 0.,
                    max_command_step_deg=float(np.max(np.abs(np.diff(np.vstack([np.zeros(2), commands]), axis=0)))),
                    visible_fraction=float(np.mean([r["visible"] for r in rows])),
-                   within_engineering_threshold_fraction=float(np.mean(errors <= cfg.engineering_threshold_px)),
+                   within_engineering_threshold_fraction=float(np.mean(visible & (errors <= cfg.engineering_threshold_px))),
                    episode_return=float(sum(r["reward"] for r in rows)))
     return rows, summary
 
@@ -114,17 +118,20 @@ def main():
     summary = {}
     for controller in dict.fromkeys(r["controller"] for r in episodes):
         selected = [r for r in episodes if r["controller"] == controller]
-        summary[controller] = {k: dict(mean=float(np.mean([r[k] for r in selected])),
-                                      std=float(np.std([r[k] for r in selected], ddof=1)) if len(selected)>1 else 0.)
-                               for k in numeric}
+        summary[controller] = {}
+        for k in numeric:
+            values = [r[k] for r in selected if r[k] is not None]
+            summary[controller][k] = dict(mean=float(np.mean(values)) if values else None,
+                                         std=float(np.std(values, ddof=1)) if len(values)>1 else (0. if values else None),
+                                         valid_episodes=len(values))
     write_csv(out / "frames.csv", rows)
     write_csv(out / "episodes.csv", episodes)
     cfg.save(out / "config.json")
     result = dict(simulation_only=True, model=args.model, stress=args.stress, episodes=args.episodes,
                   seed_start=args.seed_start, scenario=args.scenario or cfg.scenario,
-                  metrics_source="simulator ground truth for evaluation; not policy input",
+                  metrics_source="Finite front-camera GT projections including off-screen; interpret with visible/valid fractions",
                   summary=summary)
-    (out / "summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    (out / "summary.json").write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
     make_plot(out / "comparison.png", rows)
     print(json.dumps(result, indent=2))
 

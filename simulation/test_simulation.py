@@ -138,5 +138,21 @@ class SimulationTests(unittest.TestCase):
         self.assertTrue(np.isfinite(reward))
 
 
+    def test_behind_camera_metrics_are_missing_and_json_safe(self):
+        import json
+        class BehindCamera:
+            def predict(self, observation, deterministic=True):
+                return np.array([1., 0.]), None
+        cfg = replace(Config(), episode_steps=5, slew_deg_s=10000)
+        rows, metrics = rollout(cfg, 1, "SAC", model=BehindCamera())
+        self.assertTrue(all(not r["projection_valid"] for r in rows))
+        self.assertEqual(metrics["valid_projection_fraction"], 0.)
+        self.assertEqual(metrics["visible_fraction"], 0.)
+        self.assertIsNone(metrics["pointing_rms_px"])
+        self.assertIsNone(metrics["pointing_p95_px"])
+        self.assertTrue(np.isfinite(metrics["episode_return"]))
+        json.dumps(metrics, allow_nan=False)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -136,7 +136,7 @@ resume은 가중치/optimizer/버퍼를 이어서 사용하는 새 실행이다.
 - 기본 운동 `straight`는 에피소드 시작에 방향 φ를 [-π,π)에서 균일하게 한 번 뽑고 속도 벡터 0.12(cosφ,sinφ) m/s를 30초 동안 유지한다. X/Y는 초기 위치+속도×시간이며 ±30 cm는 초기 위치 범위일 뿐 이동 경계가 아니다. 반사, 방향 재추첨, 화면 경계에서의 되돌림은 없다. `sine`, `linear`(경계 반사), `mixed`(기존 두 운동 혼합)는 선택 옵션으로 남긴다. 세계 Z=5 m 및 PV 자세는 고정하지만 Tx–PV 직선 거리는 이동에 따라 달라진다. `--scenario stationary`로 고정 PV도 평가할 수 있다.
 - 같은 seed는 제어기와 관계없이 같은 초기 타깃/궤적/focal을 생성한다. 학습 seed 기본42, 평가 episode seed 기본10000부터다. 성능 판단은 여러 독립 학습 seed에서도 반복해야 한다.
 - `frames.csv`: 프레임별 오차/명령/내부 실제각/세계 좌표. GT 필드는 평가·진단용이다.
-- `episodes.csv`: episode별 pointing RMS, p95, 명령 변화, 가시 비율, return.
+- `episodes.csv`: episode별 pointing RMS, p95, 명령 변화, 가시 비율, 유효 투영 비율, return. RMS/p95는 전방의 유한한 투영만 사용하며 화면 밖 좌표도 포함한다. 카메라 뒤 좌표는 CSV에 NaN으로 표시되고 픽셀 지표에서는 제외하므로, 가시/유효 투영 비율을 반드시 함께 읽는다. 유효 투영이 하나도 없는 episode의 RMS/p95는 JSON에서 null이고 집계의 valid_episodes로 산출 가능한 episode 수를 표시한다. 화면에서 사라진 경우를 작은 오차의 성공으로 해석하지 않는다.
 - `summary.json`: episode 지표의 평균과 표본 표준편차. `comparison.png`: 첫 평가 seed의 오차/Pan/Tilt 시계열.
 - 20 px 이내 비율은 임시 공학적 비교 지표다. PV 크기/광점 크기/실제 수신전력이 없으므로 충전 성공률로 해석하지 않는다.
 
