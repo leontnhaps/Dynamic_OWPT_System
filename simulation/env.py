@@ -92,6 +92,31 @@ class TrackingEnv(gym.Env):
                     actual_angles_deg=self.actual_angles.copy(), target_world_m=self.position.copy(),
                     scenario=self.scenario)
 
+    def _limit_exit(self, uv, visible):
+        """실제 축 한계 + 해당 화면 경계 이탈 + PV 자체의 바깥쪽 이동.
+
+        이전 PV도 현재 카메라 자세로 투영해 카메라 회전으로 생긴 움직임을 제외.
+        GT는 종료 판정에만 사용하며 policy observation에는 추가하지 않는다.
+        후방을 향한 잘못된 카메라 명령은 이 조건으로 조기 종료시키지 않는다.
+        """
+        c = self.cfg
+        if not c.end_on_limit_exit or visible or not np.all(np.isfinite(uv)):
+            return None
+        previous_uv = project(self.target_position((self.t-1)*c.dt), self.actual_angles, self.focal, c)
+        if not np.all(np.isfinite(previous_uv)):
+            return None
+        motion = uv-previous_uv
+        # 낮은/높은 명령각이 향하는 화면 방향: u는 오른쪽, v는 아래쪽.
+        directions = (c.pan_sign, -c.tilt_sign)
+        for axis, (name, extent, direction) in enumerate(zip(("pan", "tilt"), (c.width, c.height), directions)):
+            for side, bound, command_direction in (("min", c.angle_low[axis], -1), ("max", c.angle_high[axis], 1)):
+                outward = direction*command_direction
+                at_limit = abs(self.actual_angles[axis]-bound) < 1e-6
+                outside = uv[axis] < 0 if outward < 0 else uv[axis] >= extent
+                if at_limit and outside and motion[axis]*outward > 1e-8:
+                    return name+"_"+side+"_outward_exit"
+        return None
+
     def step(self, action):
         if self.done:
             raise RuntimeError("Call reset() after episode end")
@@ -106,7 +131,7 @@ class TrackingEnv(gym.Env):
         self.t += 1
         uv, visible, error = self._measure()
         # 가시 영역 안에서는 카메라 측정 오차를 사용. 밖에서는 GT로 연속 비용을 유지한다.
-        # 고정 길이 episode로 이탈해 음의 보상을 피하는 조기 종료 현상을 막는다.
+        # 일반 미검출은 계속 진행하고, 한계 방향 이탈만 종료한다.
         reward_error = error if visible else np.clip(
             np.nan_to_num(uv-[c.laser_u, c.laser_v], nan=10*c.width,
                           posinf=10*c.width, neginf=-10*c.width),
@@ -116,5 +141,10 @@ class TrackingEnv(gym.Env):
         info = self._info(uv, visible, error)
         info.update(pointing_reward=pointing, command_cost=command_cost,
                     reward_uses_out_of_view_truth=not visible)
-        self.done = self.t >= c.episode_steps
-        return encode_observation(error, previous_error, self.command, c), reward, False, self.done, info
+        reason = self._limit_exit(uv, visible)
+        terminated = reason is not None
+        truncated = self.t >= c.episode_steps and not terminated
+        self.done = terminated or truncated
+        info.update(termination_reason=reason or ("time_limit" if truncated else ""))
+        return encode_observation(error, previous_error, self.command, c), reward, terminated, truncated, info
+

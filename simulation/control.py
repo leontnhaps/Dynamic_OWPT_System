@@ -27,9 +27,14 @@ def absolute_command(action, previous_command, cfg):
         raise ValueError("action must contain two finite values")
     scale, midpoint = angle_scale(cfg)
     desired = np.clip(action, -1, 1) * scale + midpoint
-    maximum_delta = cfg.slew_deg_s * cfg.dt
-    return np.clip(previous_command + np.clip(desired-previous_command, -maximum_delta, maximum_delta),
-                   cfg.angle_low, cfg.angle_high)
+    if cfg.command_step_deg:
+        # 가장 가까운 각도 격자, 정확한 절반은 0에서 먼 방향으로 반올림.
+        units = desired / cfg.command_step_deg
+        desired = np.sign(units)*np.floor(np.abs(units)+.5+1e-10)*cfg.command_step_deg
+    if cfg.slew_deg_s is not None:  # 구 모델 평가/재개 호환만을 위한 경로
+        maximum_delta = cfg.slew_deg_s * cfg.dt
+        desired = previous_command + np.clip(desired-previous_command, -maximum_delta, maximum_delta)
+    return np.clip(desired, cfg.angle_low, cfg.angle_high)
 
 
 def proportional_action(observation, cfg, pixels_per_degree):
@@ -48,3 +53,4 @@ def reward_terms(next_error, command, previous_command, cfg):
     delta = (command-previous_command) / cfg.command_reference_deg
     command_cost = float(delta @ delta)
     return cfg.pointing_weight*pointing - cfg.command_weight*command_cost, pointing, command_cost
+

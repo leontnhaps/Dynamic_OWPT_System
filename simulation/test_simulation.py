@@ -12,7 +12,7 @@ from .evaluate import rollout
 
 class SimulationTests(unittest.TestCase):
     def setUp(self):
-        self.cfg = replace(Config(), angle_limit_deg=6., scenario="mixed", focal_random_fraction=0., measurement_noise_px=0., episode_steps=50)
+        self.cfg = replace(Config(), slew_deg_s=2., command_step_deg=0., end_on_limit_exit=False, command_reference_deg=.2, angle_limit_deg=6., scenario="mixed", focal_random_fraction=0., measurement_noise_px=0., episode_steps=50)
 
     def test_corrected_calibration_and_exclusion(self):
         self.assertEqual([r["x"] for r in SAMPLES if not r["use"]], [.225])
@@ -115,7 +115,7 @@ class SimulationTests(unittest.TestCase):
         self.assertTrue(np.any(np.array(velocities) < 0))
 
     def test_wide_asymmetric_angles_and_fixed_baseline(self):
-        cfg = replace(Config(), slew_deg_s=10000)
+        cfg = replace(Config(), slew_deg_s=10000, command_step_deg=0.)
         np.testing.assert_allclose(absolute_command([-1, -1], np.zeros(2), cfg), [-180, -15])
         np.testing.assert_allclose(absolute_command([1, 1], np.zeros(2), cfg), [180, 40])
         np.testing.assert_allclose(absolute_command(action_for_angles([0, 0], cfg), np.zeros(2), cfg), [0, 0])
@@ -124,7 +124,7 @@ class SimulationTests(unittest.TestCase):
         self.assertFalse(rows[-1]["visible"])
 
     def test_sustained_tracking_beyond_old_limit_and_finite_lost_reward(self):
-        cfg = replace(Config(), measurement_noise_px=0., focal_random_fraction=0.)
+        cfg = replace(Config(), slew_deg_s=2., command_step_deg=0., end_on_limit_exit=False, measurement_noise_px=0., focal_random_fraction=0.)
         rows, metrics = rollout(cfg, 10000, "B1")
         self.assertGreater(max(abs(r["pan_cmd_deg"]) for r in rows), 6)
         self.assertLessEqual(metrics["max_command_step_deg"], .20000001)
@@ -143,7 +143,7 @@ class SimulationTests(unittest.TestCase):
         class BehindCamera:
             def predict(self, observation, deterministic=True):
                 return np.array([1., 0.]), None
-        cfg = replace(Config(), episode_steps=5, slew_deg_s=10000)
+        cfg = replace(Config(), episode_steps=5, slew_deg_s=10000, command_step_deg=0.)
         rows, metrics = rollout(cfg, 1, "SAC", model=BehindCamera())
         self.assertTrue(all(not r["projection_valid"] for r in rows))
         self.assertEqual(metrics["valid_projection_fraction"], 0.)
@@ -156,3 +156,4 @@ class SimulationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

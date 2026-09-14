@@ -23,7 +23,7 @@ def rollout(cfg, seed, controller, model=None, scenario=None):
             action, _ = model.predict(obs, deterministic=True)
         else:
             raise ValueError("Unknown controller or missing SAC model")
-        obs, reward, _, _, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(action)
         eu, ev = info["true_error_px"]
         rows.append(dict(controller=controller, seed=seed, step=step+1,
                          time_s=info["time_s"], scenario=info["scenario"],
@@ -34,7 +34,9 @@ def rollout(cfg, seed, controller, model=None, scenario=None):
                          pan_actual_sim_deg=info["actual_angles_deg"][0],
                          tilt_actual_sim_deg=info["actual_angles_deg"][1],
                          target_x_m=info["target_world_m"][0], target_y_m=info["target_world_m"][1],
-                         reward=reward))
+                         reward=reward, termination_reason=info["termination_reason"]))
+        if terminated or truncated:
+            break
     env.close()
     errors = np.array([r["error_px"] for r in rows])
     finite_errors = errors[np.isfinite(errors)]
@@ -42,6 +44,8 @@ def rollout(cfg, seed, controller, model=None, scenario=None):
     commands = np.array([[r["pan_cmd_deg"], r["tilt_cmd_deg"]] for r in rows])
     changes = np.diff(commands, axis=0) / (np.array(cfg.angle_high)-cfg.angle_low)
     summary = dict(controller=controller, seed=seed, scenario=rows[0]["scenario"],
+                   episode_steps=len(rows), duration_s=len(rows)*cfg.dt,
+                   limit_exit=int(info["termination_reason"].endswith("outward_exit")),
                    pointing_rms_px=float(np.sqrt(np.mean(finite_errors**2))) if len(finite_errors) else None,
                    pointing_p95_px=float(np.percentile(finite_errors, 95)) if len(finite_errors) else None,
                    valid_projection_fraction=float(np.mean(np.isfinite(errors))),
@@ -138,3 +142,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

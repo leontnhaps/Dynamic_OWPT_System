@@ -52,7 +52,7 @@ def main():
                     policy_kwargs=dict(net_arch=[128, 128]), seed=args.seed,
                     device=args.device, verbose=1)
     cfg.save(out / "config.json")
-    metadata = dict(algorithm="SAC", observation="M0 Tx-only 6D", action="absolute angle 2D with slew limit",
+    metadata = dict(algorithm="SAC", observation="M0 Tx-only 6D", action="absolute angle 2D; quantization and legacy slew from config",
                     seed=args.seed, requested_additional_steps=args.steps, resume=args.resume,
                     python=platform.python_version(),
                     versions={p: importlib.metadata.version(p) for p in
@@ -74,3 +74,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

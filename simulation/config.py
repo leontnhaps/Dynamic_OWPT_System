@@ -20,7 +20,9 @@ class Config:
     tilt_max_deg: float = 40.0
     scenario: str = "straight"  # episode마다 랜덤 방향, 반사 없는 등속 직선
     angle_limit_deg: float | None = None  # 이전 config/model의 ±6° 표현 호환용
-    slew_deg_s: float = 2.0        # 소프트웨어 명령 제한, 물리 서보 속도 추정값 아님
+    slew_deg_s: float | None = None        # 소프트웨어 명령 제한, 물리 서보 속도 추정값 아님
+    command_step_deg: float = 1.0
+    end_on_limit_exit: bool = True
     pan_sign: int = 1              # 양의 명령이 카메라를 오른쪽으로: 실제 부호 미확인
     tilt_sign: int = 1             # 양의 명령이 카메라를 위로: 실제 부호 미확인
     focal_random_fraction: float = .10
@@ -31,17 +33,27 @@ class Config:
     target_radius_m: float = .30
     pointing_weight: float = 10.0
     command_weight: float = .02
-    command_reference_deg: float = .20
+    command_reference_deg: float = 1.0
     p_gain: float = .45            # Δθ = p_gain * e / nominal_px_per_deg
     engineering_threshold_px: float = 20.0  # 비교 표시용; PV 충전 성공 판정값 아님
 
     def __post_init__(self):
         for name in ("width", "height", "distance_m", "dt", "episode_steps",
-                     "slew_deg_s", "command_reference_deg",
+                     "command_reference_deg",
                      "target_speed_m_s", "target_radius_m", "engineering_threshold_px"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if self.slew_deg_s is not None and (not math.isfinite(self.slew_deg_s) or self.slew_deg_s <= 0):
+            raise ValueError("slew_deg_s must be None or positive")
+        if not math.isfinite(self.command_step_deg) or self.command_step_deg < 0:
+            raise ValueError("Invalid command_step_deg")
+        if self.command_step_deg and self.slew_deg_s is not None:
+            raise ValueError("Quantized commands cannot use the legacy slew limiter")
+        if self.command_step_deg:
+            for limit in (*self.angle_low, *self.angle_high):
+                if not math.isclose(limit/self.command_step_deg, round(limit/self.command_step_deg)):
+                    raise ValueError("Angle bounds must lie on the command grid")
         for name in ("width", "height", "episode_steps", "command_delay_steps"):
             if not isinstance(getattr(self, name), int):
                 raise ValueError(f"{name} must be an integer")
@@ -81,4 +93,8 @@ class Config:
         values = json.loads(Path(path).read_text(encoding="utf-8"))
         if "angle_limit_deg" in values and "scenario" not in values:
             values["scenario"] = "mixed"  # 구 모델을 새 action 의미로 조용히 바꾸지 않는다.
+        # 기존 학습 config는 원래의 연속 명령/고정 길이 동작을 보존한다.
+        values.setdefault("command_step_deg", 0.0)
+        values.setdefault("end_on_limit_exit", False)
         return cls(**values)
+
