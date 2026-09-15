@@ -16,6 +16,21 @@ python -m simulation.evaluate --model captures/M3/sac_straight_gpu/model.zip --e
 
 명령 속도 제한은 제거했다. 기본 `slew_deg_s=null`, `command_step_deg=1`로 정수 각도 목표를 바로 전달한다. 범위 확대에 따른 SAC 탐색/수렴은 별도로 평가해야 하며 100,000 step을 성능 보장 횟수로 해석하지 않는다. `smoke_result.json`의 과거 수치는 이전 국소 환경 기록이다.
 
+### 현재 기본 정책: ±5° 조정량
+
+사용자가 세미나 전 코드 변경을 승인했다. M0 문서 수정은 세미나 이후로 보류하며, 이번 구현에서는 SAC의 출력 의미를 절대 목표각에서 직전 명령각 기준 조정량으로 변경한다. `action_mode="delta"`, `delta_limit_deg=5`, `command_step_deg=1`이 기본이다. 입력 6개, SAC 구조, 보상 가중치, PV 궤적, 한계 방향 종료는 유지한다.
+
+$$ \Delta\theta_{j,t}=\operatorname{round}_{1^\circ}(5a_{j,t}),\qquad \theta_{j,t}=\operatorname{clip}(\theta_{j,t-1}+\Delta\theta_{j,t},\theta_{j,min},\theta_{j,max}) $$
+
+정확한 절반은 0에서 먼 방향으로 반올림한다. 각 축은 -5,-4,…,0,…,+4,+5° 중 하나를 선택한다. 0은 유지이며 직전 명령각에 누적한 절대 목표각을 모터에 전달한다. 한계에서 잘린 변화량은 다음 step에 이월하지 않는다. 직전 명령각은 feedback이 아니며 관측 정규화는 기존 절대 명령각 기준 그대로다. 전체 범위는 Pan ±180°, Tilt -15~40°이고 시작은 (0,0)이다. B1도 오차에서 조정량을 계산하고 같은 ±5°/1° 변환을 거친다. B0의 delta action은 (0,0)이다.
+
+```bash
+python -m simulation.train --steps 100000 --device cuda --out captures/M3/sac_delta5_gpu
+python -m simulation.evaluate --model captures/M3/sac_delta5_gpu/model.zip --episodes 20 --out captures/M3/eval_delta5
+```
+
+`--resume` 없이 새 학습을 시작한다. 이전 config에 action_mode가 없으면 `absolute`로 읽어 기존 모델의 의미를 보존한다. 새 delta 모델은 저장/재개/평가 시 delta 설정을 유지한다. ±5°는 step당 조정 범위이며 기존 0.2° slew limiter를 다시 사용하는 것은 아니다. 실제 모터 응답은 여전히 기본적으로 즉시 도달 가정이다. 이번 검증은 동작 검증이며 학습 성능 개선을 보장하지 않는다.
+
 ### 1. M0와 이번 구현의 관계
 
 근거는 첨부된 M0-1 연구 시나리오, M0-2 구조, M0-3 변수/정보 흐름(DRAFT), M0-4 RL 관측/행동/보상, M0-5 baseline, M0-6 지표, M0-7 하드웨어 제약이다. 제목에 DRAFT가 있는 문서는 최종 확정본으로 승격하지 않는다. 이번 README는 구현 설명이며 새로운 최종 마일스톤 문서가 아니다.
@@ -62,15 +77,15 @@ $$ o_t=(e_{u,t}/E_u,e_{v,t}/E_v,\Delta e_{u,t}/E_u,\Delta e_{v,t}/E_v,(\theta_{p
 
 기본 `Eu=648`, `Ev=486`, 각도는 degree다. Δe는 시간으로 나누지 않는 프레임 차분이며 episode 시작에는 0이다. 직전 각도는 **제한 후 전송한 명령값**이다. 실제 각도 피드백, 깊이, 세계 위치, 타깃 속도는 정책 입력에 없다.
 
-SAC의 `a`는 M0처럼 **절대 목표각**을 지정한다. 변화량을 직접 출력하는 정책으로 바꾸지 않았다.
+현재 기본 SAC의 `a`는 위 절에서 정의한 **±5° 조정량**이다. 아래 절대 목표각 식은 `action_mode="absolute"`인 기존 모델의 호환 경로에만 적용된다.
 
 $$ \theta^*_{j,t}=\frac{\theta_{j,max}-\theta_{j,min}}{2}a_{j,t}+\frac{\theta_{j,max}+\theta_{j,min}}{2},\qquad a_{j,t}\in[-1,1] $$
 
-사용자 지정 범위는 Pan [-180°,180°], Tilt [-15°,40°]이다. 매 episode의 시작 명령과 가상 실제각은 (0°,0°)이다. 정규화의 s는 축별 반범위 (180°,27.5°), m은 중간값 (0°,12.5°)이다. 따라서 정규화 action (0,0)은 반올림 전 (0°,12.5°), 전달 명령은 (0°,13°)이며 B0는 별도 역변환으로 (0°,0°)를 유지한다. 이 범위의 실제 하드웨어 응답을 검증했다는 의미는 아니다. 명령 전달 전 다음 각도 양자화를 적용한다.
+사용자 지정 범위는 Pan [-180°,180°], Tilt [-15°,40°]이다. 매 episode의 시작 명령과 가상 실제각은 (0°,0°)이다. 정규화의 s는 축별 반범위 (180°,27.5°), m은 중간값 (0°,12.5°)이다. 기존 absolute 모드에서만 정규화 action (0,0)은 반올림 전 (0°,12.5°), 전달 명령은 (0°,13°)이며 B0는 별도 역변환으로 (0°,0°)를 유지한다. 이 범위의 실제 하드웨어 응답을 검증했다는 의미는 아니다. 명령 전달 전 다음 각도 양자화를 적용한다.
 
 $$ \theta_{j,t}=\operatorname{clip}(\operatorname{round}_{1^\circ}(\theta^*_{j,t}),\theta_{j,min},\theta_{j,max}) $$
 
-기본 dt=0.1 s이며, 1° 격자로 반올림한다(정확한 절반은 0에서 먼 방향). step당 변화량 상한은 없다. 기본 가상 actuator는 즉시 응답하며 실제 모터의 이동 시간까지 제거되었다는 뜻은 아니다. B1과 SAC 모두 같은 변환을 사용한다. 이전 config를 로드한 경우에만 기존 slew 제한/연속 명령이 유지된다.
+기본 dt=0.1 s이며, 1° 격자로 반올림한다(정확한 절반은 0에서 먼 방향). absolute 호환 모드에는 step당 변화량 상한이 없다. 새 delta 모드는 정책 조정량 범위가 축당 ±5°다. 기본 가상 actuator는 즉시 응답하며 실제 모터의 이동 시간까지 제거되었다는 뜻은 아니다. B1과 SAC 모두 같은 변환을 사용한다. 이전 config를 로드한 경우에만 기존 slew 제한/연속 명령이 유지된다.
 
 $$ r_{point,t}=-[(e_{u,t+1}/E_u)^2+(e_{v,t+1}/E_v)^2],\qquad r_{cmd,t}=\sum_{j\in\{pan,tilt\}}[(\theta_{j,t}-\theta_{j,t-1})/\Delta\theta_{j,ref}]^2 $$
 
@@ -131,7 +146,7 @@ resume은 가중치/optimizer/버퍼를 이어서 사용하는 새 실행이다.
 
 ### 6. 비교 결과 읽기
 
-- B0: 0° 고정 조준. B1: M0의 영상 오차 비례 제어. SAC: 학습한 절대각 정책.
+- B0: 0° 고정 조준. B1: M0의 영상 오차 비례 제어. SAC: 학습한 정책(기본 delta, 기존 모델 absolute).
 - M0의 B2는 Tx/PV 공동 보정 제어이므로 Tx만 있는 이번 단계에서 별도의 비교군으로 꾸미지 않았다.
 - 기본 운동 `straight`는 에피소드 시작에 방향 φ를 [-π,π)에서 균일하게 한 번 뽑고 속도 벡터 0.12(cosφ,sinφ) m/s를 30초 동안 유지한다. X/Y는 초기 위치+속도×시간이며 ±30 cm는 초기 위치 범위일 뿐 이동 경계가 아니다. 반사, 방향 재추첨, 화면 경계에서의 되돌림은 없다. `sine`, `linear`(경계 반사), `mixed`(기존 두 운동 혼합)는 선택 옵션으로 남긴다. 세계 Z=5 m 및 PV 자세는 고정하지만 Tx–PV 직선 거리는 이동에 따라 달라진다. `--scenario stationary`로 고정 PV도 평가할 수 있다.
 - 같은 seed는 제어기와 관계없이 같은 초기 타깃/궤적/focal을 생성한다. 학습 seed 기본42, 평가 episode seed 기본10000부터다. 성능 판단은 여러 독립 학습 seed에서도 반복해야 한다.
@@ -157,7 +172,7 @@ $$ C_{var}=\frac{1}{T-1}\sum_{t=2}^{T}\sum_j[(\theta_{j,t}-\theta_{j,t-1})/R_j]^
 | `target_position()` | t에 따른 5 m 평면의 PV 위치 생성 |
 | `TrackingEnv.step()` | 명령 제한→가정 응답→타깃 이동→측정→보상→다음 관측 |
 | `encode_observation()` | 오차/차분/직전 전달 명령을 M0 순서로 정규화 |
-| `absolute_command()` | SAC 출력에서 절대 명령각 계산 및 변화율 제한 |
+| `absolute_command()` | SAC의 delta/absolute 출력을 해석해 정수 절대 명령각 생성 |
 | `reward_terms()` | 제어 후 pointing 보상과 명령 변화 비용 계산 |
 | `proportional_action()` | B1 비례 제어기의 절대 목표각 생성 |
 | `train.main()` | SAC 생성/재개, 학습, 모델·버퍼·설정 저장 |
@@ -188,6 +203,6 @@ $$ C_{var}=\frac{1}{T-1}\sum_{t=2}^{T}\sum_j[(\theta_{j,t}-\theta_{j,t-1})/R_j]^
 이전 config에는 새 필드가 없으므로 `command_step_deg=0`, `end_on_limit_exit=false`로 읽어 원래 동작을 보존한다. 새 조건 학습은 이전 모델에 --resume을 붙이지 않고 새 폴더에서 시작한다:
 
 ```bash
-python -m simulation.train --steps 100000 --device cuda --out captures/M3/sac_1deg_limit_exit
-python -m simulation.evaluate --model captures/M3/sac_1deg_limit_exit/model.zip --episodes 20 --out captures/M3/eval_1deg_limit_exit
+python -m simulation.train --steps 100000 --device cuda --out captures/M3/sac_delta5_gpu
+python -m simulation.evaluate --model captures/M3/sac_delta5_gpu/model.zip --episodes 20 --out captures/M3/eval_delta5
 ```

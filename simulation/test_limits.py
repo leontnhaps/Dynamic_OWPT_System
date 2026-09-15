@@ -12,14 +12,14 @@ from .evaluate import rollout
 
 class LimitsTests(unittest.TestCase):
     def test_command_grid_without_slew(self):
-        c=Config()
+        c=Config(action_mode="absolute")
         self.assertIsNone(c.slew_deg_s)
         for target, expected in [([10.3,-3.8],[10,-4]),([180,40],[180,40]),([-180,-15],[-180,-15]),([.5,-.5],[1,-1])]:
             np.testing.assert_allclose(absolute_command(action_for_angles(target,c),np.zeros(2),c),expected)
         check_env(TrackingEnv(c),warn=True)
 
     def fixture(self, axis, side, sign=1, motion=1., outside=True, at_limit=True):
-        c=replace(Config(),pan_sign=sign,tilt_sign=sign,measurement_noise_px=0.,focal_random_fraction=0.)
+        c=replace(Config(action_mode="absolute"),pan_sign=sign,tilt_sign=sign,measurement_noise_px=0.,focal_random_fraction=0.)
         env=TrackingEnv(c);env.reset(seed=7)
         angles=np.zeros(2);angles[axis]=(c.angle_low if side<0 else c.angle_high)[axis]
         if not at_limit: angles[axis]-=side*2
@@ -48,7 +48,7 @@ class LimitsTests(unittest.TestCase):
         for kwargs in [dict(motion=-1),dict(motion=0),dict(outside=False),dict(at_limit=False)]:
             env,a=self.fixture(1,-1,**kwargs)
             self.assertFalse(env.step(a)[2],kwargs)
-        env=TrackingEnv();env.reset(seed=3)
+        env=TrackingEnv(Config(action_mode="absolute"));env.reset(seed=3)
         self.assertFalse(env.step([1,1])[2]) # pointing backwards is not a limit exit
 
     def test_legacy_config_preserved(self):
@@ -62,7 +62,7 @@ class LimitsTests(unittest.TestCase):
         np.testing.assert_allclose(absolute_command([1,1],np.zeros(2),c),[.2,.2])
 
     def test_evaluation_stops_and_reports_length(self):
-        rows,m=rollout(Config(),10000,'B1')
+        rows,m=rollout(Config(action_mode="absolute"),10000,'B1')
         self.assertLess(len(rows),300)
         self.assertEqual(m['limit_exit'],1)
         self.assertEqual(m['episode_steps'],len(rows))

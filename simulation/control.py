@@ -21,16 +21,21 @@ def encode_observation(error, previous_error, previous_command, cfg):
 
 
 def absolute_command(action, previous_command, cfg):
-    """[-1,1]을 절대 목표각으로 변환한 뒤 각도/변화율 제한을 적용한다."""
+    """정책 출력을 해석해 실제 전달할 절대 명령각을 반환한다."""
     action = np.asarray(action, dtype=float)
     if action.shape != (2,) or not np.all(np.isfinite(action)):
         raise ValueError("action must contain two finite values")
     scale, midpoint = angle_scale(cfg)
-    desired = np.clip(action, -1, 1) * scale + midpoint
+    if cfg.action_mode == "delta":
+        desired = np.clip(action, -1, 1) * cfg.delta_limit_deg
+    else:
+        desired = np.clip(action, -1, 1) * scale + midpoint
     if cfg.command_step_deg:
         # 가장 가까운 각도 격자, 정확한 절반은 0에서 먼 방향으로 반올림.
         units = desired / cfg.command_step_deg
         desired = np.sign(units)*np.floor(np.abs(units)+.5+1e-10)*cfg.command_step_deg
+    if cfg.action_mode == "delta":
+        desired = np.asarray(previous_command) + desired
     if cfg.slew_deg_s is not None:  # 구 모델 평가/재개 호환만을 위한 경로
         maximum_delta = cfg.slew_deg_s * cfg.dt
         desired = previous_command + np.clip(desired-previous_command, -maximum_delta, maximum_delta)
@@ -43,6 +48,8 @@ def proportional_action(observation, cfg, pixels_per_degree):
     scale, midpoint = angle_scale(cfg)
     previous = observation[4:6] * scale + midpoint
     signed_gain = np.array([cfg.pan_sign, -cfg.tilt_sign]) * cfg.p_gain / pixels_per_degree
+    if cfg.action_mode == "delta":
+        return np.clip(signed_gain * e / cfg.delta_limit_deg, -1, 1)
     return action_for_angles(previous + signed_gain * e, cfg)
 
 

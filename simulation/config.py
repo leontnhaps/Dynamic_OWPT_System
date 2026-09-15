@@ -21,6 +21,8 @@ class Config:
     scenario: str = "straight"  # episode마다 랜덤 방향, 반사 없는 등속 직선
     angle_limit_deg: float | None = None  # 이전 config/model의 ±6° 표현 호환용
     slew_deg_s: float | None = None        # 소프트웨어 명령 제한, 물리 서보 속도 추정값 아님
+    action_mode: str = "delta"
+    delta_limit_deg: float = 5.0
     command_step_deg: float = 1.0
     end_on_limit_exit: bool = True
     pan_sign: int = 1              # 양의 명령이 카메라를 오른쪽으로: 실제 부호 미확인
@@ -44,6 +46,13 @@ class Config:
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if self.action_mode not in ("absolute", "delta"):
+            raise ValueError("action_mode must be absolute or delta")
+        if not math.isfinite(self.delta_limit_deg) or self.delta_limit_deg <= 0:
+            raise ValueError("delta_limit_deg must be finite and positive")
+        if self.action_mode == "delta" and self.command_step_deg:
+            if not math.isclose(self.delta_limit_deg/self.command_step_deg, round(self.delta_limit_deg/self.command_step_deg)):
+                raise ValueError("delta limit must lie on the command grid")
         if self.slew_deg_s is not None and (not math.isfinite(self.slew_deg_s) or self.slew_deg_s <= 0):
             raise ValueError("slew_deg_s must be None or positive")
         if not math.isfinite(self.command_step_deg) or self.command_step_deg < 0:
@@ -96,5 +105,6 @@ class Config:
         # 기존 학습 config는 원래의 연속 명령/고정 길이 동작을 보존한다.
         values.setdefault("command_step_deg", 0.0)
         values.setdefault("end_on_limit_exit", False)
+        values.setdefault("action_mode", "absolute")
         return cls(**values)
 

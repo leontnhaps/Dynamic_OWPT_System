@@ -19,7 +19,7 @@ def main():
     parser.add_argument("--steps", type=int, default=100_000, help="이번 실행에서 추가 학습할 step")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--config", help="Config JSON; 생략하면 기본값")
-    parser.add_argument("--out", default="captures/M3/sac_straight")
+    parser.add_argument("--out", default="captures/M3/sac_delta5")
     parser.add_argument("--resume", help="기존 model.zip 경로; 같은 폴더의 config/replay 필요")
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args()
@@ -52,7 +52,7 @@ def main():
                     policy_kwargs=dict(net_arch=[128, 128]), seed=args.seed,
                     device=args.device, verbose=1)
     cfg.save(out / "config.json")
-    metadata = dict(algorithm="SAC", observation="M0 Tx-only 6D", action="absolute angle 2D; quantization and legacy slew from config",
+    metadata = dict(algorithm="SAC", observation="M0 Tx-only 6D", action=f"{cfg.action_mode} policy 2D -> absolute commands", delta_limit_deg=cfg.delta_limit_deg,
                     seed=args.seed, requested_additional_steps=args.steps, resume=args.resume,
                     python=platform.python_version(),
                     versions={p: importlib.metadata.version(p) for p in

@@ -16,7 +16,7 @@ def rollout(cfg, seed, controller, model=None, scenario=None):
     rows = []
     for step in range(cfg.episode_steps):
         if controller == "B0":
-            action = action_for_angles([0., 0.], cfg)
+            action = np.zeros(2) if cfg.action_mode == "delta" else action_for_angles([0., 0.], cfg)
         elif controller == "B1":
             action = proportional_action(obs, cfg, env.nominal_focal*np.pi/180)
         elif controller == "SAC" and model is not None:
