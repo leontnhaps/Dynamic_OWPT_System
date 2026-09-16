@@ -14,6 +14,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from Tx.Controller.network_client import Network
 from Tx.Controller.servo_panel import ServoPanel
 from Tx.Controller.capture_panel import CapturePanel
+from Tx.Controller.live_panel import LivePanel
 
 class App:
     def __init__(self,root,args):
@@ -28,6 +29,7 @@ class App:
         camera_tab=ttk.Frame(tabs);tabs.add(camera_tab,text='M1-1 Camera')
         self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='Pan / Tilt')
         self.capture=CapturePanel(tabs,self);tabs.add(self.capture,text='M2 사진 · Calibration')
+        self.live=LivePanel(tabs,self);tabs.add(self.live,text='실전 · YOLO + SAC')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','640'),('height','480'),('fps','10'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -46,6 +48,10 @@ class App:
         self.event_log=self.make_log(logs,'명령 · 응답 · 연결 · 오류')
         self.stats_log=self.make_log(logs,'실시간 수신 통계 (receive_stats)')
         self.preview=ttk.Label(root,anchor='center');self.preview.pack(expand=True,fill='both')
+        def show_preview(event=None):
+            if tabs.select()==str(self.live):self.preview.pack_forget()
+            else:self.preview.pack(expand=True,fill='both')
+        tabs.bind('<<NotebookTabChanged>>',show_preview)
         root.after(30,self.poll)
     def make_log(self,parent,title):
         panel=ttk.LabelFrame(parent,text=title,padding=4)
@@ -70,7 +76,11 @@ class App:
         if int(widget.index('end-1c').split('.')[0])>500:widget.delete('1.0','101.0')
         if follow.get():widget.see('end')
         widget.configure(state='disabled')
-    def send(self,cmd):
+    def send(self,cmd,tracking=False):
+        if not tracking and hasattr(self,'live') and cmd.get('cmd') in ('move','servo_config','preview','outputs_off'):
+            self.live.stop('수동 명령으로 실전 추적 중단')
+            if self.live.pending and cmd.get('cmd') in ('move','servo_config'):
+                messagebox.showerror('실전 테스트','전송된 추적 명령의 응답을 기다리세요.');return False
         try:
             self.net.send(cmd);self.record(dict(event='command',command=cmd));return True
         except OSError as exc:
@@ -104,6 +114,7 @@ class App:
                 event=self.net.events.get_nowait();kind=event.get('event')
                 self.servo.event(event)
                 self.capture.event(event)
+                self.live.event(event)
                 if kind=='network':self.links[str(event['port'])]=event['state']
                 if kind in ('hello','agent'):self.links['Pi']=event.get('agent_state',event.get('state'))
                 if kind=='pong':
@@ -128,8 +139,10 @@ class App:
         if self.current:
             age=now-self.current[2];meta=self.current[1]
             self.status.set(f'{"SIMULATION | " if meta["simulated"] else ""}Frame {meta["seq"]} | {self.size} | receive {self.fps:.1f} fps | last receive {age:.2f}s ago'+(' — STALE / STOPPED' if age>2 else ''))
+        self.live.guard(self.live.poll)
         self.root.after(30,self.poll)
     def close(self):
+        self.live.close()
         try:self.net.send(dict(cmd='outputs_off'))
         except OSError:pass
         self.net.close();self.root.destroy()
@@ -138,4 +151,5 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures/m2')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()
+
 
