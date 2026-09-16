@@ -94,7 +94,7 @@ class LivePanel(ttk.Frame):
         if self.app.size!=(c.width,c.height):raise ValueError('Camera 해상도를 모델 config에 맞추세요.')
         self.stop();self.running=True;self.detecting=True;self.not_before=time.monotonic()
         self.run_settings=self.settings()
-        folder=Path('captures/M3/live')/datetime.now().strftime('%Y%m%d_%H%M%S_%f');folder.mkdir(parents=True)
+        folder=Path('captures/M4/live')/datetime.now().strftime('%Y%m%d_%H%M%S_%f');folder.mkdir(parents=True)
         self.log=(folder/'frames.csv').open('w',newline='',encoding='utf-8')
         self.writer=csv.DictWriter(self.log,fieldnames=['unix_ns','frame_seq','frame_age_s','inference_s','status','error_u','error_v','raw_pan','raw_tilt','delta_pan','delta_tilt','command_pan','command_tilt','request_id'])
         self.writer.writeheader()

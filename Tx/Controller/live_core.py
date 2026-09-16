@@ -40,17 +40,20 @@ def command_inside(command, limits):
 
 
 class LiveModels:
-    def __init__(self, yolo_path, model_path, config_path, device):
+    def __init__(self, yolo_path, model_path, config_path, device, new_config=None, seed=42):
         import numpy as np
         from ultralytics import YOLO
         from stable_baselines3 import SAC
         from simulation.config import Config
-        if not all(Path(p).is_file() for p in (yolo_path, model_path, config_path)):
+        required=(yolo_path,) if new_config is not None else (yolo_path, model_path, config_path)
+        if not all(Path(p).is_file() for p in required):
             raise ValueError('YOLO .pt, SAC .zip, 해당 모델 config.json을 모두 선택하세요.')
-        self.cfg=Config.load(config_path)
+        self.cfg=new_config if new_config is not None else Config.load(config_path)
         validate_config(self.cfg)
         self.detector=YOLO(yolo_path)
-        self.policy=SAC.load(model_path,device=device)
+        self.policy=(new_policy(self.cfg,device,seed) if new_config is not None
+                     else SAC.load(model_path,device=device))
+        self.from_scratch=new_config is not None
         if self.policy.observation_space.shape!=(6,) or self.policy.action_space.shape!=(2,):
             raise ValueError('6차원 관측 / 2차원 행동 SAC 모델이 아닙니다.')
         self.device=device
@@ -82,3 +85,24 @@ class LiveModels:
                       raw_delta=(action*c.delta_limit_deg).tolist(),command=applied.tolist(),
                       applied_delta=(applied-command).tolist())
         return result
+
+
+def new_policy(cfg, device, seed):
+    """Initialize SAC without loading weights or stepping a simulated environment."""
+    import gymnasium as gym
+    import numpy as np
+    from stable_baselines3 import SAC
+
+    class SpacesOnly(gym.Env):
+        observation_space = gym.spaces.Box(-np.inf, np.inf, (6,), np.float32)
+        action_space = gym.spaces.Box(-1., 1., (2,), np.float32)
+
+        def reset(self, **kwargs):
+            raise RuntimeError('Live SAC uses camera observations, not env.reset()')
+
+        def step(self, action):
+            raise RuntimeError('Live SAC uses physical commands, not env.step()')
+
+    return SAC('MlpPolicy', SpacesOnly(), device=device, seed=seed,
+               learning_rate=3e-4, buffer_size=50000, batch_size=64,
+               learning_starts=64, policy_kwargs=dict(net_arch=[128, 128]), verbose=0)

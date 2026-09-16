@@ -56,7 +56,8 @@ def proportional_action(observation, cfg, pixels_per_degree):
 def reward_terms(next_error, command, previous_command, cfg):
     """M0 r_point와 r_cmd. 보상에는 제어 후 오차와 실제 보낸 명령을 사용."""
     e = np.asarray(next_error) / np.array([cfg.width/2, cfg.height/2])
-    pointing = -float(e @ e)
+    pointing = (1.0 / (1.0 + float(np.linalg.norm(next_error))/cfg.alignment_scale_px)
+                if cfg.reward_mode == "alignment" else -float(e @ e))
     delta = (command-previous_command) / cfg.command_reference_deg
     command_cost = float(delta @ delta)
     return cfg.pointing_weight*pointing - cfg.command_weight*command_cost, pointing, command_cost

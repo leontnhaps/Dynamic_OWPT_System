@@ -102,9 +102,10 @@ class RealLearner:
         self.model.set_logger(configure(str(self.folder/'optimizer'),['csv']))
         self.model._current_progress_remaining=1.
         models.cfg.save(self.folder/'config.json')
-        (self.folder/'session.json').write_text(json.dumps(dict(source=source,mode='real_finetuning',
+        (self.folder/'session.json').write_text(json.dumps(dict(source=source,mode='real_from_scratch' if getattr(models,'from_scratch',False) else 'real_finetuning',
             initial_total_timesteps=self.model.num_timesteps,batch_size=64,buffer_size=50000,
-            reward='loaded config pointing + command; separate terminal loss penalty',
+            reward=dict(mode=models.cfg.reward_mode,pointing_weight=models.cfg.pointing_weight,
+                        alignment_scale_px=models.cfg.alignment_scale_px,command_weight=models.cfg.command_weight),
             real_angle_feedback=False),ensure_ascii=False,indent=2),encoding='utf-8')
 
     def update(self,episode,summary,steps):
@@ -135,3 +136,27 @@ class RealLearner:
 
     def close(self):
         self.model.logger.close()
+
+
+class EpisodeBatch:
+    """One bounded batch; only normal episode endings can schedule another reset."""
+    def __init__(self, count):
+        if not isinstance(count, int) or not 1 <= count <= 1000:
+            raise ValueError('반복 횟수는 1~1000 정수')
+        self.total=count;self.started=0;self.active=True;self.ready_at=None
+
+    def began(self):
+        self.started+=1;self.ready_at=None
+
+    def saved(self, reason, now):
+        if not self.active:return
+        if reason not in ('time_limit','target_lost') or self.started>=self.total:
+            self.cancel()
+        else:
+            self.ready_at=now+1.
+
+    def ready(self, now):
+        return self.active and self.ready_at is not None and now>=self.ready_at
+
+    def cancel(self):
+        self.active=False;self.ready_at=None
