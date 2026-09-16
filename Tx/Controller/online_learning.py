@@ -105,7 +105,8 @@ class RealLearner:
         (self.folder/'session.json').write_text(json.dumps(dict(source=source,mode='real_from_scratch' if getattr(models,'from_scratch',False) else 'real_finetuning',
             initial_total_timesteps=self.model.num_timesteps,batch_size=64,buffer_size=50000,
             reward=dict(mode=models.cfg.reward_mode,pointing_weight=models.cfg.pointing_weight,
-                        alignment_scale_px=models.cfg.alignment_scale_px,command_weight=models.cfg.command_weight),
+                        alignment_scale_px=models.cfg.alignment_scale_px,command_weight=models.cfg.command_weight,
+                        alignment_bonus=models.cfg.alignment_bonus,alignment_bonus_radius_px=models.cfg.alignment_bonus_radius_px),
             real_angle_feedback=False),ensure_ascii=False,indent=2),encoding='utf-8')
 
     def update(self,episode,summary,steps):

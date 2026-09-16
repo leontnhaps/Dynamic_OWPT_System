@@ -60,5 +60,7 @@ def reward_terms(next_error, command, previous_command, cfg):
                 if cfg.reward_mode == "alignment" else -float(e @ e))
     delta = (command-previous_command) / cfg.command_reference_deg
     command_cost = float(delta @ delta)
-    return cfg.pointing_weight*pointing - cfg.command_weight*command_cost, pointing, command_cost
+    bonus = (cfg.alignment_bonus * max(0., 1.-float(np.linalg.norm(next_error))/cfg.alignment_bonus_radius_px)**2
+             if cfg.reward_mode == "alignment" else 0.)
+    return cfg.pointing_weight*pointing + bonus - cfg.command_weight*command_cost, pointing, command_cost
 

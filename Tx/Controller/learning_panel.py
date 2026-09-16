@@ -49,7 +49,8 @@ class LearningPanel(LivePanel):
             entry=ttk.Entry(new,textvariable=var,width=7);entry.grid(row=0,column=i*2+1)
             self.widgets.append(entry)
         ttk.Button(new,text='YOLO + 새 SAC 생성',command=lambda:self.guard(self.create_new)).grid(row=1,column=0,columnspan=3,sticky='w')
-        ttk.Label(new,text='기준점은 실측 보정값 입력. 새 모델: r=10/(1+d/거리), 명령 비용 0. 생성 후 미리보기 → 정지 → 학습 시작.').grid(row=2,column=0,columnspan=8,sticky='w')
+        ttk.Button(new,text='현재 SAC에 50px 추가 보상 적용',command=lambda:self.guard(self.apply_alignment_bonus)).grid(row=1,column=3,columnspan=5,sticky='w')
+        ttk.Label(new,text='기준점은 실측 보정값 입력. 새 모델: 역수형 + 50px 안쪽 추가 보상(최대 +30), 명령 비용 0. 생성 후 미리보기 → 정지 → 학습 시작.').grid(row=2,column=0,columnspan=8,sticky='w')
 
     def busy(self):
         if getattr(self,'batch',None) is not None and self.batch.active:
@@ -78,7 +79,8 @@ class LearningPanel(LivePanel):
         cfg=replace(base,width=self.app.size[0],height=self.app.size[1],
                     scenario='stationary',action_mode='delta',command_step_deg=1.,
                     angle_limit_deg=None,slew_deg_s=None,command_delay_steps=0,actuator_tau_s=0.,
-                    reward_mode='alignment',command_weight=0.,pointing_weight=10.,**values)
+                    reward_mode='alignment',command_weight=0.,pointing_weight=10.,
+                    alignment_bonus=30.,alignment_bonus_radius_px=50.,**values)
         validate_config(cfg)
         device=self.device.get().strip()
         if device not in ('cpu','cuda'):raise ValueError('장치는 cpu 또는 cuda')
@@ -93,7 +95,29 @@ class LearningPanel(LivePanel):
         self.future=self.executor.submit(LiveModels,self.load_paths['yolo'],None,None,device,cfg,self.seed)
         self.job=('load',self.generation)
         self.status.set('YOLO 로딩 / 무작위 SAC 초기화 중 · 이동 없음')
-        self.learning_status.set(f'새 SAC · 레이저 ({cfg.laser_u}, {cfg.laser_v}) · Δ ±{cfg.delta_limit_deg}° · 보상 10/(1+d/{cfg.alignment_scale_px}) · 명령 비용 0')
+        self.learning_status.set(f'새 SAC · 레이저 ({cfg.laser_u}, {cfg.laser_v}) · Δ ±{cfg.delta_limit_deg}° · 보상 10/(1+d/{cfg.alignment_scale_px}) + 50px 안쪽 최대 30 · 명령 비용 0')
+
+    def apply_alignment_bonus(self):
+        self.busy()
+        if self.future is not None:raise ValueError('진행 중 작업이 끝난 뒤 적용하세요.')
+        if self.models is None:raise ValueError('SAC 모델을 먼저 불러오세요.')
+        from dataclasses import replace
+        cfg=replace(self.models.cfg,reward_mode='alignment',pointing_weight=10.,
+                    command_weight=0.,alignment_scale_px=50.,
+                    alignment_bonus=30.,alignment_bonus_radius_px=50.)
+        if cfg == self.models.cfg:
+            self.learning_status.set('이미 50px 추가 보상 적용됨 · 모델과 버퍼 유지')
+            return
+        self.stop('보상 설정 변경')
+        if self.learner is not None:self.learner.close()
+        # Rewards in old replay entries belong to the old objective. Keep policy
+        # and optimizer weights, but start a new real-data session/buffer.
+        if self.models.policy.replay_buffer is not None:self.models.policy.replay_buffer.reset()
+        self.learner=None;self.episode_number=0
+        self.models.cfg=cfg
+        self.load_paths=dict(self.load_paths,reward_override='alignment_bonus_50px_30')
+        self.app.record(dict(event='learning_reward_changed',config=vars(cfg),replay_reset=True))
+        self.learning_status.set('50px 추가 보상 적용 · 가중치 유지 / 경험 버퍼 새로 시작 · 최대 보상 40')
 
     def preview(self):
         self.busy();super().preview()

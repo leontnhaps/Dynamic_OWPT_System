@@ -36,6 +36,8 @@ class Config:
     pointing_weight: float = 10.0
     reward_mode: str = "quadratic"  # old checkpoints retain their reward
     alignment_scale_px: float = 50.0
+    alignment_bonus: float = 0.0  # preserve old config rewards
+    alignment_bonus_radius_px: float = 50.0
     command_weight: float = .02
     command_reference_deg: float = 1.0
     p_gain: float = .45            # Δθ = p_gain * e / nominal_px_per_deg
@@ -52,6 +54,10 @@ class Config:
             raise ValueError("Unknown reward_mode")
         if not math.isfinite(self.alignment_scale_px) or self.alignment_scale_px <= 0:
             raise ValueError("alignment_scale_px must be positive")
+        if not math.isfinite(self.alignment_bonus) or self.alignment_bonus < 0:
+            raise ValueError("alignment_bonus must be finite and nonnegative")
+        if not math.isfinite(self.alignment_bonus_radius_px) or self.alignment_bonus_radius_px <= 0:
+            raise ValueError("alignment_bonus_radius_px must be finite and positive")
         if self.action_mode not in ("absolute", "delta"):
             raise ValueError("action_mode must be absolute or delta")
         if not math.isfinite(self.delta_limit_deg) or self.delta_limit_deg <= 0:
