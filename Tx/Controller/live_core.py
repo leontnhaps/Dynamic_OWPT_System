@@ -20,18 +20,18 @@ def validate_config(cfg):
 
 
 def target_from_boxes(boxes, class_id, confidence, size):
-    """Require exactly one matching PV; never switch arbitrarily between receivers."""
+    """Select highest-confidence valid PV; equal scores keep detector order."""
     w,h=size
     candidates=[]
     for x1,y1,x2,y2,score,cls in boxes:
-        if int(cls)!=class_id or score < confidence:
+        if not all(math.isfinite(float(x)) for x in (x1,y1,x2,y2,score,cls)):
             continue
-        if not all(math.isfinite(float(x)) for x in (x1,y1,x2,y2,score)):
+        if int(cls)!=class_id or score < confidence or score > 1:
             continue
         if 0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h:
             candidates.append(dict(box=[x1,y1,x2,y2],confidence=score,
                                    center=[(x1+x2)/2,(y1+y2)/2]))
-    return candidates[0] if len(candidates)==1 else None, len(candidates)
+    return max(candidates,key=lambda target:target['confidence']) if candidates else None, len(candidates)
 
 
 def command_inside(command, limits):

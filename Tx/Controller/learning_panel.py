@@ -248,8 +248,6 @@ class LearningPanel(LivePanel):
             previous=self.previous_error;self.running=False
             try:super().consume(result,frame,started,now)
             finally:self.running=True;self.previous_error=previous
-            if result['count']>1:
-                self.stop('다중 PV 검출: 표적 식별 불명');return
             end=self.episode.missed(now)
             self.learning_status.set(f'미검출 {self.episode.missing_count}회 · 이동 보류')
             if end:self.end_episode('target_lost',now)

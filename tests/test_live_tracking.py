@@ -11,9 +11,29 @@ class LiveTests(unittest.TestCase):
     def test_missing_and_ambiguous_target(self):
         b=[10,20,40,60,.9,0]
         self.assertEqual(target_from_boxes([],0,.5,(100,100)),(None,0))
-        self.assertEqual(target_from_boxes([b,b],0,.5,(100,100)),(None,2))
+        target,n=target_from_boxes([b,b],0,.5,(100,100))
+        self.assertEqual(n,2);self.assertEqual(target['center'],[25,40])
         target,n=target_from_boxes([b,[0,0,10,10,.99,1]],0,.5,(100,100))
         self.assertEqual(n,1);self.assertEqual(target['center'],[25,40])
+    def test_highest_confidence_filters_and_tie(self):
+        boxes=[[0,0,10,10,.6,0],[20,20,40,40,.95,0],
+               [0,0,10,10,.99,1],[0,0,10,10,.4,0],
+               [0,0,200,10,1.,0],[0,0,10,10,float('nan'),0]]
+        target,n=target_from_boxes(boxes,0,.5,(100,100))
+        self.assertEqual(n,2);self.assertEqual(target['center'],[30,30])
+        self.assertEqual(target['confidence'],.95)
+        self.assertEqual(target_from_boxes(list(reversed(boxes)),0,.5,(100,100))[0],target)
+
+    def test_coordinate_log_and_missing_blanks(self):
+        p=self.panel();p.log=Mock();p.writer=Mock()
+        r=self.result();r['count']=2;r['target']['confidence']=.95
+        LivePanel.write_row(p,r,(b'',{'seq':1},10,0),10,10.1,'sent','id')
+        row=p.writer.writerow.call_args.args[0]
+        self.assertEqual((row['detection_count'],row['selected_confidence'],row['pv_u'],row['pv_v']),(2,.95,750,350))
+        LivePanel.write_row(p,dict(target=None,count=0),(b'',{},11,0),11,11.1,'missing','')
+        row=p.writer.writerow.call_args.args[0]
+        self.assertEqual(row['detection_count'],0);self.assertNotIn('pv_u',row)
+
     def test_bad_box_rejected(self):
         self.assertEqual(target_from_boxes([[0,0,200,10,.9,0]],0,.5,(100,100)),(None,0))
     def test_age(self):

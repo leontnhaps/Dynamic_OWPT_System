@@ -36,7 +36,7 @@ class LivePanel(ttk.Frame):
             ttk.Button(buttons,text=label,command=lambda f=fn:self.guard(f)).pack(side='left',padx=4)
         self.status=tk.StringVar(value='모델을 선택하세요. 추적 시작 전에는 이동 명령을 보내지 않습니다.')
         ttk.Label(self,textvariable=self.status,wraplength=1000).grid(row=5,column=0,columnspan=7,sticky='w')
-        ttk.Label(self,text='해상도·레이저 기준점은 선택한 config 사용 | 미검출·다중 PV·0.5초 이상 지난 영상은 추적 정지 | 레이저 자동 ON 없음').grid(row=6,column=0,columnspan=7,sticky='w')
+        ttk.Label(self,text='해상도·레이저 기준점은 선택한 config 사용 | 다중 PV는 최고 confidence 선택 | 미검출·영상 지연 시 이동 보류/종료 | 레이저 자동 ON 없음').grid(row=6,column=0,columnspan=7,sticky='w')
         self.canvas=ttk.Label(self);self.canvas.grid(row=7,column=0,columnspan=7)
         self.detail=tk.StringVar();ttk.Label(self,textvariable=self.detail).grid(row=8,column=0,columnspan=7,sticky='w')
 
@@ -96,7 +96,7 @@ class LivePanel(ttk.Frame):
         self.run_settings=self.settings()
         folder=Path('captures/M4/live')/datetime.now().strftime('%Y%m%d_%H%M%S_%f');folder.mkdir(parents=True)
         self.log=(folder/'frames.csv').open('w',newline='',encoding='utf-8')
-        self.writer=csv.DictWriter(self.log,fieldnames=['unix_ns','frame_seq','frame_age_s','inference_s','status','error_u','error_v','raw_pan','raw_tilt','delta_pan','delta_tilt','command_pan','command_tilt','request_id'])
+        self.writer=csv.DictWriter(self.log,fieldnames=['unix_ns','frame_seq','frame_age_s','inference_s','status','detection_count','selected_confidence','pv_u','pv_v','error_u','error_v','raw_pan','raw_tilt','delta_pan','delta_tilt','command_pan','command_tilt','request_id'])
         self.writer.writeheader()
         (folder/'session.json').write_text(json.dumps(dict(models=self.load_paths,config=vars(c),servo=s.context(),confidence=self.run_settings[0],class_id=self.run_settings[1],actual_angles_measured=False),ensure_ascii=False,indent=2),encoding='utf-8')
         self.app.record(dict(event='live_start',folder=str(folder)))
@@ -173,12 +173,12 @@ class LivePanel(ttk.Frame):
         image.thumbnail((800,300));photo=ImageTk.PhotoImage(image);self.canvas.configure(image=photo);self.canvas.image=photo
         if target is None:
             self.previous_error=None
-            self.detail.set(f'PV 검출 {result["count"]}개: 단일 PV가 필요합니다.')
-            self.write_row(result,frame,started,now,'missing_or_ambiguous','')
-            if self.running:self.stop('PV 미검출 또는 다중 검출')
+            self.detail.set(f'PV 검출 {result["count"]}개: 유효 PV가 없습니다.')
+            self.write_row(result,frame,started,now,'missing','')
+            if self.running:self.stop('PV 미검출')
             return
         self.previous_error=result['error']
-        self.detail.set(f'오차 {tuple(round(x,1) for x in result["error"])} px | 원래 Δ {tuple(round(x,2) for x in result["raw_delta"])}° | 적용 Δ {result["applied_delta"]}° | 목표 {result["command"]}° | 추론 {(now-started)*1000:.0f} ms')
+        self.detail.set(f'PV {result["count"]}개 중 선택 confidence {target.get("confidence",0):.3f} | 오차 {tuple(round(x,1) for x in result["error"])} px | 원래 Δ {tuple(round(x,2) for x in result["raw_delta"])}° | 적용 Δ {result["applied_delta"]}° | 목표 {result["command"]}° | 추론 {(now-started)*1000:.0f} ms')
         token='';status='preview'
         if self.running:
             s=self.app.servo
@@ -197,6 +197,10 @@ class LivePanel(ttk.Frame):
     def write_row(self,r,frame,started,now,status,token):
         if self.log is None:return
         row=dict(unix_ns=time.time_ns(),frame_seq=frame[1].get('seq'),frame_age_s=now-frame[2],inference_s=now-started,status=status,request_id=token)
+        row['detection_count']=r.get('count',0)
+        target=r.get('target')
+        if target:
+            row.update(selected_confidence=target.get('confidence'),pv_u=target['center'][0],pv_v=target['center'][1])
         for key,fields in [('error',['error_u','error_v']),('raw_delta',['raw_pan','raw_tilt']),('applied_delta',['delta_pan','delta_tilt']),('command',['command_pan','command_tilt'])]:
             if key in r:row.update(zip(fields,r[key]))
         self.writer.writerow(row);self.log.flush()
