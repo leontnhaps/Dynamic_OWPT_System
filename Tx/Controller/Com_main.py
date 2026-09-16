@@ -14,7 +14,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from Tx.Controller.network_client import Network
 from Tx.Controller.servo_panel import ServoPanel
 from Tx.Controller.capture_panel import CapturePanel
-from Tx.Controller.live_panel import LivePanel
+from Tx.Controller.learning_panel import LearningPanel as LivePanel
 
 class App:
     def __init__(self,root,args):

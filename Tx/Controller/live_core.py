@@ -74,7 +74,7 @@ class LiveModels:
             return result
         error=np.asarray(target['center'])-[c.laser_u,c.laser_v]
         obs=encode_observation(error,error if previous_error is None else previous_error,command,c)
-        action,_=self.policy.predict(obs,deterministic=True)
+        action,_=self.policy.predict(obs,deterministic=not getattr(self,'learning',False))
         if not np.all(np.isfinite(action)):
             raise ValueError('SAC 출력에 비정상 값이 있습니다.')
         applied=absolute_command(action,np.asarray(command,dtype=float),c)
