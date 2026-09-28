@@ -26,10 +26,10 @@ class App:
         root.title('Dynamic OWPT — M2 Calibration Capture');root.geometry('1250x950')
         root.protocol('WM_DELETE_WINDOW',self.close)
         tabs=ttk.Notebook(root);tabs.pack(fill='x')
-        camera_tab=ttk.Frame(tabs);tabs.add(camera_tab,text='M1-1 Camera')
-        self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='Pan / Tilt')
-        self.capture=CapturePanel(tabs,self);tabs.add(self.capture,text='M2 사진 · Calibration')
-        self.live=LivePanel(tabs,self);tabs.add(self.live,text='실전 · YOLO + SAC')
+        camera_tab=ttk.Frame(tabs);tabs.add(camera_tab,text='M1-1 (Camera)')
+        self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='M1-2 (Pan/Tilt)')
+        self.capture=CapturePanel(tabs,self);tabs.add(self.capture,text='M2 (사진 · Calibration)')
+        self.live=LivePanel(tabs,self);tabs.add(self.live,text='M4 (실전 · YOLO + SAC)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','640'),('height','480'),('fps','10'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -97,12 +97,17 @@ class App:
     def ping(self):
         token=str(time.monotonic_ns());self.pings={token:time.monotonic()}
         self.send(dict(cmd='ping',token=token))
-    def save(self):
+    def stage_dir(self,stage):
+        path=self.out/stage
+        path.mkdir(parents=True,exist_ok=True)
+        return path
+
+    def save(self,stage='M1-1'):
         if not self.current or time.monotonic()-self.current[2]>2:
             messagebox.showerror('Save','최근 수신 프레임이 없습니다.');return
         data,meta,received,wall=self.current
         name='frame_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-        path=self.out/(name+'.jpg');path.write_bytes(data)
+        path=self.stage_dir(stage)/(name+'.jpg');path.write_bytes(data)
         meta=dict(meta,actual_image_size=self.size,gui_receive_unix_ns=wall,gui_receive_fps=self.fps,
                   m1_2=self.servo.context(),
                   note='requested controls and servo commands are not measurements; clocks are not synchronized')
@@ -148,7 +153,7 @@ class App:
         self.net.close();self.root.destroy()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures/m2')
+    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders (M1-1, M1-2, M2, M4)')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()
 
