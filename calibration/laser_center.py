@@ -119,7 +119,7 @@ if __name__=='__main__':
     import argparse
     import tkinter as tk
     parser=argparse.ArgumentParser()
-    parser.add_argument('--input',default='captures/m2')
+    parser.add_argument('--input',default='captures/M2')
     args=parser.parse_args()
     root=tk.Tk();root.withdraw()
     window=open_window(root,args.input)
