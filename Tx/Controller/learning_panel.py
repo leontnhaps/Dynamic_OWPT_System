@@ -150,7 +150,7 @@ class LearningPanel(LivePanel):
         super().start()
         try:
             if self.learner is None:
-                folder=Path('captures/M4/live_training')/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                folder=(self.app.stage_dir('M4')/'live_training')/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
                 self.learner=RealLearner(self.models,folder,dict(self.load_paths,reset_seed=self.seed))
                 self.rng=np.random.default_rng(self.seed)
             self.episode_number+=1
