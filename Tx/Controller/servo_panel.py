@@ -189,12 +189,12 @@ class ServoPanel(ttk.Frame):
             raise ValueError('명령 응답 후 영상을 확인하고 기록하세요.')
         if not self.note.get().strip():
             raise ValueError('관찰 내용을 입력하세요. 예: Pan + → 장치 우회전, 표식은 영상 왼쪽으로 이동')
-        self.app.save()
+        self.app.save(stage='M1-2')
 
     def save_profile(self):
         data=dict(version=1,settings=self.values(),step=self.step.get(),reference=self.reference)
         limits_from(data['settings'])
-        path=filedialog.asksaveasfilename(defaultextension='.json',initialfile='m1_2_settings.json')
+        path=filedialog.asksaveasfilename(defaultextension='.json',initialdir=str(self.app.stage_dir('M1-2')),initialfile='M1-2_settings.json')
         if path:
             Path(path).write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
             self.app.record(dict(event='m1_2_profile_saved',file=path,profile=data))
@@ -202,7 +202,7 @@ class ServoPanel(ttk.Frame):
     def load_profile(self):
         if self.pending:
             raise ValueError('요청 완료 후 설정을 불러오세요.')
-        path=filedialog.askopenfilename(filetypes=[('JSON','*.json')])
+        path=filedialog.askopenfilename(initialdir=str(self.app.stage_dir('M1-2')),filetypes=[('JSON','*.json')])
         if not path:
             return
         data=json.loads(Path(path).read_text(encoding='utf-8'))
