@@ -243,7 +243,7 @@ def main():
     parser.add_argument('--ir-pin',type=int,default=IR_CUT_PIN)
     parser.add_argument('--laser-pin',type=int,default=LASER_PIN)
     parser.add_argument('--servo-port',help='ESP32 serial device, e.g. /dev/ttyUSB0')
-    parser.add_argument('--capture-dir',default='captures/m2_pi')
+    parser.add_argument('--capture-dir',default='captures/M2/pi')
     args=parser.parse_args()
     if args.ir_pin==args.laser_pin: parser.error('IR and laser pins must differ')
     agent=Agent(args)
