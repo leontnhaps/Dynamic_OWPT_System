@@ -31,7 +31,7 @@ class App:
         self.capture=CapturePanel(tabs,self);tabs.add(self.capture,text='M2 (사진 · Calibration)')
         self.live=LivePanel(tabs,self);tabs.add(self.live,text='M4 (실전 · YOLO + SAC)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
-        for i,(name,value) in enumerate([('width','640'),('height','480'),('fps','10'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
+        for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
             var=tk.StringVar(value=value);self.values[name]=var
             ttk.Entry(row,textvariable=var,width=14).grid(row=1,column=i)
