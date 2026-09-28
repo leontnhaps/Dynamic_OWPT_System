@@ -22,7 +22,7 @@ class CapturePanel(ttk.Frame):
         self.hardware=tk.StringVar(value='IR / Laser: 상태 조회 필요')
         self.awb=tk.BooleanVar(value=False)
         rows=[
-            [('width','Width','1920'),('height','Height','1080'),('quality','JPEG quality','95'),
+            [('width','Width','1296'),('height','Height','972'),('quality','JPEG quality','80'),
              ('shutter_speed','Exposure µs','1000'),('analogue_gain','Gain','1')],
             [('distance_m','정면 Z 거리(m)',''),('target_x_m','표적 X(m), 우+','0'),
              ('target_y_m','표적 Y(m), 위+','0'),('session_label','세션 이름','calibration'),('sample_label','표본/쌍 ID','')],
