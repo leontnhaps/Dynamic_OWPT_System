@@ -136,7 +136,9 @@ class Agent:
             camera.close()
             raise
 
-    def acquire(self,camera,cfg):
+    def acquire(self,camera,cfg,*,fresh=True):
+        begin=time.monotonic()
+        wait_ms=0.0
         with io.BytesIO() as bio:
             if self.args.simulate:
                 from PIL import Image,ImageDraw
@@ -147,11 +149,18 @@ class Agent:
                 image.save(bio,format='JPEG',quality=cfg['quality'])
                 actual={'simulated':True}
             else:
-                request=camera.capture_request(flush=True)
+                # Still samples must start exposure after the capture request.
+                # Continuous preview uses the next completed frame (queue=False).
+                request=camera.capture_request(flush=fresh)
+                wait_ms=(time.monotonic()-begin)*1000
                 try:
                     actual=dict(request.get_metadata(),stream_configuration=request.config.get('main'))
                     request.save('main',bio,format='jpeg')
                 finally: request.release()
+            elapsed=(time.monotonic()-begin)*1000
+            actual['pipeline_timing']=dict(request_wait_ms=wait_ms,
+                                          jpeg_processing_ms=elapsed-wait_ms,
+                                          fresh_exposure_required=fresh)
             return bio.getvalue(),actual
 
     def connection(self):
@@ -170,6 +179,8 @@ class Agent:
             worker.start()
             camera=None
             active=None
+            timing_mark=time.monotonic()
+            timing_samples=[]
             try:
                 self.event(event='ready',simulated=self.args.simulate,
                            capabilities=['servo_status','servo_config','move','led_off','snap','ir_cut','laser','hardware_status'])
@@ -211,6 +222,8 @@ class Agent:
                         if cfg: camera=self.configure_camera(camera,cfg)
                         elif camera: camera.stop();camera.close();camera=None
                         active=cfg
+                        timing_samples=[]
+                        timing_mark=time.monotonic()
                         self.event(event='preview',state='started' if cfg else 'stopped',requested=cfg)
                     if cfg is None:
                         self.stop.wait(.05)
@@ -218,12 +231,27 @@ class Agent:
                     begin=time.monotonic()
                     with self.lock: servo_state=self.servo.status()
                     gpio=self.gpio_state()
-                    jpeg,actual=self.acquire(camera,cfg)
+                    jpeg,actual=self.acquire(camera,cfg,fresh=False)
                     self.seq+=1
                     meta=dict(session=self.session,seq=self.seq,simulated=self.args.simulate,requested=cfg,
                               capture_done_unix_ns=time.time_ns(),capture_call_ms=(time.monotonic()-begin)*1000,
                               camera_metadata=actual,servo_at_capture_start=servo_state,**gpio)
+                    send_begin=time.monotonic()
                     send_frame(images,'_preview_'+json.dumps(meta,separators=(',',':'),default=str),jpeg)
+                    sent=time.monotonic()
+                    timing=actual['pipeline_timing']
+                    timing_samples.append(dict(request_wait_ms=timing['request_wait_ms'],
+                                               jpeg_processing_ms=timing['jpeg_processing_ms'],
+                                               send_ms=(sent-send_begin)*1000,
+                                               work_ms=(sent-begin)*1000,jpeg_bytes=len(jpeg)))
+                    if sent-timing_mark>=2:
+                        self.event(event='preview_timing',requested=cfg,frames=len(timing_samples),
+                                   interval_s=sent-timing_mark,
+                                   mean={key:sum(s[key] for s in timing_samples)/len(timing_samples)
+                                         for key in timing_samples[0]},
+                                   note='Pi local timings; send_ms is socket write time, not end-to-end latency')
+                        timing_samples=[]
+                        timing_mark=time.monotonic()
                     self.stop.wait(max(0,1/cfg['fps']-(time.monotonic()-begin)))
             finally:
                 self.stop.set()
@@ -243,7 +271,7 @@ def main():
     parser.add_argument('--ir-pin',type=int,default=IR_CUT_PIN)
     parser.add_argument('--laser-pin',type=int,default=LASER_PIN)
     parser.add_argument('--servo-port',help='ESP32 serial device, e.g. /dev/ttyUSB0')
-    parser.add_argument('--capture-dir',default='captures/m2_pi')
+    parser.add_argument('--capture-dir',default='captures/M2/pi')
     args=parser.parse_args()
     if args.ir_pin==args.laser_pin: parser.error('IR and laser pins must differ')
     agent=Agent(args)

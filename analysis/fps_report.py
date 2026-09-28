@@ -97,7 +97,7 @@ def main():
     from tkinter import filedialog,messagebox
     from tkinter.scrolledtext import ScrolledText
     root=tk.Tk();root.withdraw()
-    path=filedialog.askopenfilename(title='FPS 분석할 events 로그 선택',initialdir='captures/m2',filetypes=[('이벤트 로그','*.jsonl')])
+    path=filedialog.askopenfilename(title='FPS 분석할 events 로그 선택',initialdir='captures',filetypes=[('이벤트 로그','*.jsonl')])
     if not path:root.destroy();return
     try:result=report(path,args.warmup)
     except (OSError,ValueError) as exc:

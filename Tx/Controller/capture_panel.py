@@ -22,7 +22,7 @@ class CapturePanel(ttk.Frame):
         self.hardware=tk.StringVar(value='IR / Laser: 상태 조회 필요')
         self.awb=tk.BooleanVar(value=False)
         rows=[
-            [('width','Width','1920'),('height','Height','1080'),('quality','JPEG quality','95'),
+            [('width','Width','1296'),('height','Height','972'),('quality','JPEG quality','80'),
              ('shutter_speed','Exposure µs','1000'),('analogue_gain','Gain','1')],
             [('distance_m','정면 Z 거리(m)',''),('target_x_m','표적 X(m), 우+','0'),
              ('target_y_m','표적 Y(m), 위+','0'),('session_label','세션 이름','calibration'),('sample_label','표본/쌍 ID','')],
@@ -48,7 +48,7 @@ class CapturePanel(ttk.Frame):
         ttk.Button(row,text='기존 촬영 사진 열기',command=lambda:self.guard(self.open_image)).pack(side='left',padx=3)
         ttk.Button(row,text='좌표 포함 CSV 내보내기',command=lambda:self.guard(self.export)).pack(side='left',padx=3)
         from calibration.laser_center import open_window
-        ttk.Button(self,text='수동 레이저 좌표 평균',command=lambda:open_window(self.app.root,self.app.out)).pack(anchor='w')
+        ttk.Button(self,text='수동 레이저 좌표 평균',command=lambda:open_window(self.app.root,self.app.stage_dir('M2'))).pack(anchor='w')
         ttk.Label(self,textvariable=self.state).pack(anchor='w')
         row=ttk.Frame(self);row.pack(fill='x',pady=4)
         for label,cmd in [('IR 통과 ON (night)',dict(cmd='ir_cut',level=1)),
@@ -74,7 +74,7 @@ class CapturePanel(ttk.Frame):
         self.app.send(dict(cmd='preview',enable=True,**cfg))
 
     def open_image(self):
-        path=filedialog.askopenfilename(initialdir=str(self.app.out),filetypes=[('JPEG','*.jpg')])
+        path=filedialog.askopenfilename(initialdir=str(self.app.stage_dir('M2')),filetypes=[('JPEG','*.jpg')])
         if path:
             path=Path(path)
             if not path.with_name('complete.json').exists():
@@ -82,7 +82,7 @@ class CapturePanel(ttk.Frame):
             AnnotationWindow(self.app.root,path)
 
     def export(self):
-        path,count=export_catalog(self.app.out)
+        path,count=export_catalog(self.app.stage_dir('M2'))
         self.state.set(f'{count}개 표본 CSV 저장: {path}')
 
     def snap(self):
@@ -130,10 +130,10 @@ class CapturePanel(ttk.Frame):
                         image.load()
                         size=list(image.size)
                     meta=dict(meta,actual_image_size=size,gui_receive_unix_ns=wall)
-                    path,meta=save_capture(self.app.out,data,meta)
+                    path,meta=save_capture(self.app.stage_dir('M2'),data,meta)
                     self.last_path=path
                     # Index failure must not misreport an already committed sample as lost.
-                    try: append_index(self.app.out,path,meta)
+                    try: append_index(self.app.stage_dir('M2'),path,meta)
                     except OSError as exc: self.app.record(dict(event='index_error',file=str(path),message=str(exc)))
                     self.app.record(dict(event='capture_saved',request_id=meta['request_id'],file=str(path),actual_image_size=size))
                     if self.pending is None or self.pending[0]==meta['request_id']:

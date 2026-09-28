@@ -9,8 +9,8 @@ from common.servo import number
 
 def camera_config(data, still=False):
     result = {}
-    for key, default, low, high in [('width',1920,16,2592), ('height',1080,16,1944),
-                                    ('quality',95,1,100), ('fps',10,1,60)]:
+    for key, default, low, high in [('width',1296,16,2592), ('height',972,16,1944),
+                                    ('quality',80,1,100), ('fps',30,1,60)]:
         value = number(data.get(key,default),key)
         if not value.is_integer() or not low <= value <= high:
             raise ValueError(f'{key}: integer {low}..{high} required')

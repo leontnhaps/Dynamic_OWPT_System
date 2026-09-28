@@ -52,6 +52,29 @@ class CaptureTests(unittest.TestCase):
         agent.set_output('laser',1)
         self.assertEqual(len(calls),3)
 
+    def test_preview_and_still_freshness_and_timings(self):
+        agent=Agent(SimpleNamespace(simulate=False,servo_port=None))
+        calls=[]
+        released=[]
+        class Request:
+            config={'main':{'size':(640,480)}}
+            def get_metadata(self): return {'SensorTimestamp':123}
+            def save(self,name,output,format): output.write(b'jpeg')
+            def release(self): released.append(True)
+        class Camera:
+            def capture_request(self,flush):
+                calls.append(flush)
+                return Request()
+        for fresh in (False,True):
+            data,meta=agent.acquire(Camera(),{},fresh=fresh)
+            self.assertEqual(data,b'jpeg')
+            self.assertEqual(meta['SensorTimestamp'],123)
+            self.assertEqual(meta['pipeline_timing']['fresh_exposure_required'],fresh)
+            self.assertGreaterEqual(meta['pipeline_timing']['request_wait_ms'],0)
+            self.assertGreaterEqual(meta['pipeline_timing']['jpeg_processing_ms'],0)
+        self.assertEqual(calls,[False,True])
+        self.assertEqual(len(released),2)
+
     def test_fresh_frame_metadata_and_release_on_save_error(self):
         args=SimpleNamespace(simulate=False,servo_port=None)
         agent=Agent(args)
