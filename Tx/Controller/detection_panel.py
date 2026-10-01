@@ -10,12 +10,14 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageDraw, ImageTk
 from Tx.Controller.live_core import target_from_boxes, fresh
+from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 
 
 class PVDetector:
     def __init__(self, path, device):
+        path = resolve_yolo_path(path)
         if not Path(path).is_file():
-            raise ValueError('기존 PV YOLO .pt 파일을 선택하세요.')
+            raise ValueError(f'PV YOLO 모델 파일이 없습니다: {path}')
         from ultralytics import YOLO
         self.model = YOLO(path)
         self.names = self.model.names
@@ -45,7 +47,7 @@ class DetectionPanel(ttk.Frame):
         self.latest = None
         self.log = None
         self.widgets = []
-        self.path = tk.StringVar()
+        self.path = tk.StringVar(value=str(DEFAULT_YOLO_PATH))
         self.device = tk.StringVar(value='cuda')
         self.conf = tk.StringVar(value='0.5')
         self.class_id = tk.StringVar(value='0')
@@ -63,7 +65,7 @@ class DetectionPanel(ttk.Frame):
         for label, fn in [('모델 불러오기', self.load), ('검출 시작', self.start), ('검출 정지', self.stop),
                           ('기록 시작', self.start_log), ('기록 종료', self.end_log), ('이미지 저장', self.save)]:
             ttk.Button(row, text=label, command=lambda f=fn: self.guard(f)).pack(side='left', padx=3)
-        self.status = tk.StringVar(value='기존 YOLO .pt 선택 → 모델 불러오기 → 검출 시작')
+        self.status = tk.StringVar(value='기본 PV 모델 경로 확인 → 모델 불러오기 → 검출 시작')
         ttk.Label(self, textvariable=self.status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, text='원본 영상 좌표 · 최고 confidence PV 하나 선택 · 저장: captures/M1-3/').pack(anchor='w')
         self.canvas = ttk.Label(self, anchor='center'); self.canvas.pack()
@@ -90,7 +92,7 @@ class DetectionPanel(ttk.Frame):
         device = self.device.get().strip()
         if device not in ('cpu', 'cuda'): raise ValueError('장치는 cpu 또는 cuda를 입력하세요.')
         self.model = None
-        self.loaded = dict(path=self.path.get().strip(), device=device)
+        self.loaded = dict(path=resolve_yolo_path(self.path.get()), device=device)
         self.lock(True)
         self.job = ('load', self.generation)
         self.future = self.executor.submit(PVDetector, self.loaded['path'], device)

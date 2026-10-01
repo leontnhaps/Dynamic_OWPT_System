@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import ImageTk, ImageDraw
 from Tx.Controller.live_core import LiveModels, fresh, command_inside
+from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 
 
 class LivePanel(ttk.Frame):
@@ -23,7 +24,7 @@ class LivePanel(ttk.Frame):
         self.paths={};self.widgets=[]
         for row,(name,label) in enumerate([('yolo','YOLO .pt'),('sac','SAC .zip'),('config','SAC config.json')]):
             ttk.Label(self,text=label).grid(row=row,column=0,sticky='w')
-            var=tk.StringVar();self.paths[name]=var
+            var=tk.StringVar(value=str(DEFAULT_YOLO_PATH) if name=='yolo' else '');self.paths[name]=var
             entry=ttk.Entry(self,textvariable=var,width=70);entry.grid(row=row,column=1,columnspan=5,sticky='ew')
             button=ttk.Button(self,text='선택',command=lambda n=name:self.browse(n));button.grid(row=row,column=6)
             self.widgets.extend([entry,button])
@@ -60,6 +61,7 @@ class LivePanel(ttk.Frame):
             raise ValueError('진행 중인 추론/모델 로딩이 끝난 뒤 다시 시도하세요.')
         self.models=None
         self.load_paths={k:v.get() for k,v in self.paths.items()}
+        self.load_paths['yolo']=resolve_yolo_path(self.load_paths['yolo'])
         device=self.device.get().strip()
         if device not in ('cpu','cuda'):raise ValueError('장치는 cpu 또는 cuda')
         for w in self.widgets:w.configure(state='disabled')
