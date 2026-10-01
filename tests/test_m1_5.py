@@ -38,4 +38,34 @@ class TimingTests(unittest.TestCase):
             if r['receive']>4.5:r['u']=40 if int(r['receive']*10)%2 else 20
         self.assertEqual(analyze(rows,2,1,.5,2)['status'],'unresolved')
 
+class PreparationTests(unittest.TestCase):
+    def panel(self):
+        from types import SimpleNamespace
+        method=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='TimingPanel')
+        method=next(n for n in method.body if isinstance(n,ast.FunctionDef) and n.name=='prepare_poll')
+        import time
+        env={'time':time}
+        exec(compile(ast.Module(body=[method],type_ignores=[]),str(source),'exec'),env)
+        state=SimpleNamespace(model=None,preparing='model',setup_deadline=time.monotonic()+100)
+        return state,env['prepare_poll']
+    def test_wait_for_loading(self):
+        state,poll=self.panel()
+        poll(state)
+        self.assertEqual(state.preparing,'model')
+    def test_apply_camera_and_limits(self):
+        from types import SimpleNamespace
+        state,poll=self.panel();state.model=object();sent=[];settings={}
+        state.app=SimpleNamespace(values={k:SimpleNamespace(set=lambda v,k=k:settings.update({k:v})) for k in ('width','height','fps','quality','shutter_speed','analogue_gain')},send=lambda cmd,tracking:sent.append(cmd) or True)
+        state.status=SimpleNamespace(set=lambda v:None)
+        state.setup_command=lambda cmd,phase:sent.append(dict(cmd,phase=phase))
+        poll(state)
+        self.assertEqual(sent[0]['width'],1296)
+        self.assertEqual(sent[0]['height'],972)
+        self.assertIsNone(sent[0]['shutter_speed'])
+        self.assertEqual(sent[1]['tilt_min'],-15)
+        self.assertEqual(sent[1]['phase'],'limits')
+    def test_timeout(self):
+        state,poll=self.panel();state.setup_deadline=0
+        with self.assertRaises(ValueError):poll(state)
+
 if __name__=='__main__':unittest.main()

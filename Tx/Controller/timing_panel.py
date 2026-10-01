@@ -51,6 +51,7 @@ def analyze(samples, command_time, baseline, hold, floor):
 class TimingPanel(DetectionPanel):
     def __init__(self,parent,app):
         super().__init__(parent,app)
+        self.preparing=None; self.auto_measure=False; self.setup_pending=None
         self.active=False; self.samples=[]; self.results=[]; self.pending=None
         self.fields={}
         row=ttk.Frame(self); row.pack(fill='x',before=self.canvas)
@@ -66,8 +67,79 @@ class TimingPanel(DetectionPanel):
         row=ttk.Frame(self);row.pack(fill='x',before=self.canvas)
         ttk.Button(row,text='자동 측정 시작',command=lambda:self.guard(self.begin)).pack(side='left')
         ttk.Button(row,text='측정 중단',command=self.abort).pack(side='left')
-        self.measure_status=tk.StringVar(value='M1-2 범위 적용·초기 자세 이동 → 모델 로딩·검출 시작 → 자동 측정')
+        self.measure_status=tk.StringVar(value='검출 시작 / 자동 측정 시작 → 카메라·서보·모델 자동 준비')
         ttk.Label(row,textvariable=self.measure_status,wraplength=1000).pack(side='left')
+
+    def start(self):
+        self.prepare(False)
+
+    def prepare(self, auto_measure):
+        if self.active or self.preparing:
+            raise ValueError('측정 또는 자동 준비가 진행 중입니다.')
+        self.app.live.stop('M1-5 자동 준비')
+        self.app.detection.stop()
+        if self.app.live.pending or self.app.servo.pending:
+            raise ValueError('기존 명령 응답을 기다린 뒤 시작하세요.')
+        if not self.app.servo.online:
+            raise ValueError('Pi 제어 연결이 없습니다. 서버·Pi 실행 상태를 확인하세요.')
+        if self.model is None and self.future is None:
+            self.load()
+        elif self.future is not None and self.job[0] != 'load':
+            raise ValueError('검출 작업이 끝난 뒤 시작하세요.')
+        self.auto_measure=auto_measure
+        self.preparing='model'; self.setup_pending=None
+        self.setup_deadline=time.monotonic()+120
+        self.status.set('M1-5 자동 준비: 모델 로딩 대기')
+
+    def setup_command(self, command, next_phase):
+        token=uuid.uuid4().hex
+        if not self.app.send(dict(command, request_id=token),tracking=True):
+            raise ValueError('자동 준비 명령 전송 실패')
+        self.setup_pending=token;self.preparing=next_phase
+        self.setup_deadline=time.monotonic()+5
+
+    def prepare_poll(self):
+        now=time.monotonic()
+        if now>self.setup_deadline:
+            raise ValueError('자동 준비 시간 초과: '+self.preparing)
+        if self.preparing=='model':
+            if self.model is None:return
+            # Apply the settings established in M1-1 and M1-2.
+            camera=dict(width=1296,height=972,fps=30,quality=80,shutter_speed=None,analogue_gain=None)
+            for key,value in camera.items():self.app.values[key].set('' if value is None else str(value))
+            if not self.app.send(dict(cmd='preview',enable=True,**camera),tracking=True):
+                raise ValueError('카메라 시작 실패')
+            self.setup_command(dict(cmd='servo_config',pan_min=-180,pan_max=180,tilt_min=-15,tilt_max=40),'limits')
+            self.status.set('M1-5 자동 준비: 1296×972 / 30 FPS / quality 80 / 자동 노출·gain')
+        elif self.preparing=='move' and self.setup_pending is None:
+            self.setup_command(dict(cmd='move',pan=0,tilt=0,speed=100,acc=1),'arrival')
+        elif self.preparing=='arrival' and self.setup_pending is None:
+            self.preparing='frames';self.wait_until=now+2;self.setup_deadline=now+15
+        elif self.preparing=='frames' and now>=self.wait_until:
+            frame=self.app.current
+            if not frame or now-frame[2]>.5 or frame[2]<self.wait_until:return
+            requested=frame[1].get('requested',{})
+            if self.app.size!=(1296,972) or any(requested.get(k)!=v for k,v in dict(width=1296,height=972,fps=30,quality=80).items()):return
+            if frame[1].get('simulated'):raise ValueError('실제 카메라 영상이 필요합니다.')
+            self.preparing=None
+            auto=self.auto_measure
+            DetectionPanel.start(self)
+            self.auto_measure=auto
+            self.measure_status.set('자동 설정 완료 · PV 검출 확인 중')
+
+    def guard(self, fn):
+        try:
+            fn()
+        except Exception as exc:
+            import traceback
+            from tkinter import messagebox
+            phase=self.preparing or ('inference' if self.running else 'start/load')
+            self.preparing=None;self.auto_measure=False
+            self.stop()
+            message=str(exc)
+            self.status.set('M1-5 '+phase+' 오류: '+message)
+            self.app.record(dict(event='timing_error',phase=phase,message=message,traceback=traceback.format_exc()))
+            messagebox.showerror('M1-5 '+phase, message)
 
     def start_log(self):
         if not self.active: raise ValueError('M1-5는 자동 측정 시작 버튼으로 기록합니다.')
@@ -83,6 +155,8 @@ class TimingPanel(DetectionPanel):
 
     def begin(self):
         if self.active:raise ValueError('이미 측정 중')
+        if not self.running:
+            self.prepare(True);return
         servo=self.app.servo
         if not self.running or not self.latest:raise ValueError('모델 로딩 후 검출부터 시작하세요.')
         if not servo.online or servo.pending or self.app.live.pending or not servo.last or servo.simulated is not False:
@@ -123,6 +197,23 @@ class TimingPanel(DetectionPanel):
         self.measure_status.set(f'측정 시작 · {len(plan)}회 이동 · {self.folder}')
 
     def event(self,event):
+        if self.preparing:
+            if event.get('request_id')==self.setup_pending:
+                if event.get('event')=='error':
+                    self.guard(lambda: (_ for _ in ()).throw(ValueError(event.get('message','자동 설정 실패'))));return
+                if event.get('event')=='servo':
+                    self.setup_pending=None
+                    if event.get('simulated') or not event.get('available'):
+                        self.guard(lambda: (_ for _ in ()).throw(ValueError('실제 서보 연결이 필요합니다.')));return
+                    servo=self.app.servo
+                    servo.limits=event.get('limits');servo.simulated=event.get('simulated')
+                    if self.preparing=='limits':
+                        for key,value in servo.limits.items():servo.vars[key].set(str(value))
+                        self.preparing='move'
+                    if event.get('commanded'):
+                        servo.last=event['commanded']
+                        for key in ('pan','tilt','speed','acc'):servo.vars[key].set(str(servo.last[key]))
+            return
         if not self.active:return
         if event.get('event') in ('network','agent') and (event.get('state')=='disconnected' or event.get('agent_state')=='disconnected'):
             self.abort('연결 끊김');return
@@ -149,6 +240,11 @@ class TimingPanel(DetectionPanel):
 
     def poll(self):
         super().poll()
+        if self.preparing:
+            self.prepare_poll();return
+        if self.auto_measure and self.running and self.latest:
+            self.auto_measure=False
+            self.begin()
         if not self.active:return
         now=time.monotonic()
         if not self.app.current or now-self.app.current[2]>0.5:
@@ -178,6 +274,9 @@ class TimingPanel(DetectionPanel):
             self.samples=[];self.phase='baseline';self.baseline_start=now;self.deadline=now+self.cfg['baseline']
 
     def abort(self,reason='사용자 중단'):
+        if self.preparing:
+            self.preparing=None;self.auto_measure=False
+            self.measure_status.set(reason+' · 자동 준비 중단 (이미 전송된 명령은 취소되지 않음)')
         if not self.active:return
         self.active=False
         self.sample_file.close();self.event_file.close()
@@ -196,5 +295,6 @@ class TimingPanel(DetectionPanel):
         self.app.record(dict(event='timing_measurement_end',reason=reason,folder=str(self.folder)))
 
     def stop(self):
+        self.preparing=None
         if getattr(self,'active',False):self.abort('검출 정지')
         super().stop()
