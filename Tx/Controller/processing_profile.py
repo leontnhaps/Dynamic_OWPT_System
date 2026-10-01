@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from PIL import Image, ImageTk
 from Tx.Controller.detection_panel import PVDetector
+from common.pv_detection import TARGET_SELECTION
 
 
 def describe(values):
@@ -47,7 +48,7 @@ class ProcessingProfile:
         self.settings=(confidence,class_id);self.model=None
         self.folder=self.app.stage_dir('M1-5')/('processing_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'));self.folder.mkdir()
         self.config=dict(camera=cfg,model_path=p.path.get(),device=device,confidence=confidence,class_id=class_id,
-            phase_seconds=30,warmup_seconds=2,repetitions=3,schema_version=2,
+            phase_seconds=30,warmup_seconds=2,repetitions=3,schema_version=2,target_selection=TARGET_SELECTION,
             pipeline='inference_first_visible_render',poll_interval_ms=5,render_interval_ms=33,
             clock_resolution_s=time.get_clock_info('monotonic').resolution,
             note='Stationary test. No servo commands. Laptop monotonic clock only. Pi clocks remain separate. Frames CSV contains actual visible renders (YOLO mode reuses decoded inference images). Processing CSV includes all in-window results, with blank render fields for undisplayed results. Render timestamps mark widget update return, not monitor scanout.')

@@ -4,10 +4,11 @@ import math
 from pathlib import Path
 import statistics
 import unittest
+from common.pv_detection import selected_observation_valid
 source=Path(__file__).resolve().parents[1]/'Tx/Controller/timing_panel.py'
 tree=ast.parse(source.read_text())
 fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='analyze')
-ns={'math':math,'statistics':statistics}
+ns={'math':math,'statistics':statistics,'selected_observation_valid':selected_observation_valid}
 exec(compile(ast.Module(body=[fn],type_ignores=[]),str(source),'exec'),ns)
 analyze=ns['analyze']
 
@@ -40,8 +41,20 @@ class TimingTests(unittest.TestCase):
         for row in rows:
             if 2.2<=row['receive']<=2.6:row['status']='missing'
         self.assertEqual(analyze(rows,2,1,.5,2)['status'],'invalid_detection')
-    def test_multiple(self):
-        rows=self.rows();rows[15]['count']=2
+    def test_multiple_uses_selected_pv_in_baseline_response_and_endpoint(self):
+        rows=self.rows()
+        for row in rows:row['count']=2
+        result=analyze(rows,2,1,.5,2)
+        self.assertEqual(result['status'],'valid')
+        self.assertAlmostEqual(result['settled_s'],.3)
+    def test_invalid_selected_coordinates_are_rejected(self):
+        for value in (None,float('nan'),float('inf')):
+            rows=self.rows();rows[15].update(count=2,u=value)
+            self.assertEqual(analyze(rows,2,1,.5,2)['status'],'invalid_detection')
+    def test_multiple_does_not_override_stale_or_missing(self):
+        rows=self.rows();rows[15].update(count=2,status='stale')
+        self.assertEqual(analyze(rows,2,1,.5,2)['status'],'invalid_detection')
+        rows=self.rows();rows[-1].update(count=0,status='missing')
         self.assertEqual(analyze(rows,2,1,.5,2)['status'],'invalid_detection')
     def test_no_movement(self):
         rows=self.rows()

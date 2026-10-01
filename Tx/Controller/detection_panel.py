@@ -9,7 +9,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageDraw, ImageTk
-from Tx.Controller.live_core import target_from_boxes, fresh
+from Tx.Controller.live_core import fresh
+from common.pv_detection import TARGET_SELECTION, target_from_boxes
 from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 
 
@@ -135,6 +136,7 @@ class DetectionPanel(ttk.Frame):
         folder = self.app.stage_dir('M1-3') / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         folder.mkdir()
         settings = dict(model=self.loaded, confidence=self.settings[0], class_id=self.settings[1],
+                        target_selection=TARGET_SELECTION,
                         coordinate_system='original image pixels; origin top-left',
                         note='Latest-frame sampling; unprocessed camera frames are not detection misses.')
         (folder/'session.json').write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding='utf-8')

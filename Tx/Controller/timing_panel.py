@@ -10,13 +10,14 @@ from tkinter import ttk
 import tkinter as tk
 from Tx.Controller.detection_panel import DetectionPanel
 from common.servo import move_from
+from common.pv_detection import TARGET_SELECTION, selected_observation_valid
 from Tx.Controller.processing_profile import ProcessingProfile
 
 
 def analyze(samples, command_time, baseline, hold, floor):
     before = [s for s in samples if command_time-baseline <= s['receive'] < command_time]
     after = [s for s in samples if s['receive'] >= command_time]
-    valid = lambda s: s['status'] == 'detected' and s['count'] == 1
+    valid = selected_observation_valid
     result = dict(status='invalid_detection', onset_s=None, settled_s=None,
                   missing_frames=sum(s['status']=='missing' for s in after),
                   allowed_missing_gap_s=0.35)
@@ -198,8 +199,8 @@ class TimingPanel(DetectionPanel):
         if not self.running or not self.latest:raise ValueError('모델 로딩 후 검출부터 시작하세요.')
         if not servo.online or servo.pending or self.app.live.pending or not servo.last or servo.simulated is not False:
             raise ValueError('실제 Pi 연결·범위 적용·초기 자세 이동을 먼저 확인하세요.')
-        if self.latest[2]['count']!=1 or self.latest[2]['status']!='detected' or time.monotonic()-self.latest[1][2]>0.5:
-            raise ValueError('최신 영상에 고정 PV 하나가 검출되어야 합니다.')
+        if not selected_observation_valid(self.latest[2]) or time.monotonic()-self.latest[1][2]>0.5:
+            raise ValueError('최신 영상에서 최고 confidence PV의 유효 좌표가 필요합니다.')
         cfg={k:float(self.fields[k].get()) for k in ('baseline','window','hold','floor','missing_timeout')}
         cfg['retries']=int(self.fields['retries'].get())
         if not 0<=cfg['retries']<=10:raise ValueError('재시도는 0~10회')
@@ -222,10 +223,10 @@ class TimingPanel(DetectionPanel):
         self.cfg=cfg;self.plan=plan;self.origin=origin;self.index=0
         self.samples=[];self.results=[];self.pending=None;self.attempt=0;self.missing_since=None
         self.folder=self.app.stage_dir('M1-5')/datetime.now().strftime('%Y%m%d_%H%M%S_%f');self.folder.mkdir()
-        session=dict(cfg,analysis_version=2,allowed_missing_gap_s=0.35,max_missing_fraction=0.10,steps=steps,repeats=repeats,origin=origin,servo=servo.context(),
+        session=dict(cfg,analysis_version=3,target_selection=TARGET_SELECTION,allowed_missing_gap_s=0.35,max_missing_fraction=0.10,steps=steps,repeats=repeats,origin=origin,servo=servo.context(),
                      model=self.loaded,confidence=self.settings[0],class_id=self.settings[1],
                      camera={k:v.get() for k,v in self.app.values.items()},
-                     note='Laptop monotonic clock. Visual response includes command/video transport; not pure servo latency. Fixed single PV required. No actual angle feedback.')
+                     note='Laptop monotonic clock. Visual response includes command/video transport; not pure servo latency. Stationary target; highest-confidence valid PV selected per frame. Candidate count is diagnostic, not a rejection criterion. No actual angle feedback.')
         (self.folder/'session.json').write_text(json.dumps(session,ensure_ascii=False,indent=2),encoding='utf-8')
         self.sample_file=(self.folder/'detections.csv').open('w',newline='',encoding='utf-8')
         self.sample_writer=csv.DictWriter(self.sample_file,fieldnames=['trial','attempt','phase','receive','processed','receive_unix_ns','seq','status','count','u','v','confidence','inference_ms','result_age_s'])
@@ -303,7 +304,7 @@ class TimingPanel(DetectionPanel):
             return
         if self.phase=='baseline':
             recent=[s for s in self.samples if s['receive']>=now-self.cfg['baseline']]
-            if len(recent)<5 or any(s['status']!='detected' or s['count']!=1 for s in recent):
+            if len(recent)<5 or any(not selected_observation_valid(s) for s in recent):
                 self.retry_trial(dict(status='invalid_baseline',onset_s=None,settled_s=None));return
             axis,delta,target=self.plan[self.index]
             cmd=dict(cmd='move',request_id=uuid.uuid4().hex,**move_from(dict(self.app.servo.values(),**target),self.app.servo.limits))
