@@ -39,6 +39,7 @@ class ProfileTests(unittest.TestCase):
             p.rows=[dict(phase=1,worker_ms=40),dict(phase=1,worker_ms=60)]
             p.frames=[dict(phase=0,gui_work_ms=10)]
             p.events=[dict(event='preview_timing',mean={'send_ms':.4})]
+            p.receipts=[]
             p.phases=[dict(index=0,mode='video'),dict(index=1,mode='yolo')]
             p.config={'note':'separate clocks'}
             p.panel=SimpleNamespace(measure_status=SimpleNamespace(set=lambda x:None))

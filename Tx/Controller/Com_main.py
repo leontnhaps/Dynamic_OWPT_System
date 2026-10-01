@@ -27,7 +27,8 @@ class App:
         self.logpath=self.out/('events_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'.jsonl')
         root.title('Dynamic OWPT — M2 Calibration Capture');root.geometry('1250x950')
         root.protocol('WM_DELETE_WINDOW',self.close)
-        tabs=ttk.Notebook(root);tabs.pack(fill='x')
+        tabs=ttk.Notebook(root);tabs.pack(fill='x');self.tabs=tabs
+        self.received_count=0;self.preview_frame=None;self.closing=False;self.status_mark=0
         camera_tab=ttk.Frame(tabs);tabs.add(camera_tab,text='M1-1 (Camera)')
         self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='M1-2 (Pan/Tilt)')
         self.detection=DetectionPanel(tabs,self);tabs.add(self.detection,text='M1-3 (PV 검출)')
@@ -53,10 +54,13 @@ class App:
         self.stats_log=self.make_log(logs,'실시간 수신 통계 (receive_stats)')
         self.preview=ttk.Label(root,anchor='center');self.preview.pack(expand=True,fill='both')
         def show_preview(event=None):
+            if self.timing.profile.running and tabs.select()!=str(self.timing):
+                self.timing.profile.finish('탭 변경으로 처리 시간 측정 중단')
             if tabs.select() in (str(self.live),str(self.detection),str(self.timing)):self.preview.pack_forget()
             else:self.preview.pack(expand=True,fill='both')
         tabs.bind('<<NotebookTabChanged>>',show_preview)
-        root.after(30,self.poll)
+        root.after(5,self.poll)
+        root.after(33,self.render)
     def make_log(self,parent,title):
         panel=ttk.LabelFrame(parent,text=title,padding=4)
         parent.add(panel,weight=1)
@@ -125,6 +129,8 @@ class App:
         path.with_suffix('.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding='utf-8')
         self.record(dict(event='saved',file=str(path),m1_2=self.servo.context()))
     def poll(self):
+        if self.closing:return
+        started=time.monotonic()
         try:
             for _ in range(100):
                 event=self.net.events.get_nowait();kind=event.get('event')
@@ -143,26 +149,50 @@ class App:
         self.servo.tick()
         self.capture.poll()
         frame,count=self.net.pop();now=time.monotonic()
-        if now-self.mark>=1:
-            self.fps=(count-self.previous)/(now-self.mark);self.previous=count;self.mark=now
-            self.record(dict(event='receive_stats',fps=self.fps,total=count))
+        self.received_count=count
         if frame:
             try:
-                display_start=time.monotonic()
-                image=Image.open(io.BytesIO(frame[0]));self.size=image.size
-                image.thumbnail((1000,480),Image.Resampling.LANCZOS)
-                photo=ImageTk.PhotoImage(image);self.preview.configure(image=photo);self.preview.image=photo
+                # Reading the JPEG header does not decode its pixels.
+                with Image.open(io.BytesIO(frame[0])) as image:self.size=image.size
                 self.current=frame
-                self.timing.profile.frame(frame,display_start,time.monotonic(),count)
+                self.timing.profile.received(frame,count)
             except (ValueError,OSError) as exc:self.record(dict(event='decode_error',message=str(exc)))
-        if self.current:
-            age=now-self.current[2];meta=self.current[1]
-            self.status.set(f'{"SIMULATION | " if meta["simulated"] else ""}Frame {meta["seq"]} | {self.size} | receive {self.fps:.1f} fps | last receive {age:.2f}s ago'+(' — STALE / STOPPED' if age>2 else ''))
+        # Submit inference and consume results before any image rendering.
         self.detection.guard(self.detection.poll)
         self.live.guard(self.live.poll)
         self.timing.guard(self.timing.poll)
-        self.root.after(30,self.poll)
+        if now-self.mark>=1:
+            self.fps=(count-self.previous)/(now-self.mark);self.previous=count;self.mark=now
+            self.record(dict(event='receive_stats',fps=self.fps,total=count))
+        if self.current and now-self.status_mark>=.2:
+            self.status_mark=now
+            age=now-self.current[2];meta=self.current[1]
+            self.status.set(f'{"SIMULATION | " if meta["simulated"] else ""}Frame {meta["seq"]} | {self.size} | receive {self.fps:.1f} fps | last receive {age:.2f}s ago'+(' — STALE / STOPPED' if age>2 else ''))
+        self.root.after(max(1,5-int((time.monotonic()-started)*1000)),self.poll)
+
+    def render(self):
+        if self.closing:return
+        started=time.monotonic()
+        try:
+            selected=self.tabs.select()
+            if selected==str(self.timing) and self.timing.profile.running:
+                self.timing.profile.render()
+            elif selected in (str(self.detection),str(self.timing),str(self.live)):
+                panel=next(p for p in (self.detection,self.timing,self.live) if str(p)==selected)
+                panel.render()
+            elif self.current and self.current[2]!=self.preview_frame:
+                image=Image.open(io.BytesIO(self.current[0]))
+                image.thumbnail((1000,480),Image.Resampling.LANCZOS)
+                photo=ImageTk.PhotoImage(image);self.preview.configure(image=photo);self.preview.image=photo
+                self.preview_frame=self.current[2]
+        except (ValueError,OSError,tk.TclError) as exc:
+            self.record(dict(event='render_error',message=str(exc)))
+            if self.timing.profile.running:self.timing.profile.finish('화면 갱신 오류: '+str(exc))
+        finally:
+            self.root.after(max(1,33-int((time.monotonic()-started)*1000)),self.render)
+
     def close(self):
+        self.closing=True
         self.timing.close()
         self.detection.close()
         self.live.close()
@@ -174,6 +204,4 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders (M1-1, M1-2, M1-3, M2, M4)')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()
-
-
 
