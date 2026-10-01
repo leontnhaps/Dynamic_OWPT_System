@@ -14,6 +14,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from Tx.Controller.network_client import Network
 from Tx.Controller.servo_panel import ServoPanel
 from Tx.Controller.detection_panel import DetectionPanel
+from Tx.Controller.timing_panel import TimingPanel
 from Tx.Controller.capture_panel import CapturePanel
 from Tx.Controller.learning_panel import LearningPanel as LivePanel
 
@@ -30,6 +31,7 @@ class App:
         camera_tab=ttk.Frame(tabs);tabs.add(camera_tab,text='M1-1 (Camera)')
         self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='M1-2 (Pan/Tilt)')
         self.detection=DetectionPanel(tabs,self);tabs.add(self.detection,text='M1-3 (PV 검출)')
+        self.timing=TimingPanel(tabs,self);tabs.add(self.timing,text='M1-5 (응답 · 제어 시간)')
         self.capture=CapturePanel(tabs,self);tabs.add(self.capture,text='M2 (사진 · Calibration)')
         self.live=LivePanel(tabs,self);tabs.add(self.live,text='M4 (실전 · YOLO + SAC)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
@@ -51,7 +53,7 @@ class App:
         self.stats_log=self.make_log(logs,'실시간 수신 통계 (receive_stats)')
         self.preview=ttk.Label(root,anchor='center');self.preview.pack(expand=True,fill='both')
         def show_preview(event=None):
-            if tabs.select() in (str(self.live),str(self.detection)):self.preview.pack_forget()
+            if tabs.select() in (str(self.live),str(self.detection),str(self.timing)):self.preview.pack_forget()
             else:self.preview.pack(expand=True,fill='both')
         tabs.bind('<<NotebookTabChanged>>',show_preview)
         root.after(30,self.poll)
@@ -79,10 +81,15 @@ class App:
         if follow.get():widget.see('end')
         widget.configure(state='disabled')
     def send(self,cmd,tracking=False):
+        if hasattr(self,'timing') and self.timing.active and tracking and cmd.get('request_id') != self.timing.pending:
+            self.timing.abort('다른 추적 명령으로 측정 중단')
+            return False
         if not tracking and hasattr(self,'live') and cmd.get('cmd') in ('move','servo_config','preview','outputs_off'):
             self.live.stop('수동 명령으로 실전 추적 중단')
             if self.live.pending and cmd.get('cmd') in ('move','servo_config'):
                 messagebox.showerror('실전 테스트','전송된 추적 명령의 응답을 기다리세요.');return False
+        if hasattr(self,'timing') and self.timing.active and not tracking and cmd.get('cmd') in ('move','servo_config','preview','outputs_off'):
+            self.timing.abort('수동 명령으로 측정 중단')
         try:
             self.net.send(cmd);self.record(dict(event='command',command=cmd));return True
         except OSError as exc:
@@ -122,6 +129,7 @@ class App:
                 self.servo.event(event)
                 self.capture.event(event)
                 self.live.event(event)
+                self.timing.event(event)
                 if kind=='network':self.links[str(event['port'])]=event['state']
                 if kind in ('hello','agent'):self.links['Pi']=event.get('agent_state',event.get('state'))
                 if kind=='pong':
@@ -148,8 +156,10 @@ class App:
             self.status.set(f'{"SIMULATION | " if meta["simulated"] else ""}Frame {meta["seq"]} | {self.size} | receive {self.fps:.1f} fps | last receive {age:.2f}s ago'+(' — STALE / STOPPED' if age>2 else ''))
         self.detection.guard(self.detection.poll)
         self.live.guard(self.live.poll)
+        self.timing.guard(self.timing.poll)
         self.root.after(30,self.poll)
     def close(self):
+        self.timing.close()
         self.detection.close()
         self.live.close()
         try:self.net.send(dict(cmd='outputs_off'))
@@ -160,5 +170,6 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders (M1-1, M1-2, M1-3, M2, M4)')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()
+
 
 
