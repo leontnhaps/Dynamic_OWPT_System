@@ -21,6 +21,24 @@ class TimingTests(unittest.TestCase):
         self.assertAlmostEqual(r['settled_s'],.3)
     def test_missing(self):
         rows=self.rows();rows[15]['status']='missing'
+        self.assertEqual(analyze(rows,2,1,.5,2)['status'],'valid')
+    def test_transition_missing_bounds(self):
+        rows=self.rows()
+        for row in rows:
+            if 2.2<=row['receive']<=2.3:row['status']='missing'
+        r=analyze(rows,2,1,.5,2)
+        self.assertEqual(r['status'],'valid')
+        self.assertEqual(r['missing_frames'],2)
+        self.assertAlmostEqual(r['onset_lower_s'],.1)
+        self.assertAlmostEqual(r['onset_upper_s'],.4)
+        self.assertAlmostEqual(r['onset_uncertainty_s'],.3)
+    def test_terminal_missing_rejected(self):
+        rows=self.rows();rows[-2]['status']='missing'
+        self.assertEqual(analyze(rows,2,1,.5,2)['status'],'invalid_detection')
+    def test_long_missing_rejected(self):
+        rows=self.rows()
+        for row in rows:
+            if 2.2<=row['receive']<=2.6:row['status']='missing'
         self.assertEqual(analyze(rows,2,1,.5,2)['status'],'invalid_detection')
     def test_multiple(self):
         rows=self.rows();rows[15]['count']=2

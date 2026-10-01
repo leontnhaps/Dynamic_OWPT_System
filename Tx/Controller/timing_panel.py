@@ -15,38 +15,62 @@ from common.servo import move_from
 def analyze(samples, command_time, baseline, hold, floor):
     before = [s for s in samples if command_time-baseline <= s['receive'] < command_time]
     after = [s for s in samples if s['receive'] >= command_time]
-    invalid = lambda s: s['status'] != 'detected' or s['count'] != 1
-    if len(before) < 5 or len(after) < 5 or any(invalid(s) for s in before+after):
-        return {'status': 'invalid_detection', 'onset_s': None, 'settled_s': None}
+    valid = lambda s: s['status'] == 'detected' and s['count'] == 1
+    result = dict(status='invalid_detection', onset_s=None, settled_s=None,
+                  missing_frames=sum(s['status']=='missing' for s in after),
+                  allowed_missing_gap_s=0.35)
+    # Baseline and terminal stable window still require reliable observations.
+    if len(before)<5 or len(after)<5 or any(not valid(s) for s in before):return result
+    if any(not valid(s) and s['status']!='missing' for s in after):return result
+    observed = [s for s in after if valid(s)]
+    if len(observed)<5 or result['missing_frames']/len(after)>0.10:return result
+    if not valid(after[-1]):return result
+    # Bound every missing run by actual detections; no interpolation of positions.
+    previous=before[-1];missing=False;max_missing_gap=0
+    for sample in after:
+        if not valid(sample):missing=True;continue
+        if missing:
+            gap=sample['receive']-previous['receive']
+            max_missing_gap=max(max_missing_gap,gap)
+            if gap>result['allowed_missing_gap_s']:return result
+        previous=sample;missing=False
+    result['max_missing_gap_s']=max_missing_gap
     center = [statistics.median(s[a] for s in before) for a in ('u', 'v')]
-    noise = max(math.hypot(s['u']-center[0], s['v']-center[1]) for s in before)
+    distance = lambda s,p: math.hypot(s['u']-p[0],s['v']-p[1])
+    noise = max(distance(s,center) for s in before)
     threshold = max(floor, 3*noise)
     times = [s['receive'] for s in before+after]
     gap = max(b-a for a,b in zip(times,times[1:]))
     endpoint = [s for s in after if s['receive'] >= after[-1]['receive']-hold]
+    if len(endpoint)<5 or any(not valid(s) for s in endpoint):return result
     final = [statistics.median(s[a] for s in endpoint) for a in ('u','v')]
     displacement = math.hypot(final[0]-center[0], final[1]-center[1])
-    result = dict(status='unresolved', onset_s=None, settled_s=None,
-                  threshold_px=threshold, displacement_px=displacement,
-                  max_sample_gap_s=gap, delta_u=final[0]-center[0], delta_v=final[1]-center[1])
+    result.update(status='unresolved', threshold_px=threshold,displacement_px=displacement,
+                  max_sample_gap_s=gap,delta_u=final[0]-center[0],delta_v=final[1]-center[1])
     if gap > hold/2:
-        result['status']='insufficient_sampling'; return result
+        result['status']='insufficient_sampling';return result
     if displacement <= 2*threshold:
-        result['status']='movement_too_small'; return result
-    for i,s in enumerate(after[:-1]):
-        if all(math.hypot(x['u']-center[0],x['v']-center[1]) > threshold for x in after[i:i+2]):
-            result['onset_s']=s['receive']-command_time
-            result['onset_previous_s']=(after[i-1]['receive'] if i else before[-1]['receive'])-command_time
+        result['status']='movement_too_small';return result
+    last_inside=before[-1]
+    for i,s in enumerate(observed[:-1]):
+        if distance(s,center)<=threshold:
+            last_inside=s;continue
+        following=observed[i+1]
+        if distance(following,center)>threshold and following['receive']-s['receive']<=result['allowed_missing_gap_s']:
+            lower=max(0,last_inside['receive']-command_time)
+            upper=s['receive']-command_time
+            result.update(onset_s=upper,onset_previous_s=lower,
+                          onset_lower_s=lower,onset_upper_s=upper,onset_uncertainty_s=upper-lower)
             break
     for i,s in enumerate(after):
         tail=after[i:]
-        if tail[-1]['receive']-s['receive'] >= hold and all(
-                math.hypot(x['u']-final[0],x['v']-final[1]) <= threshold for x in tail):
-            result['settled_s']=s['receive']-command_time; break
+        if (result['onset_s'] is not None and s['receive']-command_time>=result['onset_s']
+                and tail[-1]['receive']-s['receive']>=hold and len(tail)>=5
+                and all(valid(x) and distance(x,final)<=threshold for x in tail)):
+            result['settled_s']=s['receive']-command_time;break
     if result['onset_s'] is not None and result['settled_s'] is not None:
         result['status']='valid'
     return result
-
 
 def missing_timeout(status, stamp, since, limit):
     if status != 'missing':return None, False
@@ -193,7 +217,7 @@ class TimingPanel(DetectionPanel):
         self.cfg=cfg;self.plan=plan;self.origin=origin;self.index=0
         self.samples=[];self.results=[];self.pending=None;self.attempt=0;self.missing_since=None
         self.folder=self.app.stage_dir('M1-5')/datetime.now().strftime('%Y%m%d_%H%M%S_%f');self.folder.mkdir()
-        session=dict(cfg,steps=steps,repeats=repeats,origin=origin,servo=servo.context(),
+        session=dict(cfg,analysis_version=2,allowed_missing_gap_s=0.35,max_missing_fraction=0.10,steps=steps,repeats=repeats,origin=origin,servo=servo.context(),
                      model=self.loaded,confidence=self.settings[0],class_id=self.settings[1],
                      camera={k:v.get() for k,v in self.app.values.items()},
                      note='Laptop monotonic clock. Visual response includes command/video transport; not pure servo latency. Fixed single PV required. No actual angle feedback.')
