@@ -48,6 +48,12 @@ def analyze(samples, command_time, baseline, hold, floor):
     return result
 
 
+def missing_timeout(status, stamp, since, limit):
+    if status != 'missing':return None, False
+    since=stamp if since is None else since
+    return since, stamp-since>=limit
+
+
 class TimingPanel(DetectionPanel):
     def __init__(self,parent,app):
         super().__init__(parent,app)
@@ -57,10 +63,12 @@ class TimingPanel(DetectionPanel):
         row=ttk.Frame(self); row.pack(fill='x',before=self.canvas)
         for label,key,value in [('이동각°','steps','1,3,5'),('반복','repeats','10'),
                 ('기준 기록초','baseline','2'),('이동 관측초','window','3'),
-                ('안정 유지초','hold','0.5'),('최소 문턱px','floor','2')]:
+                ('안정 유지초','hold','0.5'),('최소 문턱px','floor','2'),
+                ('연속 미검출초','missing_timeout','1'),('재시도','retries','2')]:
             # Labels are localized below for the existing Korean GUI.
             labels={'steps':'이동각°','repeats':'반복','baseline':'기준 기록초',
-                    'window':'이동 관측초','hold':'안정 유지초','floor':'최소 문턱px'}
+                    'window':'이동 관측초','hold':'안정 유지초','floor':'최소 문턱px',
+                    'missing_timeout':'연속 미검출초','retries':'재시도'}
             ttk.Label(row,text=labels[key]).pack(side='left')
             var=tk.StringVar(value=value);self.fields[key]=var
             ttk.Entry(row,textvariable=var,width=7).pack(side='left')
@@ -163,10 +171,12 @@ class TimingPanel(DetectionPanel):
             raise ValueError('실제 Pi 연결·범위 적용·초기 자세 이동을 먼저 확인하세요.')
         if self.latest[2]['count']!=1 or self.latest[2]['status']!='detected' or time.monotonic()-self.latest[1][2]>0.5:
             raise ValueError('최신 영상에 고정 PV 하나가 검출되어야 합니다.')
-        cfg={k:float(self.fields[k].get()) for k in ('baseline','window','hold','floor')}
+        cfg={k:float(self.fields[k].get()) for k in ('baseline','window','hold','floor','missing_timeout')}
+        cfg['retries']=int(self.fields['retries'].get())
+        if not 0<=cfg['retries']<=10:raise ValueError('재시도는 0~10회')
         steps=[float(s) for s in self.fields['steps'].get().split(',')]
         repeats=int(self.fields['repeats'].get())
-        if not all(math.isfinite(x) and x>0 for x in cfg.values()) or cfg['hold']>=cfg['window'] or cfg['baseline']<1:
+        if not all(math.isfinite(x) and x>0 for k,x in cfg.items() if k!='retries') or cfg['hold']>=cfg['window'] or cfg['baseline']<1:
             raise ValueError('양의 유한 설정값, 기준 기록 ≥1초, 안정 유지 < 이동 관측 필요')
         if not steps or not all(math.isfinite(x) and x>=1 and x.is_integer() for x in steps) or not 1<=repeats<=100:
             raise ValueError('이동각은 1° 이상 정수, 반복은 1~100')
@@ -181,7 +191,7 @@ class TimingPanel(DetectionPanel):
                     for _ in range(repeats):
                         plan.extend([(axis,sign*step,target),(axis,-sign*step,dict(origin))])
         self.cfg=cfg;self.plan=plan;self.origin=origin;self.index=0
-        self.samples=[];self.results=[];self.pending=None
+        self.samples=[];self.results=[];self.pending=None;self.attempt=0;self.missing_since=None
         self.folder=self.app.stage_dir('M1-5')/datetime.now().strftime('%Y%m%d_%H%M%S_%f');self.folder.mkdir()
         session=dict(cfg,steps=steps,repeats=repeats,origin=origin,servo=servo.context(),
                      model=self.loaded,confidence=self.settings[0],class_id=self.settings[1],
@@ -189,7 +199,7 @@ class TimingPanel(DetectionPanel):
                      note='Laptop monotonic clock. Visual response includes command/video transport; not pure servo latency. Fixed single PV required. No actual angle feedback.')
         (self.folder/'session.json').write_text(json.dumps(session,ensure_ascii=False,indent=2),encoding='utf-8')
         self.sample_file=(self.folder/'detections.csv').open('w',newline='',encoding='utf-8')
-        self.sample_writer=csv.DictWriter(self.sample_file,fieldnames=['trial','receive','processed','receive_unix_ns','seq','status','count','u','v','confidence','inference_ms','result_age_s'])
+        self.sample_writer=csv.DictWriter(self.sample_file,fieldnames=['trial','attempt','phase','receive','processed','receive_unix_ns','seq','status','count','u','v','confidence','inference_ms','result_age_s'])
         self.sample_writer.writeheader()
         self.event_file=(self.folder/'commands.jsonl').open('w',encoding='utf-8')
         self.active=True;self.phase='baseline';self.baseline_start=time.monotonic();self.deadline=self.baseline_start+cfg['baseline']
@@ -232,11 +242,13 @@ class TimingPanel(DetectionPanel):
         if not self.active or frame[2]<self.baseline_start:return
         target=result['target'];status='detected' if target else 'missing'
         if now-frame[2]>0.5 or frame[1].get('simulated'):status='stale'
-        row=dict(trial=self.index,receive=frame[2],processed=now,receive_unix_ns=frame[3],seq=frame[1].get('seq'),
+        row=dict(trial=self.index,attempt=self.attempt,phase=self.phase,receive=frame[2],processed=now,receive_unix_ns=frame[3],seq=frame[1].get('seq'),
                  status=status,count=result['count'],u=target['center'][0] if target else None,
                  v=target['center'][1] if target else None,confidence=target['confidence'] if target else None,
                  inference_ms=result['inference_ms'],result_age_s=now-frame[2])
         self.samples.append(row);self.sample_writer.writerow(row);self.sample_file.flush()
+        self.missing_since, exceeded=missing_timeout(status,frame[2],self.missing_since,self.cfg['missing_timeout'])
+        if exceeded:self.abort('연속 미검출 시간 초과')
 
     def poll(self):
         super().poll()
@@ -251,27 +263,52 @@ class TimingPanel(DetectionPanel):
             self.abort('영상 지연 / 중단');return
         if self.pending and now-self.command_time>5:self.abort('명령 응답 시간 초과');return
         if now<self.deadline:return
+        if self.phase=='retry_return':
+            if self.pending:return
+            self.samples=[];self.phase='baseline';self.baseline_start=now
+            self.deadline=now+self.cfg['baseline']
+            self.measure_status.set(f'{self.index+1}/{len(self.plan)} · 재시도 {self.attempt}/{self.cfg["retries"]} 기준 기록')
+            return
         if self.phase=='baseline':
             recent=[s for s in self.samples if s['receive']>=now-self.cfg['baseline']]
             if len(recent)<5 or any(s['status']!='detected' or s['count']!=1 for s in recent):
-                self.abort('기준 구간 검출 부족');return
+                self.retry_trial(dict(status='invalid_baseline',onset_s=None,settled_s=None));return
             axis,delta,target=self.plan[self.index]
             cmd=dict(cmd='move',request_id=uuid.uuid4().hex,**move_from(dict(self.app.servo.values(),**target),self.app.servo.limits))
             self.pending=cmd['request_id'];self.command_time=now
             if not self.app.send(cmd,tracking=True):self.abort('전송 실패');return
-            self.event_file.write(json.dumps(dict(command=cmd,gui_monotonic=now,trial=self.index),ensure_ascii=False)+'\n');self.event_file.flush()
+            self.event_file.write(json.dumps(dict(command=cmd,gui_monotonic=now,trial=self.index,attempt=self.attempt,phase=self.phase),ensure_ascii=False)+'\n');self.event_file.flush()
             self.phase='response';self.deadline=now+self.cfg['window']
             self.measure_status.set(f'{self.index+1}/{len(self.plan)} · {axis} {delta:+g}° 응답 기록')
         else:
             if self.pending:return
             axis,delta,target=self.plan[self.index]
             result=analyze(self.samples,self.command_time,self.cfg['baseline'],self.cfg['hold'],self.cfg['floor'])
-            result.update(trial=self.index,axis=axis,delta_deg=delta,target=target)
+            result.update(trial=self.index,axis=axis,delta_deg=delta,target=target,attempt=self.attempt)
+            if result['status']!='valid':self.retry_trial(result);return
             self.results.append(result)
-            if result['status']!='valid':self.abort('응답 판정 실패: '+result['status']);return
-            self.index+=1
+            self.index+=1;self.attempt=0
             if self.index>=len(self.plan):self.abort('측정 완료');return
             self.samples=[];self.phase='baseline';self.baseline_start=now;self.deadline=now+self.cfg['baseline']
+
+    def retry_trial(self, result):
+        axis,delta,target=self.plan[self.index]
+        result.update(trial=self.index,attempt=self.attempt,axis=axis,delta_deg=delta,target=target)
+        self.results.append(result)
+        if self.attempt>=self.cfg['retries']:
+            self.abort('재시도 횟수 초과: '+result['status']);return
+        self.attempt+=1
+        # Re-establish this trial's starting command, not its final target.
+        start=self.origin if self.index==0 else self.plan[self.index-1][2]
+        now=time.monotonic()
+        cmd=dict(cmd='move',request_id=uuid.uuid4().hex,
+                 **move_from(dict(self.app.servo.values(),**start),self.app.servo.limits))
+        self.pending=cmd['request_id'];self.command_time=now
+        if not self.app.send(cmd,tracking=True):self.abort('재시도 복귀 전송 실패');return
+        self.phase='retry_return';self.deadline=now+self.cfg['window']
+        self.event_file.write(json.dumps(dict(command=cmd,gui_monotonic=now,trial=self.index,
+            attempt=self.attempt,phase=self.phase,reason=result['status']),ensure_ascii=False)+'\n');self.event_file.flush()
+        self.measure_status.set(f'{self.index+1}/{len(self.plan)} · 무효 시험 기록 · 재시도 {self.attempt}/{self.cfg["retries"]} 시작 자세 복귀')
 
     def abort(self,reason='사용자 중단'):
         if self.preparing:
@@ -280,7 +317,8 @@ class TimingPanel(DetectionPanel):
         if not self.active:return
         self.active=False
         self.sample_file.close();self.event_file.close()
-        summary=dict(reason=reason,trials=self.results,planned=len(self.plan),completed=len(self.results),
+        summary=dict(reason=reason,trials=self.results,planned=len(self.plan),completed=sum(r['status']=='valid' for r in self.results),
+                     attempts=len(self.results),retry_limit=self.cfg['retries'],missing_timeout_s=self.cfg['missing_timeout'],
                      interrupted_trial=self.index if self.index<len(self.plan) else None,
                      pending_request_id=self.pending,
                      note='No automatic return on abort. Check M1-2 before further motion. Timing is visual end-to-end; sample gaps bound resolution.')

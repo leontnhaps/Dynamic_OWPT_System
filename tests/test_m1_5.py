@@ -68,4 +68,51 @@ class PreparationTests(unittest.TestCase):
         state,poll=self.panel();state.setup_deadline=0
         with self.assertRaises(ValueError):poll(state)
 
+class RetryTests(unittest.TestCase):
+    def panel(self, index=0, attempt=0):
+        import io,json,time,uuid
+        from types import SimpleNamespace
+        cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='TimingPanel')
+        fn=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='retry_trial')
+        env={'time':time,'json':json,'uuid':uuid,'move_from':lambda data,limits:data}
+        exec(compile(ast.Module(body=[fn],type_ignores=[]),str(source),'exec'),env)
+        sent=[];aborted=[]
+        state=SimpleNamespace(index=index,attempt=attempt,cfg={'retries':2,'window':3},
+            plan=[('pan',1,{'pan':1,'tilt':0}),('pan',-1,{'pan':0,'tilt':0})],
+            origin={'pan':0,'tilt':0},results=[],event_file=io.StringIO(),
+            measure_status=SimpleNamespace(set=lambda text:None),abort=aborted.append,
+            app=SimpleNamespace(servo=SimpleNamespace(values=lambda:{'speed':100,'acc':1},limits={}),
+                send=lambda cmd,tracking:sent.append(cmd) or True))
+        return state,env['retry_trial'],sent,aborted
+    def test_restore_start_then_retry(self):
+        state,retry,sent,aborted=self.panel()
+        retry(state,{'status':'invalid_detection'})
+        self.assertEqual(state.phase,'retry_return')
+        self.assertEqual(state.attempt,1)
+        self.assertEqual(sent[0]['pan'],0)
+        self.assertFalse(aborted)
+        self.assertEqual(state.results[0]['attempt'],0)
+    def test_return_trial_restores_prior_target(self):
+        state,retry,sent,aborted=self.panel(index=1)
+        retry(state,{'status':'invalid_detection'})
+        self.assertEqual(sent[0]['pan'],1)
+    def test_retry_exhausted(self):
+        state,retry,sent,aborted=self.panel(attempt=2)
+        retry(state,{'status':'invalid_detection'})
+        self.assertFalse(sent)
+        self.assertEqual(len(aborted),1)
+
+class MissingTimeoutTests(unittest.TestCase):
+    def test_continuous_missing_and_recovery(self):
+        fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='missing_timeout')
+        env={}
+        exec(compile(ast.Module(body=[fn],type_ignores=[]),str(source),'exec'),env)
+        update=env['missing_timeout']
+        since,expired=update('missing',10,None,1)
+        self.assertFalse(expired)
+        since,expired=update('missing',10.5,since,1)
+        self.assertFalse(expired)
+        self.assertEqual(update('missing',11,since,1),(10,True))
+        self.assertEqual(update('detected',10.6,since,1),(None,False))
+
 if __name__=='__main__':unittest.main()
