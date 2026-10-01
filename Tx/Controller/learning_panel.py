@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk
 from Tx.Controller.live_panel import LivePanel
 from Tx.Controller.live_core import fresh
+from common.model_paths import resolve_yolo_path
 
 
 class LearningPanel(LivePanel):
@@ -89,7 +90,7 @@ class LearningPanel(LivePanel):
         self.learner=None;self.models=None;self.episode_number=0
         import random
         self.seed=random.randrange(2**31)
-        self.load_paths=dict(yolo=self.paths['yolo'].get(),sac=None,
+        self.load_paths=dict(yolo=resolve_yolo_path(self.paths['yolo'].get()),sac=None,
                              config=self.paths['config'].get(),mode='from_scratch',policy_seed=self.seed)
         for w in self.widgets:w.configure(state='disabled')
         self.future=self.executor.submit(LiveModels,self.load_paths['yolo'],None,None,device,cfg,self.seed)

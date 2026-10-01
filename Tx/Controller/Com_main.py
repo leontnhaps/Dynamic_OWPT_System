@@ -13,6 +13,7 @@ from PIL import Image,ImageTk
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from Tx.Controller.network_client import Network
 from Tx.Controller.servo_panel import ServoPanel
+from Tx.Controller.detection_panel import DetectionPanel
 from Tx.Controller.capture_panel import CapturePanel
 from Tx.Controller.learning_panel import LearningPanel as LivePanel
 
@@ -28,6 +29,7 @@ class App:
         tabs=ttk.Notebook(root);tabs.pack(fill='x')
         camera_tab=ttk.Frame(tabs);tabs.add(camera_tab,text='M1-1 (Camera)')
         self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='M1-2 (Pan/Tilt)')
+        self.detection=DetectionPanel(tabs,self);tabs.add(self.detection,text='M1-3 (PV 검출)')
         self.capture=CapturePanel(tabs,self);tabs.add(self.capture,text='M2 (사진 · Calibration)')
         self.live=LivePanel(tabs,self);tabs.add(self.live,text='M4 (실전 · YOLO + SAC)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
@@ -49,7 +51,7 @@ class App:
         self.stats_log=self.make_log(logs,'실시간 수신 통계 (receive_stats)')
         self.preview=ttk.Label(root,anchor='center');self.preview.pack(expand=True,fill='both')
         def show_preview(event=None):
-            if tabs.select()==str(self.live):self.preview.pack_forget()
+            if tabs.select() in (str(self.live),str(self.detection)):self.preview.pack_forget()
             else:self.preview.pack(expand=True,fill='both')
         tabs.bind('<<NotebookTabChanged>>',show_preview)
         root.after(30,self.poll)
@@ -144,16 +146,18 @@ class App:
         if self.current:
             age=now-self.current[2];meta=self.current[1]
             self.status.set(f'{"SIMULATION | " if meta["simulated"] else ""}Frame {meta["seq"]} | {self.size} | receive {self.fps:.1f} fps | last receive {age:.2f}s ago'+(' — STALE / STOPPED' if age>2 else ''))
+        self.detection.guard(self.detection.poll)
         self.live.guard(self.live.poll)
         self.root.after(30,self.poll)
     def close(self):
+        self.detection.close()
         self.live.close()
         try:self.net.send(dict(cmd='outputs_off'))
         except OSError:pass
         self.net.close();self.root.destroy()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders (M1-1, M1-2, M2, M4)')
+    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders (M1-1, M1-2, M1-3, M2, M4)')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()
 

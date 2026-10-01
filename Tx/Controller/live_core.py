@@ -2,6 +2,7 @@
 import io
 import math
 from pathlib import Path
+from common.model_paths import resolve_yolo_path
 
 
 def fresh(received, now, maximum_age=.5):
@@ -45,6 +46,7 @@ class LiveModels:
         from ultralytics import YOLO
         from stable_baselines3 import SAC
         from simulation.config import Config
+        yolo_path=resolve_yolo_path(yolo_path)
         required=(yolo_path,) if new_config is not None else (yolo_path, model_path, config_path)
         if not all(Path(p).is_file() for p in required):
             raise ValueError('YOLO .pt, SAC .zip, 해당 모델 config.json을 모두 선택하세요.')
