@@ -10,6 +10,7 @@ from tkinter import ttk
 import tkinter as tk
 from Tx.Controller.detection_panel import DetectionPanel
 from common.servo import move_from
+from Tx.Controller.processing_profile import ProcessingProfile
 
 
 def analyze(samples, command_time, baseline, hold, floor):
@@ -83,6 +84,7 @@ class TimingPanel(DetectionPanel):
         super().__init__(parent,app)
         self.preparing=None; self.auto_measure=False; self.setup_pending=None
         self.active=False; self.samples=[]; self.results=[]; self.pending=None
+        self.profile=ProcessingProfile(self)
         self.fields={}
         row=ttk.Frame(self); row.pack(fill='x',before=self.canvas)
         for label,key,value in [('이동각°','steps','1,3,5'),('반복','repeats','10'),
@@ -99,6 +101,8 @@ class TimingPanel(DetectionPanel):
         row=ttk.Frame(self);row.pack(fill='x',before=self.canvas)
         ttk.Button(row,text='자동 측정 시작',command=lambda:self.guard(self.begin)).pack(side='left')
         ttk.Button(row,text='측정 중단',command=self.abort).pack(side='left')
+        ttk.Button(row,text='처리 시간 측정',command=lambda:self.guard(self.profile.start)).pack(side='left')
+        ttk.Button(row,text='처리 시간 중단',command=self.profile.finish).pack(side='left')
         self.measure_status=tk.StringVar(value='검출 시작 / 자동 측정 시작 → 카메라·서보·모델 자동 준비')
         ttk.Label(row,textvariable=self.measure_status,wraplength=1000).pack(side='left')
 
@@ -106,6 +110,7 @@ class TimingPanel(DetectionPanel):
         self.prepare(False)
 
     def prepare(self, auto_measure):
+        if self.profile.running:raise ValueError("처리 시간 측정을 먼저 종료하세요.")
         if self.active or self.preparing:
             raise ValueError('측정 또는 자동 준비가 진행 중입니다.')
         self.app.live.stop('M1-5 자동 준비')
@@ -231,6 +236,7 @@ class TimingPanel(DetectionPanel):
         self.measure_status.set(f'측정 시작 · {len(plan)}회 이동 · {self.folder}')
 
     def event(self,event):
+        self.profile.event(event)
         if self.preparing:
             if event.get('request_id')==self.setup_pending:
                 if event.get('event')=='error':
@@ -275,6 +281,8 @@ class TimingPanel(DetectionPanel):
         if exceeded:self.abort('연속 미검출 시간 초과')
 
     def poll(self):
+        self.profile.tick()
+        if self.profile.running:return
         super().poll()
         if self.preparing:
             self.prepare_poll();return
@@ -357,6 +365,11 @@ class TimingPanel(DetectionPanel):
         self.app.record(dict(event='timing_measurement_end',reason=reason,folder=str(self.folder)))
 
     def stop(self):
+        if hasattr(self,"profile"):self.profile.finish("검출 정지")
         self.preparing=None
         if getattr(self,'active',False):self.abort('검출 정지')
         super().stop()
+
+    def close(self):
+        self.profile.close()
+        super().close()

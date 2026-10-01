@@ -81,6 +81,8 @@ class App:
         if follow.get():widget.see('end')
         widget.configure(state='disabled')
     def send(self,cmd,tracking=False):
+        if hasattr(self,"timing") and self.timing.profile.running and cmd.get("cmd") in ("move","servo_config","preview","snap","outputs_off"):
+            self.timing.profile.finish("외부 명령으로 처리 시간 측정 중단")
         if hasattr(self,'timing') and self.timing.active and tracking and cmd.get('request_id') != self.timing.pending:
             self.timing.abort('다른 추적 명령으로 측정 중단')
             return False
@@ -146,10 +148,12 @@ class App:
             self.record(dict(event='receive_stats',fps=self.fps,total=count))
         if frame:
             try:
+                display_start=time.monotonic()
                 image=Image.open(io.BytesIO(frame[0]));self.size=image.size
                 image.thumbnail((1000,480),Image.Resampling.LANCZOS)
                 photo=ImageTk.PhotoImage(image);self.preview.configure(image=photo);self.preview.image=photo
                 self.current=frame
+                self.timing.profile.frame(frame,display_start,time.monotonic(),count)
             except (ValueError,OSError) as exc:self.record(dict(event='decode_error',message=str(exc)))
         if self.current:
             age=now-self.current[2];meta=self.current[1]

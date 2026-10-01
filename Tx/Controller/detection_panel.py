@@ -99,6 +99,9 @@ class DetectionPanel(ttk.Frame):
         self.status.set('YOLO 모델 불러오는 중…')
 
     def start(self):
+        timing=getattr(self.app,"timing",None)
+        if timing is not None and timing.profile.running:
+            raise ValueError("처리 시간 측정을 먼저 종료하세요.")
         if self.model is None: raise ValueError('모델부터 불러오세요.')
         if self.future is not None: raise ValueError('진행 중인 작업이 끝난 뒤 시작하세요.')
         self.stop()
