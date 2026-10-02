@@ -142,7 +142,7 @@ class LivePanel(ttk.Frame):
                     self.models=result
                     for w in self.widgets:w.configure(state='normal')
                     c=result.cfg
-                    self.status.set(f'불러옴: {result.names} | {c.width}×{c.height} | 레이저 ({c.laser_u}, {c.laser_v}) | Δ ±{c.delta_limit_deg}°')
+                    self.status.set(f'불러옴: {result.names} | {c.width}×{c.height} | 레이저 ({c.laser_u}, {c.laser_v}) | Δ ±{c.delta_limit_deg}° | 주기 {c.dt*1000:.0f} ms')
                 elif self.job[1]==self.generation:
                     self.consume(result,self.job[2],self.job[3],now)
             except Exception as exc:

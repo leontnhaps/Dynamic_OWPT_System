@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import math
+from common.control_timing import PRIMARY_CONTROL_PERIOD_S
 
 
 @dataclass(frozen=True)
@@ -12,7 +13,7 @@ class Config:
     laser_u: float = 696.
     laser_v: float = 384.
     distance_m: float = 5.0
-    dt: float = .1                 # 설계 주기 10 Hz; 실측 수신 FPS와 같다는 뜻은 아님
+    dt: float = PRIMARY_CONTROL_PERIOD_S  # M1-5: 1차 720 ms, 2차 비교 800 ms
     episode_steps: int = 300
     pan_min_deg: float = -180.0
     pan_max_deg: float = 180.0
@@ -112,6 +113,8 @@ class Config:
         if not path:
             return cls()
         values = json.loads(Path(path).read_text(encoding="utf-8"))
+        # dt가 없던 구형 모델도 당시 기본 주기를 유지한다. 새 실험은 Config() 사용.
+        values.setdefault("dt", 0.1)
         if "angle_limit_deg" in values and "scenario" not in values:
             values["scenario"] = "mixed"  # 구 모델을 새 action 의미로 조용히 바꾸지 않는다.
         # 기존 학습 config는 원래의 연속 명령/고정 길이 동작을 보존한다.
@@ -119,4 +122,3 @@ class Config:
         values.setdefault("end_on_limit_exit", False)
         values.setdefault("action_mode", "absolute")
         return cls(**values)
-
