@@ -19,6 +19,7 @@ class LivePanel(ttk.Frame):
         self.app=app
         self.executor=ThreadPoolExecutor(max_workers=1)
         self.future=None;self.models=None;self.running=False;self.detecting=False
+        self.display=None;self.rendered_frame=None
         self.generation=0;self.pending=None;self.previous_error=None
         self.last_frame=None;self.last_submit=0.;self.not_before=0.;self.log=None
         self.paths={};self.widgets=[]
@@ -141,7 +142,7 @@ class LivePanel(ttk.Frame):
                     self.models=result
                     for w in self.widgets:w.configure(state='normal')
                     c=result.cfg
-                    self.status.set(f'불러옴: {result.names} | {c.width}×{c.height} | 레이저 ({c.laser_u}, {c.laser_v}) | Δ ±{c.delta_limit_deg}°')
+                    self.status.set(f'불러옴: {result.names} | {c.width}×{c.height} | 레이저 ({c.laser_u}, {c.laser_v}) | Δ ±{c.delta_limit_deg}° | 주기 {c.dt*1000:.0f} ms')
                 elif self.job[1]==self.generation:
                     self.consume(result,self.job[2],self.job[3],now)
             except Exception as exc:
@@ -165,14 +166,8 @@ class LivePanel(ttk.Frame):
             if self.running:self.stop('추론 결과가 0.5초 이상 지연됨')
             else:self.status.set('추론 지연: 오래된 결과 폐기')
             return
-        image=result['image'];draw=ImageDraw.Draw(image);c=self.models.cfg
-        u,v=c.laser_u,c.laser_v
-        draw.line((u-12,v,u+12,v),fill='red',width=3);draw.line((u,v-12,u,v+12),fill='red',width=3)
+        self.display=(result,frame,self.models.cfg)
         target=result['target']
-        if target:
-            draw.rectangle(target['box'],outline='lime',width=3)
-            x,y=target['center'];draw.ellipse((x-4,y-4,x+4,y+4),fill='lime')
-        image.thumbnail((800,300));photo=ImageTk.PhotoImage(image);self.canvas.configure(image=photo);self.canvas.image=photo
         if target is None:
             self.previous_error=None
             self.detail.set(f'PV 검출 {result["count"]}개: 유효 PV가 없습니다.')
@@ -195,6 +190,19 @@ class LivePanel(ttk.Frame):
                 else:self.stop('명령 전송 실패');return
             else:status='hold'
         self.write_row(result,frame,started,now,status,token)
+
+    def render(self):
+        if self.display is None or self.display[1][2]==self.rendered_frame:return
+        result,frame,c=self.display
+        image=result['image'].copy();draw=ImageDraw.Draw(image)
+        u,v=c.laser_u,c.laser_v
+        draw.line((u-12,v,u+12,v),fill='red',width=3);draw.line((u,v-12,u,v+12),fill='red',width=3)
+        target=result['target']
+        if target:
+            draw.rectangle(target['box'],outline='lime',width=3)
+            x,y=target['center'];draw.ellipse((x-4,y-4,x+4,y+4),fill='lime')
+        image.thumbnail((800,300));photo=ImageTk.PhotoImage(image);self.canvas.configure(image=photo);self.canvas.image=photo
+        self.rendered_frame=frame[2]
 
     def write_row(self,r,frame,started,now,status,token):
         if self.log is None:return

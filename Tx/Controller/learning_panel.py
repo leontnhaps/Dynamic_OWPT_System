@@ -9,6 +9,7 @@ from tkinter import ttk
 from Tx.Controller.live_panel import LivePanel
 from Tx.Controller.live_core import fresh
 from common.model_paths import resolve_yolo_path
+from common.control_timing import PRIMARY_CONTROL_PERIOD_S, CONTROL_PERIODS_S
 
 
 class LearningPanel(LivePanel):
@@ -49,9 +50,15 @@ class LearningPanel(LivePanel):
             var=tk.StringVar(value=value);self.new_vars[key]=var
             entry=ttk.Entry(new,textvariable=var,width=7);entry.grid(row=0,column=i*2+1)
             self.widgets.append(entry)
-        ttk.Button(new,text='YOLO + 새 SAC 생성',command=lambda:self.guard(self.create_new)).grid(row=1,column=0,columnspan=3,sticky='w')
-        ttk.Button(new,text='현재 SAC에 50px 추가 보상 적용',command=lambda:self.guard(self.apply_alignment_bonus)).grid(row=1,column=3,columnspan=5,sticky='w')
-        ttk.Label(new,text='기준점은 실측 보정값 입력. 새 모델: 역수형 + 50px 안쪽 추가 보상(최대 +30), 명령 비용 0. 생성 후 미리보기 → 정지 → 학습 시작.').grid(row=2,column=0,columnspan=8,sticky='w')
+        ttk.Label(new,text='새 모델 제어주기 (s)').grid(row=1,column=0)
+        self.new_vars['dt']=tk.StringVar(value=f'{PRIMARY_CONTROL_PERIOD_S:.3f}')
+        period=ttk.Combobox(new,textvariable=self.new_vars['dt'],width=7,
+                           values=[f'{v:.3f}' for v in CONTROL_PERIODS_S])
+        period.grid(row=1,column=1);self.widgets.append(period)
+        ttk.Label(new,text='1차 0.720 / 2차 0.800 · 저장 모델은 해당 config 주기 유지').grid(row=1,column=2,columnspan=6,sticky='w')
+        ttk.Button(new,text='YOLO + 새 SAC 생성',command=lambda:self.guard(self.create_new)).grid(row=2,column=0,columnspan=3,sticky='w')
+        ttk.Button(new,text='현재 SAC에 50px 추가 보상 적용',command=lambda:self.guard(self.apply_alignment_bonus)).grid(row=2,column=3,columnspan=5,sticky='w')
+        ttk.Label(new,text='기준점은 실측 보정값 입력. 새 모델: 역수형 + 50px 안쪽 추가 보상(최대 +30), 명령 비용 0. 생성 후 미리보기 → 정지 → 학습 시작.').grid(row=3,column=0,columnspan=8,sticky='w')
 
     def busy(self):
         if getattr(self,'batch',None) is not None and self.batch.active:
@@ -96,7 +103,7 @@ class LearningPanel(LivePanel):
         self.future=self.executor.submit(LiveModels,self.load_paths['yolo'],None,None,device,cfg,self.seed)
         self.job=('load',self.generation)
         self.status.set('YOLO 로딩 / 무작위 SAC 초기화 중 · 이동 없음')
-        self.learning_status.set(f'새 SAC · 레이저 ({cfg.laser_u}, {cfg.laser_v}) · Δ ±{cfg.delta_limit_deg}° · 보상 10/(1+d/{cfg.alignment_scale_px}) + 50px 안쪽 최대 30 · 명령 비용 0')
+        self.learning_status.set(f'새 SAC · 주기 {cfg.dt*1000:.0f} ms · 레이저 ({cfg.laser_u}, {cfg.laser_v}) · Δ ±{cfg.delta_limit_deg}° · 보상 10/(1+d/{cfg.alignment_scale_px}) + 50px 안쪽 최대 30 · 명령 비용 0')
 
     def apply_alignment_bonus(self):
         self.busy()

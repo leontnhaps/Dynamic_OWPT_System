@@ -9,7 +9,8 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageDraw, ImageTk
-from Tx.Controller.live_core import target_from_boxes, fresh
+from Tx.Controller.live_core import fresh
+from common.pv_detection import TARGET_SELECTION, target_from_boxes
 from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 
 
@@ -45,6 +46,7 @@ class DetectionPanel(ttk.Frame):
         self.generation = 0
         self.last_frame = None
         self.latest = None
+        self.display = None; self.rendered_frame = None
         self.log = None
         self.widgets = []
         self.path = tk.StringVar(value=str(DEFAULT_YOLO_PATH))
@@ -99,6 +101,9 @@ class DetectionPanel(ttk.Frame):
         self.status.set('YOLO 모델 불러오는 중…')
 
     def start(self):
+        timing=getattr(self.app,"timing",None)
+        if timing is not None and timing.profile.running:
+            raise ValueError("처리 시간 측정을 먼저 종료하세요.")
         if self.model is None: raise ValueError('모델부터 불러오세요.')
         if self.future is not None: raise ValueError('진행 중인 작업이 끝난 뒤 시작하세요.')
         self.stop()
@@ -119,6 +124,7 @@ class DetectionPanel(ttk.Frame):
 
     def stop(self):
         self.running = False; self.generation += 1; self.latest = None
+        self.display = None; self.rendered_frame = None
         self.canvas.configure(image=''); self.canvas.image = None
         self.end_log()
         if self.future is None: self.lock(False)
@@ -130,6 +136,7 @@ class DetectionPanel(ttk.Frame):
         folder = self.app.stage_dir('M1-3') / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         folder.mkdir()
         settings = dict(model=self.loaded, confidence=self.settings[0], class_id=self.settings[1],
+                        target_selection=TARGET_SELECTION,
                         coordinate_system='original image pixels; origin top-left',
                         note='Latest-frame sampling; unprocessed camera frames are not detection misses.')
         (folder/'session.json').write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -161,6 +168,7 @@ class DetectionPanel(ttk.Frame):
         frame = self.app.current
         if not frame or not fresh(frame[2], now, 2):
             self.latest = None
+            self.display = None
             self.canvas.configure(image=''); self.canvas.image = None
             self.status.set('영상 수신 대기 / 오래된 좌표 무효')
             return
@@ -172,7 +180,7 @@ class DetectionPanel(ttk.Frame):
     def consume(self, result, frame, now):
         self.processed += 1
         fps = self.processed / max(now-self.started, .001)
-        image = result['image'].copy()
+        image = result['image']
         target = result['target']
         stale = not fresh(frame[2], now, 2)
         row = dict(receive_unix_ns=frame[3], seq=frame[1].get('seq'), simulated=frame[1].get('simulated'),
@@ -182,18 +190,32 @@ class DetectionPanel(ttk.Frame):
         if target and not stale:
             row.update(confidence=target['confidence'], u=target['center'][0], v=target['center'][1])
             row.update(zip(('x1', 'y1', 'x2', 'y2'), target['box']))
-            draw = ImageDraw.Draw(image); draw.rectangle(target['box'], outline='lime', width=3)
             u, v = target['center']
-            draw.line((u-10, v, u+10, v), fill='lime', width=3)
-            draw.line((u, v-10, u, v+10), fill='lime', width=3)
             detail = f'PV ({u:.1f}, {v:.1f}) px | confidence {target["confidence"]:.3f} | 후보 {result["count"]}'
         else:
             detail = '오래된 결과 · 좌표 무효' if stale else 'PV 미검출 · 좌표 없음'
         if self.log is not None: self.writer.writerow(row); self.log.flush()
-        self.latest = None if stale else (image.copy(), frame, row)
-        image.thumbnail((1000, 420))
-        photo = ImageTk.PhotoImage(image); self.canvas.configure(image=photo); self.canvas.image = photo
+        self.latest = None if stale else (image, frame, row)
+        self.display = (image, frame, row)
         self.status.set(f'{detail} | 검출 {fps:.1f} FPS | 추론 {result["inference_ms"]:.0f} ms | 기록 {"ON" if self.log else "OFF"}')
+
+    @staticmethod
+    def annotated(image,row):
+        image=image.copy()
+        if row.get('status')=='detected':
+            draw=ImageDraw.Draw(image)
+            draw.rectangle(tuple(row[k] for k in ('x1','y1','x2','y2')),outline='lime',width=3)
+            u,v=row['u'],row['v']
+            draw.line((u-10,v,u+10,v),fill='lime',width=3)
+            draw.line((u,v-10,u,v+10),fill='lime',width=3)
+        return image
+
+    def render(self):
+        if self.display is None or self.display[1][2]==self.rendered_frame:return
+        image,frame,row=self.display
+        image=self.annotated(image,row);image.thumbnail((1000,420))
+        photo=ImageTk.PhotoImage(image);self.canvas.configure(image=photo);self.canvas.image=photo
+        self.rendered_frame=frame[2]
 
     def save(self):
         if not self.latest or not fresh(self.latest[1][2], time.monotonic(), 2):
@@ -201,7 +223,7 @@ class DetectionPanel(ttk.Frame):
         image, frame, row = self.latest
         path = self.app.stage_dir('M1-3') / ('frame_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
         path.with_suffix('.jpg').write_bytes(frame[0])
-        image.save(str(path)+'_detection.jpg')
+        self.annotated(image,row).save(str(path)+'_detection.jpg')
         path.with_suffix('.json').write_text(json.dumps(dict(row, model=self.loaded,
             confidence_threshold=self.settings[0], class_id=self.settings[1], frame_metadata=frame[1]),
             ensure_ascii=False, indent=2), encoding='utf-8')
