@@ -15,6 +15,7 @@ from common.tx_tracking import (TrackingConfig, RunSettings, Sample, BeamMap,
 from Tx.Controller.stationary_core import StationaryRun
 from Tx.Controller.stationary_learning import RunLog, SACLearner, SAC_SETTINGS, checkpoint_info, digest, dump
 from Tx.Controller.stationary_panel import StationaryPanel
+from Tx.Controller.servo_panel import ServoPanel
 from Tx.Controller.Com_main import App
 
 
@@ -181,6 +182,60 @@ class RunTests(unittest.TestCase):
         self.assertEqual(len(self.commands), 1)
         self.assertFalse(self.learner.transitions)
 
+    def test_initial_missing_counts_each_episode_and_stops_at_requested_total(self):
+        self.run.settings = replace(self.settings, episodes=3)
+        self.run.start()
+        for episode in range(1, 4):
+            self.assertEqual(self.run.episode, episode)
+            command = self.commands[-1]
+            self.assertTrue(-27 <= command['pan'] <= -7)
+            self.assertTrue(-10 <= command['tilt'] <= 5)
+            self.ack()
+            self.clock.advance(5.01)
+            self.run.latest = sample(self.clock, episode, None)
+            self.run.tick()
+            summary = self.run.save_request
+            self.assertEqual(summary['reason'], 'initial_target_lost')
+            self.assertTrue(summary['terminated'])
+            self.assertIsNone(summary['initial_observation'])
+            self.assertIsNone(summary.get('rms_px'))
+            self.assertEqual(summary['new_transitions'], 0)
+            self.assertFalse(self.run.stop_requested)
+            self.assertFalse(self.learner.cancel.is_set())
+            self.run.save_request = None
+            self.run.saved()
+        self.assertEqual(self.run.phase, 'complete')
+        self.assertEqual(len(self.commands), 3)
+        self.assertFalse(self.learner.transitions)
+
+    def test_initial_missing_then_tracking_loss_both_count_toward_total(self):
+        self.run.start(); self.ack()
+        self.clock.advance(5.01)
+        self.run.latest = sample(self.clock, 1, None); self.run.tick()
+        self.run.save_request = None; self.run.saved(); self.ack()
+        self.clock.advance(2.01)
+        self.run.latest = sample(self.clock, 2); self.run.tick()
+        self.command(); self.result(3, None)
+        self.clock.advance(3); self.run.tick()
+        self.assertEqual(self.run.save_request['reason'], 'target_lost')
+        self.run.save_request = None; self.run.saved()
+        self.assertEqual(self.run.phase, 'complete')
+        self.assertEqual(self.run.episode, 2)
+
+    def test_reset_ack_timeout_still_stops_all_episodes(self):
+        self.run.start(); self.clock.advance(5); self.run.tick()
+        self.assertEqual(self.run.save_request['reason'], 'ack_timeout')
+        self.run.save_request = None; self.run.saved()
+        self.assertEqual(self.run.phase, 'complete')
+        self.assertEqual(len(self.commands), 1)
+
+    def test_initial_camera_failure_still_stops_all_episodes(self):
+        self.run.start(); self.ack(); self.clock.advance(5.01)
+        self.run.latest = sample(self.clock, simulated=True); self.run.tick()
+        self.assertEqual(self.run.save_request['reason'], 'initialization_failed')
+        self.run.save_request = None; self.run.saved()
+        self.assertEqual(self.run.phase, 'complete')
+
     def test_missing_transition_never_completed_by_reacquisition(self):
         self.begin(); self.command(); self.result(center=None)
         self.assertEqual(self.run.phase, 'missing')
@@ -316,6 +371,14 @@ class LearningScheduleTests(unittest.TestCase):
             self.assertEqual(report['completed_updates'], 0)
             if mode == 'evaluate': learner.save_checkpoint.assert_not_called()
 
+    def test_initial_missing_saves_and_counts_without_inventing_updates(self):
+        learner = self.fake(1001)
+        report = learner.finish_episode(dict(episode=1, reason='initial_target_lost', new_transitions=0), Mock(), 1)
+        self.assertEqual(report['completed_updates'], 0)
+        self.assertEqual(learner.episodes, 1)
+        learner.policy.train.assert_not_called()
+        learner.save_checkpoint.assert_called_once()
+
     def test_cancel_between_updates_still_checkpoints(self):
         learner = self.fake(1001)
         learner.cancel.set()
@@ -408,6 +471,76 @@ class PanelIntegrationTests(unittest.TestCase):
         p.run.tick.assert_called_once()
 
 
+class ManualMovementTests(unittest.TestCase):
+    def panel(self):
+        p = StationaryPanel.__new__(StationaryPanel)
+        p.cfg = TrackingConfig(); p.run = None; p.work = None; p.preparing = None
+        p.hardware_ready = True; p.servo_available = True
+        p.manual_vars = {k: Mock(get=Mock(return_value=v)) for k, v in
+                         dict(pan='-17', tilt='0', step='1').items()}
+        p.manual_widgets = [Mock()]
+        servo = ServoPanel.__new__(ServoPanel)
+        servo.limits = p.cfg.limits; servo.simulated = False; servo.online = True
+        servo.last = servo.pending = None; servo.buttons = []; servo.state = Mock()
+        servo.vars = {axis: Mock() for axis in ('pan', 'tilt')}
+        p.app = SimpleNamespace(servo=servo, send=Mock(return_value=True), record=Mock(),
+            detection=SimpleNamespace(stop=Mock(), future=None),
+            timing=SimpleNamespace(active=False, preparing=None, future=None,
+                                   profile=SimpleNamespace(running=False), stop=Mock()))
+        servo.app = p.app
+        return p
+
+    def ack(self, p):
+        command = p.app.send.call_args.args[0]
+        p.app.servo.event(dict(event='servo', request_id=command['request_id'], operation='move',
+            simulated=False, available=True, limits=p.cfg.limits,
+            commanded={a:command[a] for a in ('pan', 'tilt')}))
+
+    def test_absolute_move_and_jog_share_pending_and_confirmed_command(self):
+        p = self.panel(); p.manual_move()
+        command = p.app.send.call_args.args[0]
+        self.assertEqual((command['pan'], command['tilt'], command['speed'], command['acc']), (-17, 0, 100, 1))
+        p.sync_manual_controls(); p.manual_widgets[0].configure.assert_called_with(state='disabled')
+        with self.assertRaises(ValueError): p.manual_move('pan', 1)
+        with self.assertRaises(ValueError): p.stop_other_panels()
+        self.ack(p); p.sync_manual_controls()
+        p.manual_widgets[0].configure.assert_called_with(state='normal')
+        p.manual_vars['pan'].get.return_value = '90'
+        p.manual_move('pan', 1)
+        self.assertEqual(p.app.send.call_args.args[0]['pan'], -16)
+        self.ack(p); p.manual_move('tilt', -1)
+        self.assertEqual(p.app.send.call_args.args[0]['tilt'], -1)
+
+    def test_manual_rejection_does_not_abort_learning_or_send_commands(self):
+        from unittest.mock import patch
+        p = self.panel(); p.run = SimpleNamespace(active=True, abort=Mock())
+        with patch('Tx.Controller.stationary_panel.messagebox.showerror') as error:
+            p.manual_guard(p.manual_move)
+        error.assert_called_once(); p.run.abort.assert_not_called(); p.app.send.assert_not_called()
+        for field, value in [('run', None), ('work', object())]: setattr(p, field, value)
+        with self.assertRaises(ValueError): p.manual_move()
+        p.work = None; p.preparing = 'model'
+        with self.assertRaises(ValueError): p.manual_move()
+        p.app.send.assert_not_called()
+
+    def test_invalid_targets_missing_reference_and_disconnection_send_nothing(self):
+        p = self.panel()
+        with self.assertRaises(ValueError): p.manual_move('pan', 1)
+        for key, value in [('pan', '181'), ('pan', '-17.5'), ('pan', 'nan'), ('tilt', '-16')]:
+            p = self.panel(); p.manual_vars[key].get.return_value = value
+            with self.assertRaises(ValueError): p.manual_move()
+            p.app.send.assert_not_called()
+        for value in ('0', '0.5', '-1'):
+            p = self.panel(); p.app.servo.last = {'pan': -17, 'tilt': 0}
+            p.manual_vars['step'].get.return_value = value
+            with self.assertRaises(ValueError): p.manual_move('tilt', 1)
+            p.app.send.assert_not_called()
+        for key, value in [('online', False), ('limits', None), ('simulated', True)]:
+            p = self.panel(); setattr(p.app.servo, key, value)
+            with self.assertRaises(ValueError): p.manual_move()
+            p.app.send.assert_not_called()
+
+
 class AutomaticPreparationTests(unittest.TestCase):
     def panel(self):
         from common.tx_setup import TX_CAMERA_SETTINGS
@@ -497,6 +630,27 @@ class AutomaticPreparationTests(unittest.TestCase):
         self.assertIsNone(p.app.current)
         self.assertIsNone(p.app.servo.limits)
         p.learn_pool.submit.assert_called_once()
+
+    def test_start_without_preview_detection_attempts_reset_and_records_new_rules(self):
+        p = self.panel(); p.preparing = None; p.servo_available = True
+        p.app.servo.online = True; p.app.servo.simulated = False
+        p.app.servo.limits = p.cfg.limits
+        p.check_prepared = Mock(); p.stop_other_panels = Mock()
+        p.check_camera = Mock(return_value=(b'jpeg', {'simulated':False}, 10, 0))
+        p.latest = None; p.log = None; p.learner = Learner(); p.identity = {}
+        with tempfile.TemporaryDirectory() as folder:
+            p.app.stage_dir = lambda stage: Path(folder)
+            p.start()
+            try:
+                self.assertEqual(p.run.phase, 'reset_reply')
+                p.send.assert_called_once()
+                config = json.loads((p.log.folder/'config.json').read_text())
+                self.assertEqual(config['schema'], 'tx-stationary-run-v2')
+                self.assertEqual(config['checkpoint_schema'], 'tx-stationary-v1')
+                self.assertEqual([config['run'][k] for k in ('pan_low', 'pan_high', 'tilt_low', 'tilt_high')],
+                                 [-27, -7, -10, 5])
+            finally:
+                p.log.close()
 
 
 @unittest.skipUnless(importlib.util.find_spec('stable_baselines3') and importlib.util.find_spec('torch'),

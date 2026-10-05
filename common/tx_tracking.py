@@ -7,6 +7,7 @@ from common.servo import limits_from
 from common.tx_setup import TX_OPERATING_LIMITS
 
 SCHEMA = 'tx-stationary-v1'
+RUN_SCHEMA = 'tx-stationary-run-v2'
 
 
 @dataclass(frozen=True)
@@ -69,10 +70,10 @@ class RunSettings:
     settle_s: float = 2.
     acquire_s: float = 3.
     missing_s: float = 3.
-    pan_low: int = -20
-    pan_high: int = 20
+    pan_low: int = -27
+    pan_high: int = -7
     tilt_low: int = -10
-    tilt_high: int = 20
+    tilt_high: int = 5
     updates_per_transition: float = 1.
 
     def validate(self, cfg):

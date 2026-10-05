@@ -10,7 +10,8 @@ from pathlib import Path
 from PIL import ImageDraw, ImageTk
 from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 from common.control_timing import CONTROL_PERIODS_S, PRIMARY_CONTROL_PERIOD_S
-from common.tx_tracking import SCHEMA, TrackingConfig, RunSettings, Sample, invalid_reason
+from common.tx_tracking import SCHEMA, RUN_SCHEMA, TrackingConfig, RunSettings, Sample, invalid_reason
+from common.servo import move_from, number
 from common.pv_detection import TARGET_SELECTION
 from common.tx_setup import TX_CAMERA_SETTINGS
 from Tx.Controller.detection_panel import PVDetector, DetectionPanel
@@ -62,14 +63,16 @@ class StationaryPanel(ttk.Frame):
         combo.pack(side='left'); self.widgets.append(combo)
         box = ttk.LabelFrame(self, text='Episode 설정 · 최대 step과 반복은 초기 실험용 입력값', padding=4)
         box.pack(fill='x')
-        fields = [('max_steps', '최대 step', '100'), ('episodes', '반복 횟수', '10'),
-                  ('settle_s', '초기 이동 대기 s', '2'), ('updates_per_transition', '경험당 업데이트', '1'),
-                  ('seed', 'Seed', '42'), ('pan_low', '초기 Pan min', '-20'), ('pan_high', 'max', '20'),
-                  ('tilt_low', '초기 Tilt min', '-10'), ('tilt_high', 'max', '20')]
-        for i, (key, label, value) in enumerate(fields):
+        defaults = asdict(RunSettings())
+        defaults['seed'] = 42
+        fields = [('max_steps', '최대 step'), ('episodes', '반복 횟수'),
+                  ('settle_s', '초기 이동 대기 s'), ('updates_per_transition', '경험당 업데이트'),
+                  ('seed', 'Seed'), ('pan_low', '초기 Pan min'), ('pan_high', 'max'),
+                  ('tilt_low', '초기 Tilt min'), ('tilt_high', 'max')]
+        for i, (key, label) in enumerate(fields):
             r, c = divmod(i, 5)
             ttk.Label(box, text=label).grid(row=r*2, column=c*2, sticky='w')
-            var = tk.StringVar(value=value); self.vars[key] = var
+            var = tk.StringVar(value=str(defaults[key])); self.vars[key] = var
             entry = ttk.Entry(box, textvariable=var, width=10)
             entry.grid(row=r*2+1, column=c*2, padx=5, sticky='w'); self.widgets.append(entry)
         ttk.Label(self, text='8차원 관측 · Δ ±5° / 1° 단위 · reward = −거리/1000 + intensity mean · 적중 ≤23 px 후 유지').pack(anchor='w')
@@ -78,12 +81,31 @@ class StationaryPanel(ttk.Frame):
         for label, fn in [('자동 준비 (영상 · 서보 · 모델)', self.prepare), ('검출 미리보기', self.preview),
                           ('학습 / 평가 시작', self.start), ('전체 중지 · 저장', self.stop), ('결과 폴더 확인', self.show_folder)]:
             ttk.Button(row, text=label, command=lambda f=fn: self.guard(f)).pack(side='left', padx=3)
+        manual = ttk.LabelFrame(self, text='Pan / Tilt 수동 이동 · 자동 준비 후 사용 · 학습/평가/저장 중 잠금', padding=4)
+        manual.pack(fill='x')
+        row = ttk.Frame(manual); row.pack(fill='x')
+        self.manual_vars = {}; self.manual_widgets = []
+        for key, label, value in [('pan', 'Pan °', '-17'), ('tilt', 'Tilt °', '0'), ('step', 'Step °', '1')]:
+            ttk.Label(row, text=label).pack(side='left')
+            var = tk.StringVar(value=value); self.manual_vars[key] = var
+            entry = ttk.Entry(row, textvariable=var, width=7)
+            entry.pack(side='left', padx=3); self.manual_widgets.append(entry)
+        button = ttk.Button(row, text='입력 각도로 이동', command=lambda: self.manual_guard(self.manual_move))
+        button.pack(side='left', padx=3); self.manual_widgets.append(button)
+        for axis in ('pan', 'tilt'):
+            for sign in (-1, 1):
+                button = ttk.Button(row, text=f'{axis.title()} {"+" if sign > 0 else "−"}',
+                    command=lambda a=axis, s=sign: self.manual_guard(lambda: self.manual_move(a, s)))
+                button.pack(side='left', padx=3); self.manual_widgets.append(button)
+        ttk.Label(manual, textvariable=self.app.servo.state, wraplength=1120).pack(anchor='w')
+        ttk.Label(manual, text='±는 직전 전송 명령에서 1° 단위 증감 · 입력값은 목표각이며 실제각/도달 여부는 미측정').pack(anchor='w')
         self.status = tk.StringVar(value='이 탭에서 자동 준비 → PV 검출 확인 → 학습 / 평가 시작')
         self.progress = tk.StringVar(value='목표각은 명령값이며 실제 서보 각도·도달 피드백이 아닙니다.')
         self.result_text = tk.StringVar()
         for var in (self.status, self.progress, self.result_text):
             ttk.Label(self, textvariable=var, wraplength=1120).pack(anchor='w')
         self.canvas = ttk.Label(self, anchor='center'); self.canvas.pack(fill='both', expand=True)
+        self.sync_manual_controls()
 
     @property
     def active(self):
@@ -96,6 +118,69 @@ class StationaryPanel(ttk.Frame):
     def lock(self, locked):
         for widget in self.widgets:
             widget.configure(state='disabled' if locked else ('readonly' if isinstance(widget, ttk.Combobox) else 'normal'))
+        self.sync_manual_controls()
+
+    def check_manual_available(self):
+        if self.busy:
+            raise ValueError('자동 준비·학습·평가·저장이 끝난 뒤 수동 이동하세요.')
+        if not self.hardware_ready:
+            raise ValueError('이 탭에서 자동 준비를 먼저 완료하세요.')
+        servo = self.app.servo
+        if (not servo.online or self.servo_available is not True or servo.simulated is not False
+                or servo.limits != self.cfg.limits):
+            raise ValueError('실제 Pi 연결과 운용 범위를 확인하고 자동 준비를 다시 실행하세요.')
+        if servo.pending or (self.run is not None and self.run.pending):
+            raise ValueError('전송된 명령의 응답을 기다리세요.')
+        if self.app.timing.active or self.app.timing.preparing or self.app.timing.profile.running:
+            raise ValueError('M1-5 측정을 먼저 종료하세요.')
+
+    def sync_manual_controls(self):
+        if 'manual_widgets' not in self.__dict__:
+            return
+        try:
+            self.check_manual_available()
+            state = 'normal'
+        except ValueError:
+            state = 'disabled'
+        if self.__dict__.get('_manual_state') == state:
+            return
+        self._manual_state = state
+        for widget in self.manual_widgets:
+            widget.configure(state=state)
+
+    def manual_guard(self, fn):
+        # A rejected manual click must never cancel a running episode.
+        try:
+            fn()
+        except (ValueError, TypeError, OSError, KeyError) as exc:
+            messagebox.showerror('M3-2 수동 이동', str(exc))
+        finally:
+            self.sync_manual_controls()
+
+    def manual_move(self, axis=None, sign=0):
+        self.check_manual_available()
+        servo = self.app.servo
+        if axis is None:
+            target = {a: number(self.manual_vars[a].get(), a) for a in ('pan', 'tilt')}
+        else:
+            if axis not in ('pan', 'tilt') or sign not in (-1, 1):
+                raise ValueError('Pan/Tilt 증감 방향을 확인하세요.')
+            if servo.last is None:
+                raise ValueError('먼저 입력 각도로 이동하여 직전 명령을 확인하세요.')
+            step = number(self.manual_vars['step'].get(), 'step')
+            if step < 1 or not step.is_integer():
+                raise ValueError('Step은 1° 이상의 정수입니다.')
+            target = {a: number(servo.last[a], a) for a in ('pan', 'tilt')}
+            target[axis] += sign*step
+        if not all(v.is_integer() for v in target.values()):
+            raise ValueError('Pan/Tilt 목표각은 1° 단위 정수입니다.')
+        move = move_from(dict(target, speed=self.cfg.speed, acc=self.cfg.acc), self.cfg.limits)
+        self.stop_other_panels()
+        # Reuse shared request/response tracking so every tab sees the pending move.
+        servo.request(dict(cmd='move', **move))
+        if servo.pending:
+            self.app.record(dict(event='m3_2_manual_move', request_id=servo.pending[0],
+                                 command=move, actual_angle=None, arrival_verified=False))
 
     def guard(self, fn):
         try:
@@ -269,12 +354,12 @@ class StationaryPanel(ttk.Frame):
         if not servo.online or self.servo_available is not True or servo.simulated is not False or servo.limits != self.cfg.limits:
             raise ValueError('실제 Pi 연결과 저장 모델의 동일한 운용 범위를 확인하세요.')
         settings = self.settings(); settings.validate(self.cfg)
-        if self.latest is None or invalid_reason(self.latest, time.monotonic(), self.cfg):
-            raise ValueError('검출 미리보기에서 최신 PV 검출을 먼저 확인하세요.')
         if self.log is not None:
             self.log.close()
         folder = self.app.stage_dir('M3-2')/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-        config = dict(schema=SCHEMA, tracking=asdict(self.cfg), run=asdict(settings), sac=SAC_SETTINGS,
+        config = dict(schema=RUN_SCHEMA, checkpoint_schema=SCHEMA,
+                      tracking=asdict(self.cfg), run=asdict(settings), sac=SAC_SETTINGS,
+                      episode_policy='count_initial_target_lost_and_target_lost; stop_on_device_or_camera_failure',
                       model=self.identity, target_selection=TARGET_SELECTION, camera_metadata=frame[1],
                       observation_order=['e_u', 'e_v', 'delta_e_u', 'delta_e_v', 'last_delta_pan', 'last_delta_tilt', 'pan', 'tilt'],
                       normalization=[696, 588, 1296, 972, 5, 5], angle_normalization=self.cfg.limits,
@@ -364,6 +449,7 @@ class StationaryPanel(ttk.Frame):
     def poll(self):
         if self.closed:
             return
+        self.sync_manual_controls()
         if self.work is not None and self.work.done():
             future, self.work = self.work, None
             if self.work_kind == 'prepare':

@@ -213,7 +213,7 @@ class SACLearner:
 
     def finish_episode(self, summary, log, ratio):
         summary = dict(summary, mode=self.mode)
-        allowed = summary['reason'] in ('step_limit', 'target_lost')
+        allowed = summary['reason'] in ('step_limit', 'target_lost', 'initial_target_lost')
         planned = (math.floor(summary['new_transitions']*ratio)
                    if self.mode != 'evaluate' and allowed and self.total_transitions >= SAC_SETTINGS['learning_starts'] else 0)
         completed, started = 0, time.monotonic()

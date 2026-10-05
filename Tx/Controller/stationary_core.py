@@ -156,7 +156,11 @@ class StationaryRun:
                 self.event('initial_observation', observation=self.raw.tolist(), normalized=self.obs.tolist(), **self.initial)
                 self.phase = 'ready'
             elif now >= self.acquire_after+self.settings.acquire_s:
-                self.abort('initialization_failed', reason)
+                if reason in ('missing', 'invalid_box', 'empty_pixel_region'):
+                    self.event('initial_observation_unavailable', reason=reason)
+                    self.finish('initial_target_lost')
+                else:
+                    self.abort('initialization_failed', reason)
             return
         if self.phase == 'ready':
             # A newer missing result invalidates the old success even before the next action.
@@ -259,7 +263,7 @@ class StationaryRun:
         now = self.clock()
         self.discard(reason, now)
         summary = self.metrics.summary(now) if self.metrics else dict(executed_actions=0, valid_results=0)
-        summary.update(episode=self.episode, reason=reason, terminated=reason == 'target_lost',
+        summary.update(episode=self.episode, reason=reason, terminated=reason in ('target_lost', 'initial_target_lost'),
                        truncated=reason == 'step_limit', new_transitions=self.new_transitions,
                        excluded_transitions=self.excluded, initial_command=self.initial_command,
                        initial_observation=self.initial, reset_elapsed_s=(self.metrics.started if self.metrics else now)-self.reset_started)
