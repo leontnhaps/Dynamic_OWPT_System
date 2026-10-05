@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import datetime
 import time
+import uuid
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
@@ -11,6 +12,7 @@ from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 from common.control_timing import CONTROL_PERIODS_S, PRIMARY_CONTROL_PERIOD_S
 from common.tx_tracking import SCHEMA, TrackingConfig, RunSettings, Sample, invalid_reason
 from common.pv_detection import TARGET_SELECTION
+from common.tx_setup import TX_CAMERA_SETTINGS
 from Tx.Controller.detection_panel import PVDetector, DetectionPanel
 from Tx.Controller.stationary_core import StationaryRun
 from Tx.Controller.stationary_learning import SACLearner, RunLog, SAC_SETTINGS, checkpoint_info, digest
@@ -29,6 +31,9 @@ class StationaryPanel(ttk.Frame):
         self.latest = self.display = None
         self.closed = False
         self.servo_available = None
+        self.preparing = None
+        self.setup_pending = None
+        self.hardware_ready = False
         self.widgets = []
         self.path = tk.StringVar(value=str(DEFAULT_YOLO_PATH))
         self.checkpoint = tk.StringVar()
@@ -70,10 +75,10 @@ class StationaryPanel(ttk.Frame):
         ttk.Label(self, text='8차원 관측 · Δ ±5° / 1° 단위 · reward = −거리/1000 + intensity mean · 적중 ≤23 px 후 유지').pack(anchor='w')
         ttk.Label(self, text='유효 경험 1,000개부터 episode 종료 후 학습 · batch 256 · 256×256 · 미검출 3초 · captures/M3-2/').pack(anchor='w')
         row = ttk.Frame(self); row.pack(fill='x', pady=4)
-        for label, fn in [('모델 준비', self.prepare), ('검출 미리보기', self.preview),
+        for label, fn in [('자동 준비 (영상 · 서보 · 모델)', self.prepare), ('검출 미리보기', self.preview),
                           ('학습 / 평가 시작', self.start), ('전체 중지 · 저장', self.stop), ('결과 폴더 확인', self.show_folder)]:
             ttk.Button(row, text=label, command=lambda f=fn: self.guard(f)).pack(side='left', padx=3)
-        self.status = tk.StringVar(value='M1-1 영상 시작 → M1-2 운용 범위 적용 → 모델 준비 → 검출 미리보기 → 학습 / 평가 시작')
+        self.status = tk.StringVar(value='이 탭에서 자동 준비 → PV 검출 확인 → 학습 / 평가 시작')
         self.progress = tk.StringVar(value='목표각은 명령값이며 실제 서보 각도·도달 피드백이 아닙니다.')
         self.result_text = tk.StringVar()
         for var in (self.status, self.progress, self.result_text):
@@ -86,7 +91,7 @@ class StationaryPanel(ttk.Frame):
 
     @property
     def busy(self):
-        return self.active or self.work is not None
+        return self.active or self.work is not None or self.preparing is not None
 
     def lock(self, locked):
         for widget in self.widgets:
@@ -96,6 +101,7 @@ class StationaryPanel(ttk.Frame):
         try:
             fn()
         except Exception as exc:
+            self.cancel_preparation()
             if self.active:
                 self.run.abort('execution_error', str(exc))
             self.status.set('오류: '+str(exc))
@@ -132,9 +138,9 @@ class StationaryPanel(ttk.Frame):
             raise ValueError('현재 작업을 중지하고 완료를 기다리세요.')
         self.stop_other_panels()
         self.previewing = False
-        if not self.app.servo.limits:
-            raise ValueError('M1-2 운용 범위를 먼저 적용하세요.')
-        cfg = TrackingConfig(dt=float(self.vars['dt'].get()), **self.app.servo.limits)
+        if not self.app.servo.online:
+            raise ValueError('서버와 Raspberry Pi를 실행하고 연결을 확인하세요.')
+        cfg = TrackingConfig(dt=float(self.vars['dt'].get()), **(self.app.servo.limits or {}))
         cfg.validate()
         mode = {'신규 학습': 'new', '이어서 학습': 'resume', '고정 모델 평가': 'evaluate'}[self.mode.get()]
         source = self.checkpoint.get().strip()
@@ -145,6 +151,10 @@ class StationaryPanel(ttk.Frame):
         self.learner = self.detector = None
         self.latest = self.display = None
         self.rendered = None
+        self.preparing = 'model'
+        self.hardware_ready = False
+        self.setup_pending = None
+        self.setup_deadline = time.monotonic()+120
         self.lock(True)
         self.status.set('YOLO / SAC 준비 중 · 이동 명령 없음')
         self.work_kind = 'prepare'
@@ -153,8 +163,6 @@ class StationaryPanel(ttk.Frame):
             selected = cfg
             if mode != 'new':
                 _, _, selected = checkpoint_info(source)
-                if selected.limits != cfg.limits:
-                    raise ValueError('Checkpoint 운용 범위를 M1-2에 동일하게 적용하세요.')
             detector = PVDetector(path, yolo_device)
             if selected.class_id not in detector.names:
                 raise ValueError('YOLO PV class ID 0을 확인하세요.')
@@ -165,33 +173,82 @@ class StationaryPanel(ttk.Frame):
 
         self.work = self.learn_pool.submit(load)
 
+    def cancel_preparation(self):
+        if self.preparing is not None:
+            self.preparing = None
+            self.setup_pending = None
+            self.hardware_ready = False
+            self.previewing = False
+            if self.work is None:
+                self.lock(False)
+
+    def prepare_hardware(self):
+        """Configure camera and command limits; no reset/motion before Start."""
+        self.settings().validate(self.cfg)
+        self.preparing = 'limits'
+        self.setup_pending = 'm3-2-setup-'+uuid.uuid4().hex
+        self.setup_deadline = time.monotonic()+5
+        self.camera_requested_at = time.monotonic()
+        for key, value in TX_CAMERA_SETTINGS.items():
+            self.app.values[key].set('' if value is None else str(value))
+        if not self.send(dict(cmd='preview', enable=True, request_id='m3-2-camera-'+uuid.uuid4().hex, **TX_CAMERA_SETTINGS)):
+            raise ValueError('카메라 자동 시작 실패')
+        if not self.send(dict(cmd='servo_config', request_id=self.setup_pending, **self.cfg.limits)):
+            raise ValueError('서보 운용 범위 자동 적용 실패')
+        self.status.set('자동 준비: 카메라 시작 · 실제 서보 연결/운용 범위 확인 중')
+
+    def prepare_poll(self):
+        if self.preparing is None:
+            return
+        now = time.monotonic()
+        if now >= self.setup_deadline:
+            raise ValueError('자동 준비 시간 초과: '+self.preparing)
+        if self.preparing != 'frames':
+            return
+        frame = self.app.current
+        if not frame or frame[2] <= self.camera_requested_at or not 0 <= now-frame[2] <= self.cfg.dt:
+            return
+        if frame[1].get('simulated') is not False:
+            raise ValueError('실제 카메라 영상이 필요합니다.')
+        if self.app.size != (self.cfg.width, self.cfg.height) or not self.camera_matches(frame):
+            return
+        self.preparing = None
+        self.hardware_ready = True
+        self.previewing = True
+        self.last_frame = None
+        self.lock(False)
+        self.progress.set(f'자동 적용: Pan {self.cfg.pan_min}~{self.cfg.pan_max}°, Tilt {self.cfg.tilt_min}~{self.cfg.tilt_max}° · {self.cfg.dt*1000:.0f} ms')
+        self.status.set('자동 준비 완료 · PV 검출 확인 후 학습 / 평가 시작을 누르세요. 현재 이동 명령 없음.')
+
     def check_camera(self):
         frame = self.app.current
         if (not frame or self.app.size != (1296, 972) or frame[1].get('simulated') is not False
                 or not 0 <= time.monotonic()-frame[2] <= self.cfg.dt):
             raise ValueError('1296×972 실제 카메라의 최신 영상이 필요합니다.')
         if not self.camera_matches(frame):
-            raise ValueError('M1-1에서 1296×972 / 30 FPS / quality 80 / 자동 노출·gain을 적용하세요.')
+            raise ValueError('카메라 설정이 달라졌습니다. 이 탭에서 자동 준비를 다시 실행하세요.')
         return frame
 
     @staticmethod
     def camera_matches(frame):
-        expected = dict(width=1296, height=972, fps=30, quality=80, shutter_speed=None, analogue_gain=None)
+        expected = TX_CAMERA_SETTINGS
         requested = frame[1].get('requested', {})
         return all(k in requested and requested[k] == value for k, value in expected.items())
 
     def check_prepared(self):
         if self.learner is None:
-            raise ValueError('모델 준비부터 실행하세요.')
-        if self.work is not None or self.active:
+            raise ValueError('이 탭에서 자동 준비부터 실행하세요.')
+        if self.busy:
             raise ValueError('현재 작업이 끝난 뒤 시작하세요.')
+        if not self.hardware_ready:
+            raise ValueError('이 탭에서 자동 준비를 완료하세요.')
         if (resolve_yolo_path(self.path.get()) != self.identity['yolo_path']
                 or self.device.get() != self.identity['yolo_device'] or self.sac_device.get() != self.identity['sac_device']
                 or self.checkpoint.get().strip() != self.identity['selected_checkpoint']
                 or int(self.vars['seed'].get()) != self.identity['seed']
                 or float(self.vars['dt'].get()) != self.cfg.dt
                 or {'신규 학습': 'new', '이어서 학습': 'resume', '고정 모델 평가': 'evaluate'}[self.mode.get()] != self.learner.mode):
-            raise ValueError('변경된 설정으로 모델 준비를 다시 실행하세요.')
+            raise ValueError('변경된 설정으로 자동 준비를 다시 실행하세요.')
         if self.run is not None and self.run.pending:
             raise ValueError('전송된 명령 응답 확인이 필요합니다. Pi 상태를 확인하세요.')
 
@@ -206,7 +263,7 @@ class StationaryPanel(ttk.Frame):
     def start(self):
         self.check_prepared()
         if self.run is not None:
-            raise ValueError('새 실행은 모델 준비를 다시 실행하세요. 이어서 학습은 저장된 checkpoint를 선택하세요.')
+            raise ValueError('새 실행은 자동 준비를 다시 실행하세요. 이어서 학습은 저장된 checkpoint를 선택하세요.')
         self.stop_other_panels()
         frame = self.check_camera()
         servo = self.app.servo
@@ -239,12 +296,14 @@ class StationaryPanel(ttk.Frame):
         return self.app.send(command, tracking=True)
 
     def stop(self):
+        preparing = self.preparing is not None
+        self.cancel_preparation()
         self.previewing = False
         if self.active:
             self.run.abort('user_stop')
             self.status.set('추가 명령 중지 · 완료된 데이터 저장 중 (이미 전달된 이동은 즉시 정지되지 않음)')
         else:
-            self.status.set('미리보기 정지')
+            self.status.set('자동 준비 중단 · 추가 설정/이동 명령 없음' if preparing else '미리보기 정지')
 
     def show_folder(self):
         messagebox.showinfo('M3-2 결과', str(self.log.folder) if self.log else '실행 결과가 아직 없습니다.')
@@ -254,6 +313,36 @@ class StationaryPanel(ttk.Frame):
             self.servo_available = event.get('available')
         if event.get('event') in ('hello', 'agent', 'ready') or (event.get('event') == 'network' and event.get('state') != 'connected'):
             self.servo_available = None
+            self.hardware_ready = False
+        if self.preparing is not None:
+            kind = event.get('event')
+            disconnected = kind == 'network' and event.get('state') != 'connected'
+            foreign = (kind == 'servo' and event.get('operation') in ('move', 'servo_config')
+                       and event.get('request_id') != self.setup_pending)
+            if disconnected or foreign or kind in ('hello', 'agent', 'ready', 'error'):
+                self.cancel_preparation()
+                self.status.set('자동 준비 중단: 연결/장치 상태를 확인하고 자동 준비를 다시 실행하세요.')
+                self.app.record(dict(event='m3_2_setup_error', detail=event))
+                return
+            if self.setup_pending is not None and event.get('request_id') == self.setup_pending and kind == 'servo':
+                if (event.get('operation') != 'servo_config' or event.get('simulated') is not False
+                        or event.get('available') is not True or event.get('limits') != self.cfg.limits):
+                    self.cancel_preparation()
+                    self.status.set('자동 준비 실패: 실제 서보 연결과 운용 범위 응답을 확인하세요.')
+                    self.app.record(dict(event='m3_2_setup_error', detail=event))
+                    return
+                servo = self.app.servo
+                servo.limits = dict(self.cfg.limits)
+                servo.simulated = False
+                for key, value in self.cfg.limits.items():
+                    servo.vars[key].set(str(value))
+                for key in ('speed', 'acc'):
+                    servo.vars[key].set(str(getattr(self.cfg, key)))
+                self.setup_pending = None
+                self.preparing = 'frames'
+                self.setup_deadline = time.monotonic()+15
+                self.status.set('자동 준비: 새 카메라 영상 확인 중')
+            return
         if self.run is None:
             return
         if self.run.reply(event):
@@ -280,13 +369,19 @@ class StationaryPanel(ttk.Frame):
             future, self.work = self.work, None
             if self.work_kind == 'prepare':
                 try:
-                    self.detector, self.learner, self.cfg, self.identity = future.result()
-                    self.run = None
-                    self.vars['dt'].set(f'{self.cfg.dt:.3f}')
-                    self.latest = None
-                    self.status.set('모델 준비 완료 · 검출 미리보기로 PV를 확인하세요.')
-                finally:
+                    loaded = future.result()
+                    if self.preparing == 'model':
+                        self.detector, self.learner, self.cfg, self.identity = loaded
+                        self.run = None
+                        self.vars['dt'].set(f'{self.cfg.dt:.3f}')
+                        self.latest = None
+                        self.prepare_hardware()
+                    else:
+                        self.lock(False)  # Stopped while loading: discard completion, send nothing.
+                except Exception:
+                    self.cancel_preparation()
                     self.lock(False)
+                    raise
             else:
                 try:
                     report = future.result()
@@ -301,6 +396,7 @@ class StationaryPanel(ttk.Frame):
                     self.lock(False)
                     self.status.set('실행 종료 · '+str(self.log.folder))
                     self.previewing = False
+        self.prepare_poll()
         if self.inference is not None and self.inference.done():
             future, self.inference = self.inference, None
             result, frame, frame_id, processed = future.result()

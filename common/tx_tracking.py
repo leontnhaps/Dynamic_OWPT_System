@@ -4,6 +4,7 @@ import math
 import numpy as np
 from common.control_timing import PRIMARY_CONTROL_PERIOD_S, CONTROL_PERIODS_S
 from common.servo import limits_from
+from common.tx_setup import TX_OPERATING_LIMITS
 
 SCHEMA = 'tx-stationary-v1'
 
@@ -11,10 +12,10 @@ SCHEMA = 'tx-stationary-v1'
 @dataclass(frozen=True)
 class TrackingConfig:
     dt: float = PRIMARY_CONTROL_PERIOD_S
-    pan_min: int = -180
-    pan_max: int = 180
-    tilt_min: int = -15
-    tilt_max: int = 40
+    pan_min: int = TX_OPERATING_LIMITS['pan_min']
+    pan_max: int = TX_OPERATING_LIMITS['pan_max']
+    tilt_min: int = TX_OPERATING_LIMITS['tilt_min']
+    tilt_max: int = TX_OPERATING_LIMITS['tilt_max']
     width: int = 1296
     height: int = 972
     laser_u: float = 696.

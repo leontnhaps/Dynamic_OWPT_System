@@ -380,6 +380,7 @@ class PanelIntegrationTests(unittest.TestCase):
     def test_video_inference_continues_during_episode_updates(self):
         from concurrent.futures import Future
         p = StationaryPanel.__new__(StationaryPanel)
+        p.preparing = None
         p.closed = False; p.work = Future(); p.inference = None
         p.previewing = True; p.detector = object(); p.cfg = TrackingConfig()
         p.app = SimpleNamespace(current=(b'jpeg', {}, __import__('time').monotonic(), 0), received_count=3)
@@ -391,6 +392,97 @@ class PanelIntegrationTests(unittest.TestCase):
         p.poll()
         p.infer_pool.submit.assert_called_once()
         p.run.tick.assert_called_once()
+
+
+class AutomaticPreparationTests(unittest.TestCase):
+    def panel(self):
+        from common.tx_setup import TX_CAMERA_SETTINGS
+        p = StationaryPanel.__new__(StationaryPanel)
+        p.cfg = TrackingConfig(); p.preparing = 'model'; p.setup_pending = None
+        p.hardware_ready = False; p.previewing = False; p.run = None; p.work = None
+        p.settings = lambda: RunSettings()
+        p.send = Mock(return_value=True)
+        p.status = Mock(); p.progress = Mock(); p.lock = Mock()
+        p.app = SimpleNamespace(values={k:Mock() for k in TX_CAMERA_SETTINGS},
+            current=None, size=None, record=Mock(),
+            servo=SimpleNamespace(limits=None, simulated=None,
+                vars={k:Mock() for k in (*p.cfg.limits, 'speed', 'acc')}))
+        return p
+
+    def ready_reply(self, p, **overrides):
+        return dict(dict(event='servo', operation='servo_config', request_id=p.setup_pending,
+                         available=True, simulated=False, limits=p.cfg.limits), **overrides)
+
+    def test_cold_start_applies_camera_and_limits_without_moving(self):
+        from common.tx_setup import TX_CAMERA_SETTINGS
+        p = self.panel()
+        p.prepare_hardware()
+        commands = [call.args[0] for call in p.send.call_args_list]
+        self.assertEqual([c['cmd'] for c in commands], ['preview', 'servo_config'])
+        self.assertEqual({k: commands[0][k] for k in TX_CAMERA_SETTINGS}, TX_CAMERA_SETTINGS)
+        p.event(self.ready_reply(p))
+        self.assertEqual(p.app.servo.limits, p.cfg.limits)
+        self.assertEqual(p.preparing, 'frames')
+        received = __import__('time').monotonic()
+        p.app.current = (b'jpeg', dict(simulated=False, requested=TX_CAMERA_SETTINGS), received, 0)
+        p.app.size = (1296, 972)
+        p.prepare_poll()
+        self.assertTrue(p.hardware_ready)
+        self.assertTrue(p.previewing)
+        self.assertIsNone(p.preparing)
+
+    def test_previous_frame_and_wrong_metadata_cannot_complete_setup(self):
+        from common.tx_setup import TX_CAMERA_SETTINGS
+        p = self.panel(); p.prepare_hardware(); p.event(self.ready_reply(p))
+        p.app.size = (1296, 972)
+        p.app.current = (b'jpeg', dict(simulated=False, requested=TX_CAMERA_SETTINGS), p.camera_requested_at-1, 0)
+        p.prepare_poll(); self.assertFalse(p.hardware_ready)
+        p.app.current = (b'jpeg', dict(simulated=False, requested=dict(TX_CAMERA_SETTINGS, fps=15)), __import__('time').monotonic(), 0)
+        p.prepare_poll(); self.assertFalse(p.hardware_ready)
+
+    def test_resume_applies_saved_limits_directly(self):
+        p = self.panel(); p.cfg = TrackingConfig(pan_min=-90, pan_max=90, dt=.8)
+        p.prepare_hardware()
+        command = p.send.call_args_list[1].args[0]
+        self.assertEqual(command['pan_min'], -90)
+        self.assertEqual(command['pan_max'], 90)
+
+    def test_unavailable_servo_disconnect_and_stop_prevent_ready(self):
+        p = self.panel(); p.prepare_hardware()
+        p.event(self.ready_reply(p, available=False))
+        self.assertFalse(p.hardware_ready); self.assertIsNone(p.preparing)
+        p = self.panel(); p.prepare_hardware()
+        p.event(dict(event='network', port=7600, state='disconnected'))
+        self.assertFalse(p.hardware_ready); self.assertIsNone(p.preparing)
+        p = self.panel(); p.prepare_hardware(); p.stop()
+        self.assertIsNone(p.preparing); self.assertFalse(p.previewing)
+
+    def test_stopped_model_loading_does_not_later_configure_devices(self):
+        from concurrent.futures import Future
+        p = self.panel(); p.closed = False; p.work_kind = 'prepare'
+        p.inference = None; p.detector = None
+        p.work = Future(); p.stop()
+        p.work.set_result((object(), object(), TrackingConfig(), {}))
+        p.poll()
+        p.send.assert_not_called()
+        self.assertFalse(p.hardware_ready)
+
+    def test_prepare_has_no_requirement_for_old_tabs_camera_or_limits(self):
+        from concurrent.futures import Future
+        from unittest.mock import patch
+        p = self.panel(); p.closed = False; p.inference = None
+        p.stop_other_panels = Mock(); p.app.servo.online = True
+        def var(value): return SimpleNamespace(get=lambda: value)
+        p.vars = {'dt': var('.720'), 'seed': var('42')}
+        p.mode = var('신규 학습'); p.checkpoint = var(''); p.path = var('weights.pt')
+        p.device = var('cpu'); p.sac_device = var('cpu'); p.learn_pool = Mock()
+        p.learn_pool.submit.return_value = Future()
+        p.preparing = None
+        p.prepare()
+        self.assertEqual(p.preparing, 'model')
+        self.assertIsNone(p.app.current)
+        self.assertIsNone(p.app.servo.limits)
+        p.learn_pool.submit.assert_called_once()
 
 
 @unittest.skipUnless(importlib.util.find_spec('stable_baselines3') and importlib.util.find_spec('torch'),

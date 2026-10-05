@@ -10,6 +10,7 @@ from tkinter import ttk
 import tkinter as tk
 from Tx.Controller.detection_panel import DetectionPanel
 from common.servo import move_from
+from common.tx_setup import TX_CAMERA_SETTINGS, TX_OPERATING_LIMITS
 from common.pv_detection import TARGET_SELECTION, selected_observation_valid
 from Tx.Controller.processing_profile import ProcessingProfile
 
@@ -145,11 +146,11 @@ class TimingPanel(DetectionPanel):
         if self.preparing=='model':
             if self.model is None:return
             # Apply the settings established in M1-1 and M1-2.
-            camera=dict(width=1296,height=972,fps=30,quality=80,shutter_speed=None,analogue_gain=None)
+            camera=dict(TX_CAMERA_SETTINGS)
             for key,value in camera.items():self.app.values[key].set('' if value is None else str(value))
             if not self.app.send(dict(cmd='preview',enable=True,**camera),tracking=True):
                 raise ValueError('카메라 시작 실패')
-            self.setup_command(dict(cmd='servo_config',pan_min=-180,pan_max=180,tilt_min=-15,tilt_max=40),'limits')
+            self.setup_command(dict(cmd='servo_config',**TX_OPERATING_LIMITS),'limits')
             self.status.set('M1-5 자동 준비: 1296×972 / 30 FPS / quality 80 / 자동 노출·gain')
         elif self.preparing=='move' and self.setup_pending is None:
             self.setup_command(dict(cmd='move',pan=0,tilt=0,speed=100,acc=1),'arrival')

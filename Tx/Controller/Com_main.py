@@ -88,9 +88,10 @@ class App:
         widget.configure(state='disabled')
     def send(self,cmd,tracking=False):
         stationary=getattr(self,'stationary',None)
-        if stationary is not None and stationary.active and cmd.get('cmd') in ('move','servo_config','preview','snap','outputs_off'):
+        if stationary is not None and (stationary.active or getattr(stationary,'preparing',None)) and cmd.get('cmd') in ('move','servo_config','preview','snap','outputs_off'):
             if not str(cmd.get('request_id','')).startswith('m3-2-'):
-                stationary.run.abort('external_command',cmd.get('cmd'))
+                if stationary.active:stationary.run.abort('external_command',cmd.get('cmd'))
+                else:stationary.stop()
                 if cmd.get('cmd')!='outputs_off':
                     self.record(dict(event='command_blocked',reason='M3-2 저장 완료 후 다시 실행',command=cmd))
                     return False
