@@ -89,6 +89,8 @@ class DetectionPanel(ttk.Frame):
         for widget in self.widgets: widget.configure(state='disabled' if locked else 'normal')
 
     def load(self):
+        if getattr(getattr(self.app,'stationary',None),'busy',False):
+            raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         if self.future is not None: raise ValueError('진행 중인 작업이 끝난 뒤 다시 시도하세요.')
         self.stop()
         device = self.device.get().strip()
@@ -101,6 +103,8 @@ class DetectionPanel(ttk.Frame):
         self.status.set('YOLO 모델 불러오는 중…')
 
     def start(self):
+        if getattr(getattr(self.app,'stationary',None),'busy',False):
+            raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         timing=getattr(self.app,"timing",None)
         if timing is not None and timing.profile.running:
             raise ValueError("처리 시간 측정을 먼저 종료하세요.")

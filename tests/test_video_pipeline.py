@@ -23,7 +23,8 @@ class VideoPipelineTests(unittest.TestCase):
         a.record=Mock();a.mark=10;a.previous=0;a.fps=30
         a.servo=Mock();a.capture=Mock()
         a.detection=Mock(name='detection');a.live=Mock(name='live');a.timing=Mock(name='timing')
-        for p in (a.detection,a.live,a.timing):p.guard=lambda fn:fn()
+        a.stationary=Mock(name='stationary')
+        for p in (a.detection,a.live,a.timing,a.stationary):p.guard=lambda fn:fn()
         a.timing.profile.running=False
         return a
 

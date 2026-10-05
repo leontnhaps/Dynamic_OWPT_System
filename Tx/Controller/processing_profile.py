@@ -34,6 +34,8 @@ class ProcessingProfile:
         self.display=None;self.rendered_frame=None;self.receipts=[]
 
     def start(self):
+        if getattr(getattr(self.app,'stationary',None),'busy',False):
+            raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         p=self.panel
         if self.running:raise ValueError('처리 시간 측정이 진행 중입니다.')
         if self.future is not None and not self.future.done():raise ValueError('이전 처리 작업 완료 후 다시 시작하세요.')

@@ -1,0 +1,380 @@
+"""M3-2 tab: camera preview, stationary SAC training, resume and evaluation."""
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
+from datetime import datetime
+import time
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from pathlib import Path
+from PIL import ImageDraw, ImageTk
+from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
+from common.control_timing import CONTROL_PERIODS_S, PRIMARY_CONTROL_PERIOD_S
+from common.tx_tracking import SCHEMA, TrackingConfig, RunSettings, Sample, invalid_reason
+from common.pv_detection import TARGET_SELECTION
+from Tx.Controller.detection_panel import PVDetector, DetectionPanel
+from Tx.Controller.stationary_core import StationaryRun
+from Tx.Controller.stationary_learning import SACLearner, RunLog, SAC_SETTINGS, checkpoint_info, digest
+
+
+class StationaryPanel(ttk.Frame):
+    def __init__(self, parent, app):
+        super().__init__(parent, padding=6)
+        self.app = app
+        self.infer_pool = ThreadPoolExecutor(max_workers=1)
+        self.learn_pool = ThreadPoolExecutor(max_workers=1)
+        self.inference = self.work = None
+        self.detector = self.learner = self.run = self.log = None
+        self.previewing = False
+        self.last_frame = self.rendered = None
+        self.latest = self.display = None
+        self.closed = False
+        self.servo_available = None
+        self.widgets = []
+        self.path = tk.StringVar(value=str(DEFAULT_YOLO_PATH))
+        self.checkpoint = tk.StringVar()
+        self.mode = tk.StringVar(value='신규 학습')
+        self.device = tk.StringVar(value='cuda')
+        self.sac_device = tk.StringVar(value='cpu')
+        self.vars = {}
+        for label, var, choose in [('YOLO .pt', self.path, self.browse_yolo),
+                                   ('Checkpoint 폴더', self.checkpoint, self.browse_checkpoint)]:
+            row = ttk.Frame(self); row.pack(fill='x', pady=2)
+            ttk.Label(row, text=label, width=18).pack(side='left')
+            entry = ttk.Entry(row, textvariable=var, width=76)
+            entry.pack(side='left', fill='x', expand=True)
+            button = ttk.Button(row, text='선택', command=choose); button.pack(side='left')
+            self.widgets.extend([entry, button])
+        row = ttk.Frame(self); row.pack(fill='x', pady=3)
+        for label, var, values in [('모드', self.mode, ('신규 학습', '이어서 학습', '고정 모델 평가')),
+                                    ('YOLO 장치', self.device, ('cuda', 'cpu')),
+                                    ('SAC 장치', self.sac_device, ('cpu', 'cuda'))]:
+            ttk.Label(row, text=label).pack(side='left')
+            combo = ttk.Combobox(row, textvariable=var, values=values, state='readonly', width=15)
+            combo.pack(side='left', padx=4); self.widgets.append(combo)
+        period = tk.StringVar(value=f'{PRIMARY_CONTROL_PERIOD_S:.3f}'); self.vars['dt'] = period
+        ttk.Label(row, text='제어주기 s').pack(side='left')
+        combo = ttk.Combobox(row, textvariable=period, values=[f'{v:.3f}' for v in CONTROL_PERIODS_S], state='readonly', width=7)
+        combo.pack(side='left'); self.widgets.append(combo)
+        box = ttk.LabelFrame(self, text='Episode 설정 · 최대 step과 반복은 초기 실험용 입력값', padding=4)
+        box.pack(fill='x')
+        fields = [('max_steps', '최대 step', '100'), ('episodes', '반복 횟수', '10'),
+                  ('settle_s', '초기 이동 대기 s', '2'), ('updates_per_transition', '경험당 업데이트', '1'),
+                  ('seed', 'Seed', '42'), ('pan_low', '초기 Pan min', '-20'), ('pan_high', 'max', '20'),
+                  ('tilt_low', '초기 Tilt min', '-10'), ('tilt_high', 'max', '20')]
+        for i, (key, label, value) in enumerate(fields):
+            r, c = divmod(i, 5)
+            ttk.Label(box, text=label).grid(row=r*2, column=c*2, sticky='w')
+            var = tk.StringVar(value=value); self.vars[key] = var
+            entry = ttk.Entry(box, textvariable=var, width=10)
+            entry.grid(row=r*2+1, column=c*2, padx=5, sticky='w'); self.widgets.append(entry)
+        ttk.Label(self, text='8차원 관측 · Δ ±5° / 1° 단위 · reward = −거리/1000 + intensity mean · 적중 ≤23 px 후 유지').pack(anchor='w')
+        ttk.Label(self, text='유효 경험 1,000개부터 episode 종료 후 학습 · batch 256 · 256×256 · 미검출 3초 · captures/M3-2/').pack(anchor='w')
+        row = ttk.Frame(self); row.pack(fill='x', pady=4)
+        for label, fn in [('모델 준비', self.prepare), ('검출 미리보기', self.preview),
+                          ('학습 / 평가 시작', self.start), ('전체 중지 · 저장', self.stop), ('결과 폴더 확인', self.show_folder)]:
+            ttk.Button(row, text=label, command=lambda f=fn: self.guard(f)).pack(side='left', padx=3)
+        self.status = tk.StringVar(value='M1-1 영상 시작 → M1-2 운용 범위 적용 → 모델 준비 → 검출 미리보기 → 학습 / 평가 시작')
+        self.progress = tk.StringVar(value='목표각은 명령값이며 실제 서보 각도·도달 피드백이 아닙니다.')
+        self.result_text = tk.StringVar()
+        for var in (self.status, self.progress, self.result_text):
+            ttk.Label(self, textvariable=var, wraplength=1120).pack(anchor='w')
+        self.canvas = ttk.Label(self, anchor='center'); self.canvas.pack(fill='both', expand=True)
+
+    @property
+    def active(self):
+        return self.run is not None and self.run.active
+
+    @property
+    def busy(self):
+        return self.active or self.work is not None
+
+    def lock(self, locked):
+        for widget in self.widgets:
+            widget.configure(state='disabled' if locked else ('readonly' if isinstance(widget, ttk.Combobox) else 'normal'))
+
+    def guard(self, fn):
+        try:
+            fn()
+        except Exception as exc:
+            if self.active:
+                self.run.abort('execution_error', str(exc))
+            self.status.set('오류: '+str(exc))
+            self.app.record(dict(event='m3_2_error', message=str(exc)))
+            messagebox.showerror('M3-2', str(exc))
+
+    def browse_yolo(self):
+        path = filedialog.askopenfilename(filetypes=[('YOLO', '*.pt')])
+        if path: self.path.set(path)
+
+    def browse_checkpoint(self):
+        path = filedialog.askdirectory(title='manifest.json이 있는 episode checkpoint 폴더 선택')
+        if path: self.checkpoint.set(path)
+
+    def stop_other_panels(self):
+        if self.app.timing.active or self.app.timing.preparing or self.app.timing.profile.running:
+            raise ValueError('M1-5 측정을 먼저 종료하세요.')
+        self.app.live.stop('M3-2 실행 준비')
+        if self.app.live.pending or self.app.servo.pending or self.app.live.update_requested is not None or self.app.live.future is not None:
+            raise ValueError('기존 명령·모델 작업이 끝난 뒤 시작하세요.')
+        self.app.detection.stop()
+        self.app.timing.stop()
+        if self.app.detection.future is not None or self.app.timing.future is not None:
+            raise ValueError('기존 검출 작업 종료 후 다시 시작하세요.')
+
+    def settings(self):
+        keys = set(RunSettings.__dataclass_fields__)
+        floats = {'settle_s', 'updates_per_transition'}
+        values = {k: (float(v.get()) if k in floats else int(v.get())) for k, v in self.vars.items() if k in keys}
+        return RunSettings(**values)
+
+    def prepare(self):
+        if self.busy or self.inference is not None:
+            raise ValueError('현재 작업을 중지하고 완료를 기다리세요.')
+        self.stop_other_panels()
+        self.previewing = False
+        if not self.app.servo.limits:
+            raise ValueError('M1-2 운용 범위를 먼저 적용하세요.')
+        cfg = TrackingConfig(dt=float(self.vars['dt'].get()), **self.app.servo.limits)
+        cfg.validate()
+        mode = {'신규 학습': 'new', '이어서 학습': 'resume', '고정 모델 평가': 'evaluate'}[self.mode.get()]
+        source = self.checkpoint.get().strip()
+        path, yolo_device, sac_device = resolve_yolo_path(self.path.get()), self.device.get(), self.sac_device.get()
+        seed = int(self.vars['seed'].get())
+        if not 0 <= seed < 2**32:
+            raise ValueError('Seed는 0~2^32−1 정수입니다.')
+        self.learner = self.detector = None
+        self.latest = self.display = None
+        self.rendered = None
+        self.lock(True)
+        self.status.set('YOLO / SAC 준비 중 · 이동 명령 없음')
+        self.work_kind = 'prepare'
+
+        def load():
+            selected = cfg
+            if mode != 'new':
+                _, _, selected = checkpoint_info(source)
+                if selected.limits != cfg.limits:
+                    raise ValueError('Checkpoint 운용 범위를 M1-2에 동일하게 적용하세요.')
+            detector = PVDetector(path, yolo_device)
+            if selected.class_id not in detector.names:
+                raise ValueError('YOLO PV class ID 0을 확인하세요.')
+            learner = SACLearner(selected, mode, source or None, sac_device, seed)
+            identity = dict(yolo_path=path, yolo_sha256=digest(path), yolo_device=yolo_device,
+                            sac_device=sac_device, source_checkpoint=learner.source, selected_checkpoint=source, mode=mode, seed=seed)
+            return detector, learner, selected, identity
+
+        self.work = self.learn_pool.submit(load)
+
+    def check_camera(self):
+        frame = self.app.current
+        if (not frame or self.app.size != (1296, 972) or frame[1].get('simulated') is not False
+                or not 0 <= time.monotonic()-frame[2] <= self.cfg.dt):
+            raise ValueError('1296×972 실제 카메라의 최신 영상이 필요합니다.')
+        if not self.camera_matches(frame):
+            raise ValueError('M1-1에서 1296×972 / 30 FPS / quality 80 / 자동 노출·gain을 적용하세요.')
+        return frame
+
+    @staticmethod
+    def camera_matches(frame):
+        expected = dict(width=1296, height=972, fps=30, quality=80, shutter_speed=None, analogue_gain=None)
+        requested = frame[1].get('requested', {})
+        return all(k in requested and requested[k] == value for k, value in expected.items())
+
+    def check_prepared(self):
+        if self.learner is None:
+            raise ValueError('모델 준비부터 실행하세요.')
+        if self.work is not None or self.active:
+            raise ValueError('현재 작업이 끝난 뒤 시작하세요.')
+        if (resolve_yolo_path(self.path.get()) != self.identity['yolo_path']
+                or self.device.get() != self.identity['yolo_device'] or self.sac_device.get() != self.identity['sac_device']
+                or self.checkpoint.get().strip() != self.identity['selected_checkpoint']
+                or int(self.vars['seed'].get()) != self.identity['seed']
+                or float(self.vars['dt'].get()) != self.cfg.dt
+                or {'신규 학습': 'new', '이어서 학습': 'resume', '고정 모델 평가': 'evaluate'}[self.mode.get()] != self.learner.mode):
+            raise ValueError('변경된 설정으로 모델 준비를 다시 실행하세요.')
+        if self.run is not None and self.run.pending:
+            raise ValueError('전송된 명령 응답 확인이 필요합니다. Pi 상태를 확인하세요.')
+
+    def preview(self):
+        self.check_prepared()
+        self.stop_other_panels()
+        self.check_camera()
+        self.previewing = True
+        self.last_frame = None
+        self.status.set('PV 미리보기 · 서보 이동 없음')
+
+    def start(self):
+        self.check_prepared()
+        if self.run is not None:
+            raise ValueError('새 실행은 모델 준비를 다시 실행하세요. 이어서 학습은 저장된 checkpoint를 선택하세요.')
+        self.stop_other_panels()
+        frame = self.check_camera()
+        servo = self.app.servo
+        if not servo.online or self.servo_available is not True or servo.simulated is not False or servo.limits != self.cfg.limits:
+            raise ValueError('실제 Pi 연결과 저장 모델의 동일한 운용 범위를 확인하세요.')
+        settings = self.settings(); settings.validate(self.cfg)
+        if self.latest is None or invalid_reason(self.latest, time.monotonic(), self.cfg):
+            raise ValueError('검출 미리보기에서 최신 PV 검출을 먼저 확인하세요.')
+        if self.log is not None:
+            self.log.close()
+        folder = self.app.stage_dir('M3-2')/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        config = dict(schema=SCHEMA, tracking=asdict(self.cfg), run=asdict(settings), sac=SAC_SETTINGS,
+                      model=self.identity, target_selection=TARGET_SELECTION, camera_metadata=frame[1],
+                      observation_order=['e_u', 'e_v', 'delta_e_u', 'delta_e_v', 'last_delta_pan', 'last_delta_tilt', 'pan', 'tilt'],
+                      normalization=[696, 588, 1296, 972, 5, 5], angle_normalization=self.cfg.limits,
+                      action_grid='round_half_away_from_zero', beam_pixels='ceil bounds, half-open integer pixel centers',
+                      metrics='post-action observations only; normalized variation includes first action after reset',
+                      source_references=['https://arxiv.org/abs/1812.05905', 'https://spinningup.openai.com/en/latest/algorithms/sac.html'],
+                      hardware_validated=False)
+        self.log = RunLog(folder, config)
+        self.learner.cancel.clear()
+        self.run = StationaryRun(self.cfg, settings, self.learner, self.log, self.send, time.monotonic)
+        self.run.latest = self.latest
+        self.previewing = True
+        self.lock(True)
+        self.run.start()
+        self.status.set('실행 시작 · 저장: '+str(folder))
+
+    def send(self, command):
+        return self.app.send(command, tracking=True)
+
+    def stop(self):
+        self.previewing = False
+        if self.active:
+            self.run.abort('user_stop')
+            self.status.set('추가 명령 중지 · 완료된 데이터 저장 중 (이미 전달된 이동은 즉시 정지되지 않음)')
+        else:
+            self.status.set('미리보기 정지')
+
+    def show_folder(self):
+        messagebox.showinfo('M3-2 결과', str(self.log.folder) if self.log else '실행 결과가 아직 없습니다.')
+
+    def event(self, event):
+        if event.get('event') == 'servo':
+            self.servo_available = event.get('available')
+        if event.get('event') in ('hello', 'agent', 'ready') or (event.get('event') == 'network' and event.get('state') != 'connected'):
+            self.servo_available = None
+        if self.run is None:
+            return
+        if self.run.reply(event):
+            if event.get('event') == 'servo' and event.get('commanded'):
+                self.app.servo.last = event['commanded']
+                for axis in ('pan', 'tilt'):
+                    self.app.servo.vars[axis].set(str(event['commanded'][axis]))
+            return
+        if not self.active:
+            return
+        kind = event.get('event')
+        disconnected = kind == 'network' and event.get('state') != 'connected'
+        # A Pi reconnect/restart also invalidates pending state and requires a new run.
+        device_change = kind in ('hello', 'agent', 'ready')
+        foreign = kind == 'servo' and event.get('operation') in ('move', 'servo_config')
+        if disconnected or device_change or foreign or kind == 'error':
+            self.run.abort('connection_or_device_error', str(event))
+            self.previewing = False
+
+    def poll(self):
+        if self.closed:
+            return
+        if self.work is not None and self.work.done():
+            future, self.work = self.work, None
+            if self.work_kind == 'prepare':
+                try:
+                    self.detector, self.learner, self.cfg, self.identity = future.result()
+                    self.run = None
+                    self.vars['dt'].set(f'{self.cfg.dt:.3f}')
+                    self.latest = None
+                    self.status.set('모델 준비 완료 · 검출 미리보기로 PV를 확인하세요.')
+                finally:
+                    self.lock(False)
+            else:
+                try:
+                    report = future.result()
+                except Exception:
+                    self.run.phase = 'error'
+                    self.previewing = False
+                    self.lock(False)
+                    raise
+                self.result_text.set(f"Episode {report['episode']} · {report['reason']} · RMS {report.get('rms_px')} px · 적중 비율 {report.get('hit_ratio')} · 유효 경험 {report['total_transitions']} · 업데이트 {report['completed_updates']}/{report['planned_updates']}")
+                self.run.saved()
+                if not self.active:
+                    self.lock(False)
+                    self.status.set('실행 종료 · '+str(self.log.folder))
+                    self.previewing = False
+        if self.inference is not None and self.inference.done():
+            future, self.inference = self.inference, None
+            result, frame, frame_id, processed = future.result()
+            sample = Sample(frame_id, frame[2], processed, result['image'].width, result['image'].height,
+                            result['target'], result['count'], frame[1].get('seq'), frame[3],
+                            result['inference_ms'], frame[1].get('simulated', True))
+            self.latest = sample
+            self.display = (result['image'], sample)
+            if self.run is not None and self.active:
+                if not self.camera_matches(frame):
+                    self.run.abort('camera_configuration', '실행 중 카메라 설정 변경')
+                self.run.latest = sample
+                self.record_detection(sample)
+        if self.previewing and self.inference is None and self.detector is not None:
+            frame = self.app.current
+            if frame and frame[2] != self.last_frame and time.monotonic()-frame[2] <= self.cfg.dt:
+                self.last_frame = frame[2]
+                frame_id = self.app.received_count
+                def infer(detector=self.detector, frame=frame, frame_id=frame_id):
+                    result = detector.infer(frame[0], self.cfg.confidence, self.cfg.class_id)
+                    return result, frame, frame_id, time.monotonic()
+                self.inference = self.infer_pool.submit(infer)
+        if self.active:
+            self.run.tick()
+            self.progress.set(f'Episode {self.run.episode}/{self.run.settings.episodes} · {self.run.phase} · step {self.run.steps}/{self.run.settings.max_steps} · 저장 {self.run.new_transitions}개 · 목표각 {self.run.command.tolist()}°')
+            if self.run.save_request is not None and self.work is None:
+                summary, self.run.save_request = self.run.save_request, None
+                self.work_kind = 'save'
+                self.work = self.learn_pool.submit(self.learner.finish_episode, summary, self.log, self.run.settings.updates_per_transition)
+
+    def record_detection(self, sample):
+        reason = invalid_reason(sample, time.monotonic(), self.cfg)
+        row = dict(episode=self.run.episode, phase=self.run.phase, frame_id=sample.frame_id, seq=sample.seq,
+                   receive_unix_ns=sample.receive_unix_ns, receive_s=sample.received, processed_s=sample.processed,
+                   width=sample.width, height=sample.height, simulated=sample.simulated, status=reason or 'detected',
+                   count=sample.count, inference_ms=sample.inference_ms)
+        # Preserve detected raw coordinates even for a stale result; status controls use.
+        if sample.target is not None:
+            row.update(confidence=sample.target['confidence'])
+            row.update(zip(('u', 'v'), sample.target['center']))
+            row.update(zip(('x1', 'y1', 'x2', 'y2'), sample.target['box']))
+        self.log.row('detections', row)
+
+    def render(self):
+        if self.display is None:
+            return
+        image, sample = self.display
+        stale = time.monotonic()-sample.received > self.cfg.dt
+        key = (sample.frame_id, stale)
+        if self.rendered == key:
+            return
+        row = {'status': 'missing'}
+        if sample.target is not None and not stale:
+            row.update(status='detected', **dict(zip(('u', 'v'), sample.target['center'])),
+                       **dict(zip(('x1', 'y1', 'x2', 'y2'), sample.target['box'])))
+        image = DetectionPanel.annotated(image, row)
+        draw = ImageDraw.Draw(image)
+        u, v = self.cfg.laser_u, self.cfg.laser_v
+        draw.line((u-12, v, u+12, v), fill='red', width=2)
+        draw.line((u, v-12, u, v+12), fill='red', width=2)
+        draw.ellipse((u-23, v-23, u+23, v+23), outline='yellow', width=2)
+        draw.text((8, 8), 'STALE' if stale else ('PV detected' if sample.target else 'PV missing'), fill='yellow')
+        image.thumbnail((1000, 340))
+        photo = ImageTk.PhotoImage(image)
+        self.canvas.configure(image=photo); self.canvas.image = photo
+        self.rendered = key
+
+    def close(self):
+        self.stop()
+        self.closed = True
+        if self.run is not None and self.run.save_request is not None and self.work is None:
+            summary, self.run.save_request = self.run.save_request, None
+            self.work = self.learn_pool.submit(self.learner.finish_episode, summary, self.log, self.run.settings.updates_per_transition)
+        if self.log is not None:
+            self.learn_pool.submit(self.log.close)
+        self.infer_pool.shutdown(wait=False, cancel_futures=True)
+        self.learn_pool.shutdown(wait=False, cancel_futures=False)

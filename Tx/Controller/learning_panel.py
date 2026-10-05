@@ -61,6 +61,8 @@ class LearningPanel(LivePanel):
         ttk.Label(new,text='기준점은 실측 보정값 입력. 새 모델: 역수형 + 50px 안쪽 추가 보상(최대 +30), 명령 비용 0. 생성 후 미리보기 → 정지 → 학습 시작.').grid(row=3,column=0,columnspan=8,sticky='w')
 
     def busy(self):
+        if getattr(getattr(self.app,'stationary',None),'busy',False):
+            raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         if getattr(self,'batch',None) is not None and self.batch.active:
             raise ValueError('연속 학습을 먼저 정지하세요.')
         if self.learning:

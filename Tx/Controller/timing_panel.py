@@ -111,6 +111,8 @@ class TimingPanel(DetectionPanel):
         self.prepare(False)
 
     def prepare(self, auto_measure):
+        if getattr(getattr(self.app,'stationary',None),'busy',False):
+            raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         if self.profile.running:raise ValueError("처리 시간 측정을 먼저 종료하세요.")
         if self.active or self.preparing:
             raise ValueError('측정 또는 자동 준비가 진행 중입니다.')
