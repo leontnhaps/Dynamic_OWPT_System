@@ -45,6 +45,7 @@
 
 ## M3 정지 PV 학습
 
+- 임시 구현한 M2 사진·Calibration 탭과 M4 실전 학습 탭 및 전용 코드는 폐기했다. 현재 마일스톤의 M2 설계 문서와 구분하고, 후속 구현에서 구형 탭·50 px 추가 보상·상태 의존성을 다시 연결하지 않는다. Pi에서 사용하는 공통 촬영 기능과 기존 측정 데이터는 유지한다.
 - 실제 정지 PV 학습은 `stationary_panel.py` / `stationary_core.py` / `stationary_learning.py`와 `common/tx_tracking.py`를 사용한다. 삭제된 `simulation/`에 의존하는 구형 M4의 6차원 모델·적중 보너스·종료 규칙을 가져오지 않는다.
 - 8차원 observation 순서와 고정 정규화, action ±5° 및 1° 양자화, 거리/1000과 bounding-box intensity mean의 두 보상 항을 유지한다. 적중 23 px는 평가 기준이며 episode를 종료하지 않는다.
 - 새 유효 transition 1,000개부터 episode 종료 후 신규 유효 transition 수에 비례하여 업데이트한다. 첫 업데이트 전에는 균일 무작위 행동을 사용한다. 무효 transition을 재검출로 뒤늦게 완성하거나 reward 0으로 채우지 않는다.

@@ -52,6 +52,20 @@ def sample(clock, frame=1, center=(696, 384), **kwargs):
 
 
 class GeometryTests(unittest.TestCase):
+    def test_preparation_without_legacy_panels_keeps_servo_interlock(self):
+        panel = StationaryPanel.__new__(StationaryPanel)
+        panel.app = SimpleNamespace(
+            servo=SimpleNamespace(pending=None),
+            detection=SimpleNamespace(stop=Mock(), future=None),
+            timing=SimpleNamespace(active=False, preparing=None, future=None,
+                                   profile=SimpleNamespace(running=False), stop=Mock()))
+        panel.stop_other_panels()
+        panel.app.detection.stop.assert_called_once()
+        panel.app.timing.stop.assert_called_once()
+        panel.app.servo.pending = 'in-flight-command'
+        with self.assertRaises(ValueError):
+            panel.stop_other_panels()
+
     def test_observation_order_normalization_and_actual_applied_delta(self):
         cfg = TrackingConfig()
         raw, obs = observation(sample(lambda: 0, center=(706, 364)), [20, 10], [3, -2], [6, -12], cfg)

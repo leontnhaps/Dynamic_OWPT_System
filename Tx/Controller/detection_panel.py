@@ -9,7 +9,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageDraw, ImageTk
-from Tx.Controller.live_core import fresh
+from common.pv_detection import fresh
 from common.pv_detection import TARGET_SELECTION, target_from_boxes
 from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 
@@ -116,9 +116,7 @@ class DetectionPanel(ttk.Frame):
             raise ValueError(f'신뢰도는 0 초과 1 이하, class ID 확인: {self.model.names}')
         if not self.app.current or not fresh(self.app.current[2], time.monotonic(), 2):
             raise ValueError('M1-1에서 카메라 영상을 먼저 켜세요.')
-        # Stop any existing live tracking/learning before a detection-only test.
-        self.app.live.stop('M1-3 검출 시험')
-        if self.app.live.pending or self.app.servo.pending:
+        if self.app.servo.pending:
             raise ValueError('이미 전송한 서보 명령의 응답을 기다리세요.')
         self.settings = (confidence, class_id)
         self.running = True; self.last_frame = None

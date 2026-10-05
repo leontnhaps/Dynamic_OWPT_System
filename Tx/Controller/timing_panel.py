@@ -117,9 +117,8 @@ class TimingPanel(DetectionPanel):
         if self.profile.running:raise ValueError("처리 시간 측정을 먼저 종료하세요.")
         if self.active or self.preparing:
             raise ValueError('측정 또는 자동 준비가 진행 중입니다.')
-        self.app.live.stop('M1-5 자동 준비')
         self.app.detection.stop()
-        if self.app.live.pending or self.app.servo.pending:
+        if self.app.servo.pending:
             raise ValueError('기존 명령 응답을 기다린 뒤 시작하세요.')
         if not self.app.servo.online:
             raise ValueError('Pi 제어 연결이 없습니다. 서버·Pi 실행 상태를 확인하세요.')
@@ -200,7 +199,7 @@ class TimingPanel(DetectionPanel):
             self.prepare(True);return
         servo=self.app.servo
         if not self.running or not self.latest:raise ValueError('모델 로딩 후 검출부터 시작하세요.')
-        if not servo.online or servo.pending or self.app.live.pending or not servo.last or servo.simulated is not False:
+        if not servo.online or servo.pending or not servo.last or servo.simulated is not False:
             raise ValueError('실제 Pi 연결·범위 적용·초기 자세 이동을 먼저 확인하세요.')
         if not selected_observation_valid(self.latest[2]) or time.monotonic()-self.latest[1][2]>0.5:
             raise ValueError('최신 영상에서 최고 confidence PV의 유효 좌표가 필요합니다.')

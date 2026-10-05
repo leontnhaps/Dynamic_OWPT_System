@@ -15,8 +15,6 @@ from Tx.Controller.network_client import Network
 from Tx.Controller.servo_panel import ServoPanel
 from Tx.Controller.detection_panel import DetectionPanel
 from Tx.Controller.timing_panel import TimingPanel
-from Tx.Controller.capture_panel import CapturePanel
-from Tx.Controller.learning_panel import LearningPanel as LivePanel
 from Tx.Controller.stationary_panel import StationaryPanel
 
 class App:
@@ -34,9 +32,7 @@ class App:
         self.servo=ServoPanel(tabs,self);tabs.add(self.servo,text='M1-2 (Pan/Tilt)')
         self.detection=DetectionPanel(tabs,self);tabs.add(self.detection,text='M1-3 (PV 검출)')
         self.timing=TimingPanel(tabs,self);tabs.add(self.timing,text='M1-5 (응답 · 제어 시간)')
-        self.capture=CapturePanel(tabs,self);tabs.add(self.capture,text='M2 (사진 · Calibration)')
         self.stationary=StationaryPanel(tabs,self);tabs.add(self.stationary,text='M3-2 (정지 PV · SAC)')
-        self.live=LivePanel(tabs,self);tabs.add(self.live,text='M4 (실전 · YOLO + SAC)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -58,7 +54,7 @@ class App:
         def show_preview(event=None):
             if self.timing.profile.running and tabs.select()!=str(self.timing):
                 self.timing.profile.finish('탭 변경으로 처리 시간 측정 중단')
-            if tabs.select() in (str(self.live),str(self.detection),str(self.timing),str(self.stationary)):self.preview.pack_forget()
+            if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary)):self.preview.pack_forget()
             else:self.preview.pack(expand=True,fill='both')
         tabs.bind('<<NotebookTabChanged>>',show_preview)
         root.after(5,self.poll)
@@ -100,10 +96,6 @@ class App:
         if hasattr(self,'timing') and self.timing.active and tracking and cmd.get('request_id') != self.timing.pending:
             self.timing.abort('다른 추적 명령으로 측정 중단')
             return False
-        if not tracking and hasattr(self,'live') and cmd.get('cmd') in ('move','servo_config','preview','outputs_off'):
-            self.live.stop('수동 명령으로 실전 추적 중단')
-            if self.live.pending and cmd.get('cmd') in ('move','servo_config'):
-                messagebox.showerror('실전 테스트','전송된 추적 명령의 응답을 기다리세요.');return False
         if hasattr(self,'timing') and self.timing.active and not tracking and cmd.get('cmd') in ('move','servo_config','preview','outputs_off'):
             self.timing.abort('수동 명령으로 측정 중단')
         try:
@@ -145,8 +137,6 @@ class App:
             for _ in range(100):
                 event=self.net.events.get_nowait();kind=event.get('event')
                 self.servo.event(event)
-                self.capture.event(event)
-                self.live.event(event)
                 self.timing.event(event)
                 self.stationary.event(event)
                 if kind=='network':self.links[str(event['port'])]=event['state']
@@ -158,7 +148,6 @@ class App:
                 self.record(event)
         except queue.Empty:pass
         self.servo.tick()
-        self.capture.poll()
         frame,count=self.net.pop();now=time.monotonic()
         self.received_count=count
         if frame:
@@ -170,7 +159,6 @@ class App:
             except (ValueError,OSError) as exc:self.record(dict(event='decode_error',message=str(exc)))
         # Submit inference and consume results before any image rendering.
         self.detection.guard(self.detection.poll)
-        self.live.guard(self.live.poll)
         self.timing.guard(self.timing.poll)
         self.stationary.guard(self.stationary.poll)
         if now-self.mark>=1:
@@ -189,8 +177,8 @@ class App:
             selected=self.tabs.select()
             if selected==str(self.timing) and self.timing.profile.running:
                 self.timing.profile.render()
-            elif selected in (str(self.detection),str(self.timing),str(self.live),str(self.stationary)):
-                panel=next(p for p in (self.detection,self.timing,self.live,self.stationary) if str(p)==selected)
+            elif selected in (str(self.detection),str(self.timing),str(self.stationary)):
+                panel=next(p for p in (self.detection,self.timing,self.stationary) if str(p)==selected)
                 panel.render()
             elif self.current and self.current[2]!=self.preview_frame:
                 image=Image.open(io.BytesIO(self.current[0]))
@@ -208,7 +196,6 @@ class App:
         self.stationary.close()
         self.timing.close()
         self.detection.close()
-        self.live.close()
         try:self.net.send(dict(cmd='outputs_off'))
         except OSError:pass
         self.net.close();self.root.destroy()

@@ -40,8 +40,8 @@ class ProcessingProfile:
         if self.running:raise ValueError('처리 시간 측정이 진행 중입니다.')
         if self.future is not None and not self.future.done():raise ValueError('이전 처리 작업 완료 후 다시 시작하세요.')
         if p.active or p.preparing or p.future is not None:raise ValueError('기존 측정·모델 작업을 종료한 뒤 시작하세요.')
-        self.app.live.stop('처리 시간 측정');self.app.detection.stop();p.stop()
-        if self.app.live.pending or self.app.servo.pending:raise ValueError('이전 서보 응답을 기다리세요.')
+        self.app.detection.stop();p.stop()
+        if self.app.servo.pending:raise ValueError('이전 서보 응답을 기다리세요.')
         cfg=dict(width=1296,height=972,fps=30,quality=80,shutter_speed=None,analogue_gain=None)
         for key,value in cfg.items():self.app.values[key].set('' if value is None else str(value))
         if not self.app.send(dict(cmd='preview',enable=True,**cfg)):raise ValueError('카메라 시작 실패')
@@ -79,7 +79,7 @@ class ProcessingProfile:
 
     def _tick(self):
         now=time.monotonic()
-        if self.app.live.detecting or self.app.detection.running:
+        if self.app.detection.running:
             raise ValueError('다른 검출 작업 시작으로 측정 중단')
         if self.state=='loading':
             if now>self.deadline:raise ValueError('모델 로딩 시간 초과')
@@ -94,7 +94,7 @@ class ProcessingProfile:
             if frame[1].get('simulated'):raise ValueError('실제 카메라 영상이 필요합니다.')
             req=frame[1].get('requested',{})
             if any(req.get(k)!=v for k,v in self.config['camera'].items()):return
-            if self.app.live.future is not None or self.app.detection.future is not None:return
+            if self.app.detection.future is not None:return
             self.next_phase(now)
         frame=self.app.current
         if not frame or now-frame[2]>5:raise ValueError('영상 수신 5초 이상 중단')

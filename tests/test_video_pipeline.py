@@ -21,10 +21,10 @@ class VideoPipelineTests(unittest.TestCase):
         a.root=Mock();a.tabs=Mock();a.preview=Mock();a.preview_frame=None
         a.closing=False;a.current=None;a.status=Mock();a.status_mark=0
         a.record=Mock();a.mark=10;a.previous=0;a.fps=30
-        a.servo=Mock();a.capture=Mock()
-        a.detection=Mock(name='detection');a.live=Mock(name='live');a.timing=Mock(name='timing')
+        a.servo=Mock()
+        a.detection=Mock(name='detection');a.timing=Mock(name='timing')
         a.stationary=Mock(name='stationary')
-        for p in (a.detection,a.live,a.timing,a.stationary):p.guard=lambda fn:fn()
+        for p in (a.detection,a.timing,a.stationary):p.guard=lambda fn:fn()
         a.timing.profile.running=False
         return a
 
@@ -47,7 +47,7 @@ class VideoPipelineTests(unittest.TestCase):
         a.tabs.select.return_value=str(a.detection)
         a.render()
         a.detection.render.assert_called_once()
-        a.live.render.assert_not_called();a.timing.render.assert_not_called()
+        a.stationary.render.assert_not_called();a.timing.render.assert_not_called()
         a.preview.configure.assert_not_called()
         a.root.after.assert_called_once()
 
@@ -80,7 +80,7 @@ class VideoPipelineTests(unittest.TestCase):
         p.measure_start=9;p.deadline=39;p.rows=[];p.frames=[];p.events=[];p.receipts=[]
         p.rendered_frame=None;p.display=None;p.settings=(.5,0);p.model=object()
         p.panel=SimpleNamespace(canvas=Mock(),measure_status=Mock())
-        p.app=SimpleNamespace(live=SimpleNamespace(detecting=False),detection=SimpleNamespace(running=False),
+        p.app=SimpleNamespace(detection=SimpleNamespace(running=False),
                               current=(b'jpeg',{'seq':2},10.06,2),received_count=2,record=Mock())
         p.job=(b'jpeg',{'seq':1},10,1);p.job_total=1;p.submitted=10.01;p.last=10
         p.future=Future()
@@ -135,8 +135,7 @@ class VideoPipelineTests(unittest.TestCase):
         p.panel=SimpleNamespace(app=None,active=False,preparing=None,future=None,stop=Mock(),
                                 conf=setting('.5'),class_id=setting('0'),device=setting('cpu'),
                                 path=setting('test.pt'),canvas=Mock(),measure_status=Mock())
-        p.app=SimpleNamespace(live=SimpleNamespace(stop=Mock(),pending=None,detecting=False,future=None),
-                              detection=SimpleNamespace(stop=Mock(),running=False,future=None),
+        p.app=SimpleNamespace(detection=SimpleNamespace(stop=Mock(),running=False,future=None),
                               servo=SimpleNamespace(pending=None),send=Mock(return_value=True),
                               values={k:setting('') for k in ('width','height','fps','quality','shutter_speed','analogue_gain')},
                               current=None,received_count=0,record=Mock())

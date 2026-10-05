@@ -119,9 +119,8 @@ class StationaryPanel(ttk.Frame):
     def stop_other_panels(self):
         if self.app.timing.active or self.app.timing.preparing or self.app.timing.profile.running:
             raise ValueError('M1-5 측정을 먼저 종료하세요.')
-        self.app.live.stop('M3-2 실행 준비')
-        if self.app.live.pending or self.app.servo.pending or self.app.live.update_requested is not None or self.app.live.future is not None:
-            raise ValueError('기존 명령·모델 작업이 끝난 뒤 시작하세요.')
+        if self.app.servo.pending:
+            raise ValueError('기존 명령 응답이 끝난 뒤 시작하세요.')
         self.app.detection.stop()
         self.app.timing.stop()
         if self.app.detection.future is not None or self.app.timing.future is not None:

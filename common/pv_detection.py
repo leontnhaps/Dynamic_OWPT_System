@@ -4,6 +4,11 @@ import math
 TARGET_SELECTION = 'highest_confidence'
 
 
+def fresh(received, now, maximum_age=.5):
+    """Accept only recent observations, excluding future timestamps."""
+    return 0 <= now-received <= maximum_age
+
+
 def target_from_boxes(boxes, class_id, confidence, size):
     """Select highest-confidence valid PV; equal scores keep detector order."""
     w,h=size
