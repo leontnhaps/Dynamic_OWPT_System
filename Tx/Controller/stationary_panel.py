@@ -9,8 +9,9 @@ from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 from PIL import ImageDraw, ImageTk
 from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
-from common.control_timing import CONTROL_PERIODS_S, PRIMARY_CONTROL_PERIOD_S
-from common.tx_tracking import SCHEMA, RUN_SCHEMA, TrackingConfig, RunSettings, Sample, invalid_reason
+from common.control_timing import CONTROL_PERIODS_S, PRIMARY_CONTROL_PERIOD_S, EVALUATION_CONTROL_PERIODS_S
+from common.tx_tracking import (SCHEMA, RUN_SCHEMA, TrackingConfig, RunSettings, Sample,
+                                invalid_reason, checkpoint_run_config)
 from common.servo import move_from, number
 from common.pv_detection import TARGET_SELECTION
 from common.tx_setup import TX_CAMERA_SETTINGS
@@ -57,10 +58,15 @@ class StationaryPanel(ttk.Frame):
             ttk.Label(row, text=label).pack(side='left')
             combo = ttk.Combobox(row, textvariable=var, values=values, state='readonly', width=15)
             combo.pack(side='left', padx=4); self.widgets.append(combo)
+            if var is self.mode:
+                combo.bind('<<ComboboxSelected>>', self.mode_changed)
         period = tk.StringVar(value=f'{PRIMARY_CONTROL_PERIOD_S:.3f}'); self.vars['dt'] = period
         ttk.Label(row, text='제어주기 s').pack(side='left')
         combo = ttk.Combobox(row, textvariable=period, values=[f'{v:.3f}' for v in CONTROL_PERIODS_S], state='readonly', width=7)
         combo.pack(side='left'); self.widgets.append(combo)
+        self.period_combo = combo
+        self.timing_note = tk.StringVar()
+        ttk.Label(self, textvariable=self.timing_note, wraplength=1120).pack(anchor='w')
         box = ttk.LabelFrame(self, text='Episode 설정 · 최대 step과 반복은 초기 실험용 입력값', padding=4)
         box.pack(fill='x')
         defaults = asdict(RunSettings())
@@ -105,6 +111,7 @@ class StationaryPanel(ttk.Frame):
         for var in (self.status, self.progress, self.result_text):
             ttk.Label(self, textvariable=var, wraplength=1120).pack(anchor='w')
         self.canvas = ttk.Label(self, anchor='center'); self.canvas.pack(fill='both', expand=True)
+        self.sync_period_control()
         self.sync_manual_controls()
 
     @property
@@ -118,7 +125,28 @@ class StationaryPanel(ttk.Frame):
     def lock(self, locked):
         for widget in self.widgets:
             widget.configure(state='disabled' if locked else ('readonly' if isinstance(widget, ttk.Combobox) else 'normal'))
+        self.sync_period_control(locked)
         self.sync_manual_controls()
+
+    def mode_changed(self, event=None):
+        self.vars['dt'].set(f'{PRIMARY_CONTROL_PERIOD_S:.3f}' if self.mode.get() == '신규 학습' else '저장값')
+        self.sync_period_control()
+
+    def sync_period_control(self, locked=False):
+        if 'period_combo' not in self.__dict__:
+            return
+        mode = self.mode.get()
+        if mode == '신규 학습':
+            values = tuple(f'{v:.3f}' for v in CONTROL_PERIODS_S)
+            note = '새 학습: 선택한 주기로 학습합니다.'
+        elif mode == '이어서 학습':
+            values = ('저장값',)
+            note = '이어서 학습: checkpoint에 저장된 주기를 자동 적용합니다.'
+        else:
+            values = ('저장값', *(f'{v:.3f}' for v in EVALUATION_CONTROL_PERIODS_S))
+            note = '고정 모델 평가: 저장값 또는 비교 주기를 선택하세요. 0.600 / 0.500 s는 이동 중 명령 갱신이 가능한 실험값입니다.'
+        self.period_combo.configure(values=values, state='disabled' if locked or mode == '이어서 학습' else 'readonly')
+        self.timing_note.set(note)
 
     def check_manual_available(self):
         if self.busy:
@@ -224,9 +252,13 @@ class StationaryPanel(ttk.Frame):
         self.previewing = False
         if not self.app.servo.online:
             raise ValueError('서버와 Raspberry Pi를 실행하고 연결을 확인하세요.')
-        cfg = TrackingConfig(dt=float(self.vars['dt'].get()), **(self.app.servo.limits or {}))
-        cfg.validate()
         mode = {'신규 학습': 'new', '이어서 학습': 'resume', '고정 모델 평가': 'evaluate'}[self.mode.get()]
+        period_text = self.vars['dt'].get()
+        period = None if period_text == '저장값' else float(period_text)
+        cfg = None
+        if mode == 'new':
+            cfg = TrackingConfig(dt=period, **(self.app.servo.limits or {}))
+            cfg.validate()
         source = self.checkpoint.get().strip()
         path, yolo_device, sac_device = resolve_yolo_path(self.path.get()), self.device.get(), self.sac_device.get()
         seed = int(self.vars['seed'].get())
@@ -245,14 +277,18 @@ class StationaryPanel(ttk.Frame):
 
         def load():
             selected = cfg
+            training_period = cfg.dt if cfg is not None else None
             if mode != 'new':
-                _, _, selected = checkpoint_info(source)
+                _, _, saved_cfg = checkpoint_info(source)
+                training_period = saved_cfg.dt
+                selected = checkpoint_run_config(saved_cfg, mode, period)
             detector = PVDetector(path, yolo_device)
             if selected.class_id not in detector.names:
                 raise ValueError('YOLO PV class ID 0을 확인하세요.')
             learner = SACLearner(selected, mode, source or None, sac_device, seed)
             identity = dict(yolo_path=path, yolo_sha256=digest(path), yolo_device=yolo_device,
-                            sac_device=sac_device, source_checkpoint=learner.source, selected_checkpoint=source, mode=mode, seed=seed)
+                            sac_device=sac_device, source_checkpoint=learner.source, selected_checkpoint=source, mode=mode, seed=seed,
+                            training_control_period_s=training_period)
             return detector, learner, selected, identity
 
         self.work = self.learn_pool.submit(load)
@@ -302,7 +338,8 @@ class StationaryPanel(ttk.Frame):
         self.last_frame = None
         self.lock(False)
         self.progress.set(f'자동 적용: Pan {self.cfg.pan_min}~{self.cfg.pan_max}°, Tilt {self.cfg.tilt_min}~{self.cfg.tilt_max}° · {self.cfg.dt*1000:.0f} ms')
-        self.status.set('자동 준비 완료 · PV 검출 확인 후 학습 / 평가 시작을 누르세요. 현재 이동 명령 없음.')
+        training_period = self.identity['training_control_period_s']
+        self.status.set(f'자동 준비 완료 · 학습 주기 {training_period:.3f} s / 실행 주기 {self.cfg.dt:.3f} s · 학습 / 평가 시작을 누르세요.')
 
     def check_camera(self):
         frame = self.app.current
@@ -330,7 +367,7 @@ class StationaryPanel(ttk.Frame):
                 or self.device.get() != self.identity['yolo_device'] or self.sac_device.get() != self.identity['sac_device']
                 or self.checkpoint.get().strip() != self.identity['selected_checkpoint']
                 or int(self.vars['seed'].get()) != self.identity['seed']
-                or float(self.vars['dt'].get()) != self.cfg.dt
+                or self.vars['dt'].get() == '저장값' or float(self.vars['dt'].get()) != self.cfg.dt
                 or {'신규 학습': 'new', '이어서 학습': 'resume', '고정 모델 평가': 'evaluate'}[self.mode.get()] != self.learner.mode):
             raise ValueError('변경된 설정으로 자동 준비를 다시 실행하세요.')
         if self.run is not None and self.run.pending:
@@ -359,6 +396,10 @@ class StationaryPanel(ttk.Frame):
         folder = self.app.stage_dir('M3-2')/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         config = dict(schema=RUN_SCHEMA, checkpoint_schema=SCHEMA,
                       tracking=asdict(self.cfg), run=asdict(settings), sac=SAC_SETTINGS,
+                      control_timing=dict(training_period_s=self.identity['training_control_period_s'],
+                                          execution_period_s=self.cfg.dt,
+                                          evaluation_override=self.learner.mode == 'evaluate' and
+                                          self.cfg.dt != self.identity['training_control_period_s']),
                       episode_policy='count_initial_target_lost_and_target_lost; stop_on_device_or_camera_failure',
                       model=self.identity, target_selection=TARGET_SELECTION, camera_metadata=frame[1],
                       observation_order=['e_u', 'e_v', 'delta_e_u', 'delta_e_v', 'last_delta_pan', 'last_delta_tilt', 'pan', 'tilt'],

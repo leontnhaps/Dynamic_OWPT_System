@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 import numpy as np
-from common.tx_tracking import SCHEMA, TrackingConfig
+from common.tx_tracking import SCHEMA, TrackingConfig, checkpoint_run_config
 
 SAC_SETTINGS = dict(learning_rate=3e-4, buffer_size=1_000_000, batch_size=256,
                     gamma=.99, tau=.005, learning_starts=1000, ent_coef='auto',
@@ -163,23 +163,22 @@ def checkpoint_info(path):
 
 class SACLearner:
     def __init__(self, cfg, mode='new', checkpoint=None, device='cpu', seed=42):
-        from stable_baselines3 import SAC
-        from stable_baselines3.common.logger import configure
-        import torch
         if mode not in ('new', 'resume', 'evaluate'):
             raise ValueError('Unknown run mode')
+        cfg.validate(evaluation=mode == 'evaluate')
         self.mode, self.cfg = mode, cfg
         self.cancel = threading.Event()
         self.rng = np.random.default_rng(seed)
         self.total_transitions = self.updates = self.executed_actions = self.episodes = 0
         self.source = None
         if mode == 'new':
-            cfg.validate()
             self.policy = make_policy(cfg, device, seed)
         else:
             source, state, saved_cfg = checkpoint_info(checkpoint)
-            if cfg != saved_cfg:
-                raise ValueError('저장된 제어주기·정규화·보상·각도 설정을 유지해야 합니다.')
+            if cfg != checkpoint_run_config(saved_cfg, mode, cfg.dt):
+                raise ValueError('저장된 정규화·보상·각도 설정과 학습 재개의 제어주기를 유지해야 합니다.')
+            from stable_baselines3 import SAC
+            from stable_baselines3.common.logger import configure
             self.source = str(source.resolve())
             self.policy = SAC.load(source/'model.zip', device=device)
             if self.policy.observation_space.shape != (8,) or self.policy.action_space.shape != (2,):

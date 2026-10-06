@@ -1,13 +1,13 @@
 """M2/M3 camera observations, commands and episode metrics (no hardware I/O)."""
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import math
 import numpy as np
-from common.control_timing import PRIMARY_CONTROL_PERIOD_S, CONTROL_PERIODS_S
+from common.control_timing import PRIMARY_CONTROL_PERIOD_S, CONTROL_PERIODS_S, EVALUATION_CONTROL_PERIODS_S
 from common.servo import limits_from
 from common.tx_setup import TX_OPERATING_LIMITS
 
 SCHEMA = 'tx-stationary-v1'
-RUN_SCHEMA = 'tx-stationary-run-v2'
+RUN_SCHEMA = 'tx-stationary-run-v3'
 
 
 @dataclass(frozen=True)
@@ -45,14 +45,16 @@ class TrackingConfig:
     def limits(self):
         return {k: getattr(self, k) for k in ('pan_min', 'pan_max', 'tilt_min', 'tilt_max')}
 
-    def validate(self):
+    def validate(self, *, evaluation=False):
         if not all(math.isfinite(v) for v in asdict(self).values()):
             raise ValueError('설정은 유한한 수치여야 합니다.')
         limits_from(self.limits)
         if not all(float(v).is_integer() for v in self.limits.values()):
             raise ValueError('운용 한계각은 1° 단위로 적용하세요.')
-        if self.dt not in CONTROL_PERIODS_S:
-            raise ValueError('제어주기는 0.720 또는 0.800 s입니다.')
+        periods = EVALUATION_CONTROL_PERIODS_S if evaluation else CONTROL_PERIODS_S
+        if self.dt not in periods:
+            raise ValueError('평가 제어주기는 0.720 / 0.800 / 0.600 / 0.500 s입니다.' if evaluation
+                             else '학습 제어주기는 0.720 또는 0.800 s입니다.')
         fixed = TrackingConfig()
         # M3-1 geometry, action and detector settings are one persisted contract.
         for key in ('width', 'height', 'laser_u', 'laser_v', 'beam_wx', 'beam_wy',
@@ -61,6 +63,16 @@ class TrackingConfig:
                 raise ValueError(f'M3-1 고정 설정 불일치: {key}')
         if min(self.reward_distance, self.error_weight, self.aim_weight) <= 0:
             raise ValueError('보상 정규화와 계수는 양수여야 합니다.')
+
+
+def checkpoint_run_config(saved_cfg, mode, period=None):
+    """Resume the saved contract, with a period-only override for frozen evaluation."""
+    saved_cfg.validate()
+    if mode not in ('resume', 'evaluate'):
+        raise ValueError('Checkpoint 실행 모드를 확인하세요.')
+    cfg = replace(saved_cfg, dt=period) if mode == 'evaluate' and period is not None else saved_cfg
+    cfg.validate(evaluation=mode == 'evaluate')
+    return cfg
 
 
 @dataclass(frozen=True)

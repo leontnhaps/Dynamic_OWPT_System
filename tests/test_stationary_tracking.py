@@ -1,5 +1,5 @@
 import csv
-from dataclasses import replace
+from dataclasses import asdict, replace
 import importlib.util
 import json
 import math
@@ -7,11 +7,12 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 import numpy as np
 from common.tx_tracking import (TrackingConfig, RunSettings, Sample, BeamMap,
-                                observation, action_command, invalid_reason, EpisodeMetrics)
+                                observation, action_command, invalid_reason, EpisodeMetrics,
+                                checkpoint_run_config, RUN_SCHEMA)
 from Tx.Controller.stationary_core import StationaryRun
 from Tx.Controller.stationary_learning import RunLog, SACLearner, SAC_SETTINGS, checkpoint_info, digest, dump
 from Tx.Controller.stationary_panel import StationaryPanel
@@ -124,6 +125,27 @@ class GeometryTests(unittest.TestCase):
         for cfg in (TrackingConfig(dt=.1), TrackingConfig(pan_max=180.5), TrackingConfig(reward_distance=0)):
             with self.assertRaises(ValueError): cfg.validate()
         with self.assertRaises(ValueError): RunSettings().validate(TrackingConfig(pan_min=-10))
+
+    def test_short_periods_are_evaluation_only_and_saved_contract_is_preserved(self):
+        saved = TrackingConfig(dt=.8, pan_min=-90, pan_max=90, reward_distance=900)
+        self.assertEqual(checkpoint_run_config(saved, 'evaluate'), saved)
+        self.assertEqual(checkpoint_run_config(saved, 'resume', .5), saved)
+        for period in (.6, .5):
+            selected = checkpoint_run_config(saved, 'evaluate', period)
+            self.assertEqual(asdict(selected), dict(asdict(saved), dt=period))
+            with self.assertRaises(ValueError): selected.validate()
+            with self.assertRaises(ValueError): SACLearner(selected, 'new')
+        for period in (.1, 0, -1, float('nan'), float('inf')):
+            with self.assertRaises(ValueError): checkpoint_run_config(saved, 'evaluate', period)
+
+    def test_checkpoint_load_rejects_training_period_change_and_other_eval_changes(self):
+        saved = TrackingConfig()
+        with patch('Tx.Controller.stationary_learning.checkpoint_info', return_value=(Path('checkpoint'), {}, saved)):
+            for cfg, mode in [(replace(saved, dt=.8), 'resume'),
+                              (replace(saved, dt=.5, reward_distance=900), 'evaluate'),
+                              (replace(saved, dt=.6, pan_min=-90), 'evaluate')]:
+                with self.subTest(mode=mode, cfg=cfg), self.assertRaisesRegex(ValueError, '저장된'):
+                    SACLearner(cfg, mode, 'checkpoint')
 
 
 class RunTests(unittest.TestCase):
@@ -309,6 +331,28 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.run.save_request['valid_results'], 2)
         self.assertEqual(self.run.save_request['new_transitions'], 0)
         self.assertEqual(self.learner.behaviors, [False, False])
+
+    def test_short_evaluation_uses_selected_wait_freshness_and_no_catchup(self):
+        self.cfg = TrackingConfig(dt=.5)
+        self.learner.mode = 'evaluate'
+        self.run = StationaryRun(self.cfg, self.settings, self.learner, self.log,
+                                 lambda c: self.commands.append(c) or True, self.clock)
+        self.begin(); self.command()
+        self.clock.advance(.499)
+        self.run.latest = sample(self.clock, 2); self.run.tick()
+        self.assertEqual(self.run.phase, 'result')
+        self.result(3, delay=.002)
+        self.assertEqual(self.run.phase, 'ready')
+        self.command()
+        self.assertAlmostEqual(self.run.inflight['command_interval_s'], .501)
+        self.result(4, delay=.8)
+        self.assertEqual(self.run.phase, 'saving')
+        self.assertEqual(len(self.commands), 3)
+        self.assertFalse(self.learner.transitions)
+        self.assertEqual(self.learner.behaviors, [False, False])
+        self.assertEqual(invalid_reason(sample(self.clock, 5), self.clock()+.501, self.cfg), 'stale')
+        with (self.log.folder/'steps.csv').open() as f: rows = list(csv.DictReader(f))
+        self.assertAlmostEqual(float(rows[1]['interval_excess_s']), .001)
 
     def test_latest_missing_prevents_old_success_action(self):
         self.begin()
@@ -547,6 +591,7 @@ class AutomaticPreparationTests(unittest.TestCase):
         p = StationaryPanel.__new__(StationaryPanel)
         p.cfg = TrackingConfig(); p.preparing = 'model'; p.setup_pending = None
         p.hardware_ready = False; p.previewing = False; p.run = None; p.work = None
+        p.identity = {'training_control_period_s': .72}
         p.settings = lambda: RunSettings()
         p.send = Mock(return_value=True)
         p.status = Mock(); p.progress = Mock(); p.lock = Mock()
@@ -631,13 +676,35 @@ class AutomaticPreparationTests(unittest.TestCase):
         self.assertIsNone(p.app.servo.limits)
         p.learn_pool.submit.assert_called_once()
 
+    def test_prepare_applies_evaluation_period_and_resume_uses_saved_period(self):
+        from concurrent.futures import Future
+        for mode, selection, expected in [('evaluate', '.500', .5), ('evaluate', '저장값', .8), ('resume', '.500', .8)]:
+            p = self.panel(); p.preparing = None; p.inference = None
+            p.stop_other_panels = Mock(); p.app.servo.online = True
+            def var(value): return SimpleNamespace(get=lambda: value)
+            p.vars = {'dt': var(selection), 'seed': var('42')}
+            p.mode = var('고정 모델 평가' if mode == 'evaluate' else '이어서 학습')
+            p.checkpoint = var('checkpoint'); p.path = var('weights.pt')
+            p.device = var('cpu'); p.sac_device = var('cpu'); p.learn_pool = Mock()
+            p.learn_pool.submit.return_value = Future()
+            saved = TrackingConfig(dt=.8, pan_min=-90, pan_max=90)
+            with patch('Tx.Controller.stationary_panel.checkpoint_info', return_value=(Path('checkpoint'), {}, saved)), \
+                 patch('Tx.Controller.stationary_panel.PVDetector', return_value=SimpleNamespace(names={0: 'PV'})), \
+                 patch('Tx.Controller.stationary_panel.SACLearner', return_value=SimpleNamespace(source='checkpoint')) as learner, \
+                 patch('Tx.Controller.stationary_panel.digest', return_value='hash'):
+                p.prepare()
+                detector, model, selected, identity = p.learn_pool.submit.call_args.args[0]()
+            self.assertEqual(selected, replace(saved, dt=expected))
+            self.assertEqual(learner.call_args.args[0], selected)
+            self.assertEqual(identity['training_control_period_s'], .8)
+
     def test_start_without_preview_detection_attempts_reset_and_records_new_rules(self):
         p = self.panel(); p.preparing = None; p.servo_available = True
         p.app.servo.online = True; p.app.servo.simulated = False
         p.app.servo.limits = p.cfg.limits
         p.check_prepared = Mock(); p.stop_other_panels = Mock()
         p.check_camera = Mock(return_value=(b'jpeg', {'simulated':False}, 10, 0))
-        p.latest = None; p.log = None; p.learner = Learner(); p.identity = {}
+        p.latest = None; p.log = None; p.learner = Learner()
         with tempfile.TemporaryDirectory() as folder:
             p.app.stage_dir = lambda stage: Path(folder)
             p.start()
@@ -645,10 +712,30 @@ class AutomaticPreparationTests(unittest.TestCase):
                 self.assertEqual(p.run.phase, 'reset_reply')
                 p.send.assert_called_once()
                 config = json.loads((p.log.folder/'config.json').read_text())
-                self.assertEqual(config['schema'], 'tx-stationary-run-v2')
+                self.assertEqual(config['schema'], RUN_SCHEMA)
                 self.assertEqual(config['checkpoint_schema'], 'tx-stationary-v1')
                 self.assertEqual([config['run'][k] for k in ('pan_low', 'pan_high', 'tilt_low', 'tilt_high')],
                                  [-27, -7, -10, 5])
+            finally:
+                p.log.close()
+
+    def test_short_evaluation_logs_training_and_execution_period_separately(self):
+        p = self.panel(); p.preparing = None; p.servo_available = True
+        p.cfg = TrackingConfig(dt=.6)
+        p.app.servo.online = True; p.app.servo.simulated = False; p.app.servo.limits = p.cfg.limits
+        p.check_prepared = Mock(); p.stop_other_panels = Mock()
+        p.check_camera = Mock(return_value=(b'jpeg', {'simulated':False}, 10, 0))
+        p.latest = None; p.log = None; p.learner = Learner(); p.learner.mode = 'evaluate'
+        with tempfile.TemporaryDirectory() as folder:
+            p.app.stage_dir = lambda stage: Path(folder)
+            p.start()
+            try:
+                config = json.loads((p.log.folder/'config.json').read_text())
+                self.assertEqual(config['schema'], 'tx-stationary-run-v3')
+                self.assertEqual(config['tracking']['dt'], .6)
+                self.assertEqual(config['control_timing'], dict(training_period_s=.72,
+                                 execution_period_s=.6, evaluation_override=True))
+                self.assertEqual(p.run.cfg.dt, .6)
             finally:
                 p.log.close()
 
@@ -677,10 +764,15 @@ class RealSACCheckpointTests(unittest.TestCase):
             self.assertEqual(restored.policy.replay_buffer.size(), 1000)
             self.assertTrue(torch.equal(restored.policy.log_ent_coef, learner.policy.log_ent_coef))
             self.assertTrue(restored.policy.actor.optimizer.state_dict()['state'])
-            eval_model = SACLearner(TrackingConfig(), 'evaluate', source)
+            saved_hashes = {p.name: digest(p) for p in source.iterdir() if p.is_file()}
+            eval_model = SACLearner(TrackingConfig(dt=.5), 'evaluate', source)
             before = {k: v.clone() for k, v in eval_model.policy.policy.state_dict().items()}
             self.assertFalse(eval_model.add(obs, [0, 0], .2, obs, True))
             eval_model.action(obs, False)
+            report = eval_model.finish_episode(dict(episode=1, reason='step_limit', new_transitions=0), Mock(), 1)
+            self.assertEqual(report['completed_updates'], 0)
+            self.assertIsNone(report['checkpoint'])
+            self.assertEqual(saved_hashes, {p.name: digest(p) for p in source.iterdir() if p.is_file()})
             for key, value in eval_model.policy.policy.state_dict().items(): self.assertTrue(torch.equal(value, before[key]))
             log.close()
 

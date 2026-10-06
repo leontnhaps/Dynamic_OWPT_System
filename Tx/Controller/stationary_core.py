@@ -7,7 +7,7 @@ from common.tx_tracking import BeamMap, EpisodeMetrics, invalid_reason, observat
 
 class StationaryRun:
     def __init__(self, cfg, settings, learner, log, send, clock):
-        cfg.validate()
+        cfg.validate(evaluation=learner.mode == 'evaluate')
         settings.validate(cfg)
         self.cfg, self.settings = cfg, settings
         self.learner, self.log, self.send, self.clock = learner, log, send, clock
