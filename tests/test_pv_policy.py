@@ -4,15 +4,13 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
-from common.pv_detection import TARGET_SELECTION, selected_observation_valid, target_from_boxes
+from common.pv_detection import TARGET_SELECTION, fresh, selected_observation_valid, target_from_boxes
 from Tx.Controller.detection_panel import DetectionPanel
 from Tx.Controller.timing_panel import TimingPanel
-from Tx.Controller.live_core import target_from_boxes as live_selector
 
 
 class PVPolicyTests(unittest.TestCase):
     def test_shared_selector_and_selected_coordinate_validation(self):
-        self.assertIs(live_selector,target_from_boxes)
         target,count=target_from_boxes([[0,0,10,10,.7,0],[10,10,20,20,.9,0]],0,.5,(100,100))
         self.assertEqual(target['center'],[15,15]);self.assertEqual(count,2)
         row=dict(status='detected',count=count,u=15,v=15)
@@ -35,7 +33,7 @@ class PVPolicyTests(unittest.TestCase):
             limits=dict(pan_min=-180,pan_max=180,tilt_min=-15,tilt_max=40),
             values=lambda:dict(pan=0,tilt=0,speed=100,acc=1),context=lambda:{})
         with tempfile.TemporaryDirectory() as folder:
-            p.app=SimpleNamespace(servo=servo,live=SimpleNamespace(pending=False),values={},
+            p.app=SimpleNamespace(servo=servo,values={},
                 stage_dir=lambda stage:Path(folder),detection=SimpleNamespace(stop=Mock()),send=Mock(return_value=True))
             p.begin()
             try:
@@ -49,6 +47,12 @@ class PVPolicyTests(unittest.TestCase):
                 self.assertEqual(p.phase,'response')
             finally:
                 p.sample_file.close();p.event_file.close()
+
+
+    def test_freshness_rejects_stale_and_future_frames(self):
+        self.assertTrue(fresh(10,10.5))
+        self.assertFalse(fresh(10,10.501))
+        self.assertFalse(fresh(10.1,10))
 
 
 if __name__=='__main__':unittest.main()

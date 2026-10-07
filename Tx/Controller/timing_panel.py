@@ -10,6 +10,7 @@ from tkinter import ttk
 import tkinter as tk
 from Tx.Controller.detection_panel import DetectionPanel
 from common.servo import move_from
+from common.tx_setup import TX_CAMERA_SETTINGS, TX_OPERATING_LIMITS
 from common.pv_detection import TARGET_SELECTION, selected_observation_valid
 from Tx.Controller.processing_profile import ProcessingProfile
 
@@ -111,12 +112,13 @@ class TimingPanel(DetectionPanel):
         self.prepare(False)
 
     def prepare(self, auto_measure):
+        if getattr(getattr(self.app,'stationary',None),'busy',False):
+            raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         if self.profile.running:raise ValueError("처리 시간 측정을 먼저 종료하세요.")
         if self.active or self.preparing:
             raise ValueError('측정 또는 자동 준비가 진행 중입니다.')
-        self.app.live.stop('M1-5 자동 준비')
         self.app.detection.stop()
-        if self.app.live.pending or self.app.servo.pending:
+        if self.app.servo.pending:
             raise ValueError('기존 명령 응답을 기다린 뒤 시작하세요.')
         if not self.app.servo.online:
             raise ValueError('Pi 제어 연결이 없습니다. 서버·Pi 실행 상태를 확인하세요.')
@@ -143,11 +145,11 @@ class TimingPanel(DetectionPanel):
         if self.preparing=='model':
             if self.model is None:return
             # Apply the settings established in M1-1 and M1-2.
-            camera=dict(width=1296,height=972,fps=30,quality=80,shutter_speed=None,analogue_gain=None)
+            camera=dict(TX_CAMERA_SETTINGS)
             for key,value in camera.items():self.app.values[key].set('' if value is None else str(value))
             if not self.app.send(dict(cmd='preview',enable=True,**camera),tracking=True):
                 raise ValueError('카메라 시작 실패')
-            self.setup_command(dict(cmd='servo_config',pan_min=-180,pan_max=180,tilt_min=-15,tilt_max=40),'limits')
+            self.setup_command(dict(cmd='servo_config',**TX_OPERATING_LIMITS),'limits')
             self.status.set('M1-5 자동 준비: 1296×972 / 30 FPS / quality 80 / 자동 노출·gain')
         elif self.preparing=='move' and self.setup_pending is None:
             self.setup_command(dict(cmd='move',pan=0,tilt=0,speed=100,acc=1),'arrival')
@@ -197,7 +199,7 @@ class TimingPanel(DetectionPanel):
             self.prepare(True);return
         servo=self.app.servo
         if not self.running or not self.latest:raise ValueError('모델 로딩 후 검출부터 시작하세요.')
-        if not servo.online or servo.pending or self.app.live.pending or not servo.last or servo.simulated is not False:
+        if not servo.online or servo.pending or not servo.last or servo.simulated is not False:
             raise ValueError('실제 Pi 연결·범위 적용·초기 자세 이동을 먼저 확인하세요.')
         if not selected_observation_valid(self.latest[2]) or time.monotonic()-self.latest[1][2]>0.5:
             raise ValueError('최신 영상에서 최고 confidence PV의 유효 좌표가 필요합니다.')

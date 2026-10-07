@@ -5,6 +5,7 @@ from pathlib import Path
 import statistics
 import unittest
 from common.pv_detection import selected_observation_valid
+from common.tx_setup import TX_CAMERA_SETTINGS, TX_OPERATING_LIMITS
 source=Path(__file__).resolve().parents[1]/'Tx/Controller/timing_panel.py'
 tree=ast.parse(source.read_text())
 fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='analyze')
@@ -75,7 +76,7 @@ class PreparationTests(unittest.TestCase):
         method=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='TimingPanel')
         method=next(n for n in method.body if isinstance(n,ast.FunctionDef) and n.name=='prepare_poll')
         import time
-        env={'time':time}
+        env={'time':time,'TX_CAMERA_SETTINGS':TX_CAMERA_SETTINGS,'TX_OPERATING_LIMITS':TX_OPERATING_LIMITS}
         exec(compile(ast.Module(body=[method],type_ignores=[]),str(source),'exec'),env)
         state=SimpleNamespace(model=None,preparing='model',setup_deadline=time.monotonic()+100)
         return state,env['prepare_poll']

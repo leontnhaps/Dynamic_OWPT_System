@@ -9,7 +9,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageDraw, ImageTk
-from Tx.Controller.live_core import fresh
+from common.pv_detection import fresh
 from common.pv_detection import TARGET_SELECTION, target_from_boxes
 from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 
@@ -89,6 +89,8 @@ class DetectionPanel(ttk.Frame):
         for widget in self.widgets: widget.configure(state='disabled' if locked else 'normal')
 
     def load(self):
+        if getattr(getattr(self.app,'stationary',None),'busy',False):
+            raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         if self.future is not None: raise ValueError('진행 중인 작업이 끝난 뒤 다시 시도하세요.')
         self.stop()
         device = self.device.get().strip()
@@ -101,6 +103,8 @@ class DetectionPanel(ttk.Frame):
         self.status.set('YOLO 모델 불러오는 중…')
 
     def start(self):
+        if getattr(getattr(self.app,'stationary',None),'busy',False):
+            raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         timing=getattr(self.app,"timing",None)
         if timing is not None and timing.profile.running:
             raise ValueError("처리 시간 측정을 먼저 종료하세요.")
@@ -112,9 +116,7 @@ class DetectionPanel(ttk.Frame):
             raise ValueError(f'신뢰도는 0 초과 1 이하, class ID 확인: {self.model.names}')
         if not self.app.current or not fresh(self.app.current[2], time.monotonic(), 2):
             raise ValueError('M1-1에서 카메라 영상을 먼저 켜세요.')
-        # Stop any existing live tracking/learning before a detection-only test.
-        self.app.live.stop('M1-3 검출 시험')
-        if self.app.live.pending or self.app.servo.pending:
+        if self.app.servo.pending:
             raise ValueError('이미 전송한 서보 명령의 응답을 기다리세요.')
         self.settings = (confidence, class_id)
         self.running = True; self.last_frame = None
