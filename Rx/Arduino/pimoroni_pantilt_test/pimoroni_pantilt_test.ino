@@ -9,7 +9,11 @@
 #include <errno.h>
 
 const uint8_t HAT_ADDRESS = 0x15;
-const int TEST_LIMIT_DEG = 10;  // Uncalibrated bench limit, not a proven safe envelope.
+// Historical Pan sweep: -90..90. Historical standalone Tilt test: -55..55.
+// Inverted UAV mounting: test only nonnegative Tilt commands.
+// These are command limits, not a measured collision-free mechanical envelope.
+const int AXIS_MIN_DEG[2] = {-90, 0};
+const int AXIS_MAX_DEG[2] = {90, 55};
 const unsigned long IDLE_MS = 2000;
 char lineBuffer[40];
 uint8_t lineLength = 0;
@@ -52,13 +56,24 @@ bool stopOutputs() {
   return true;
 }
 
+bool angleAllowed(uint8_t axis, long angle) {
+  return axis < 2 && angle >= AXIS_MIN_DEG[axis] && angle <= AXIS_MAX_DEG[axis];
+}
+
+void printRange(uint8_t axis) {
+  if (axis >= 2) { Serial.println(F("ERR invalid axis")); return; }
+  Serial.print(axis == 0 ? F("pan_command_range_deg=") : F("tilt_command_range_deg="));
+  Serial.print(AXIS_MIN_DEG[axis]); Serial.print(F("..")); Serial.println(AXIS_MAX_DEG[axis]);
+}
+
 void moveAxis(uint8_t axis, int angle) {
   if (fault) {
     Serial.println(F("ERR fault; fix wiring/power then off"));
     return;
   }
-  if (angle < -TEST_LIMIT_DEG || angle > TEST_LIMIT_DEG) {
-    Serial.println(F("ERR range -10..10 degrees"));
+  if (!angleAllowed(axis, angle)) {
+    Serial.println(F("ERR command outside axis range"));
+    printRange(axis);
     return;
   }
   // Select ONE axis. Disable both before loading a new target, so an old
@@ -85,6 +100,7 @@ void status() {
   Serial.print(F("STATUS fault=")); Serial.print(fault);
   Serial.print(F(" last_ack_enabled_mask=")); Serial.println(enabledMask);
   for (uint8_t i = 0; i < 2; ++i) {
+    printRange(i);
     Serial.print(i == 0 ? F("pan_commanded_deg=") : F("tilt_commanded_deg="));
     if (commandedValid[i]) Serial.println(commandedDeg[i]);
     else Serial.println(F("unknown"));
@@ -95,7 +111,9 @@ void status() {
 void help() {
   Serial.println(F("M4-1 Pimoroni HAT 0x15; 9600 baud; newline"));
   Serial.println(F("help | probe | status | off | pan N | tilt N"));
-  Serial.println(F("N: integer -10..10; one axis only; PWM off after 2s"));
+  printRange(0); printRange(1);
+  Serial.println(F("N: integer; one axis only; PWM off after 2s"));
+  Serial.println(F("Inverted mount: negative Tilt rejected; verify physical direction with tilt 5."));
   Serial.println(F("First target may move far from unknown position. Support PV."));
 }
 
@@ -111,11 +129,16 @@ void handleLine(char *line) {
     char *end;
     errno = 0;
     long angle = strtol(arg, &end, 10);
-    if (end == arg || *end != '\0' || errno == ERANGE ||
-        angle < -TEST_LIMIT_DEG || angle > TEST_LIMIT_DEG) {
-      Serial.println(F("ERR integer range -10..10")); return;
+    if (end == arg || *end != '\0' || errno == ERANGE) {
+      Serial.println(F("ERR expected integer degrees")); return;
     }
-    moveAxis(isPan ? 0 : 1, (int)angle);
+    uint8_t axis = isPan ? 0 : 1;
+    // Validate long before narrowing to AVR's 16-bit int.
+    if (!angleAllowed(axis, angle)) {
+      Serial.println(F("ERR command outside axis range"));
+      printRange(axis); return;
+    }
+    moveAxis(axis, (int)angle);
     return;
   }
   if (arg) { Serial.println(F("ERR unexpected argument")); return; }
