@@ -3,10 +3,10 @@
 // Register values and pulse conversion follow the official PanTilt driver.
 // No position feedback: every reported angle is a COMMAND, not a measurement.
 #include <Arduino.h>
-// Software I2C: board labels 4 = SDA, 5 = SCL. External pull-ups to 3.3V.
+// Software I2C: board labels A0 = SDA, A1 = SCL. External pull-ups to 3.3V.
 #ifndef PANTILT_I2C
 #include "SoftI2c.h"
-SoftI2c hatBus(4, 5);
+SoftI2c hatBus(A0, A1); // 
 #define PANTILT_I2C hatBus
 #endif
 #include <stdlib.h>
@@ -115,7 +115,7 @@ void status() {
 
 void help() {
   Serial.println(F("M4-1 Pimoroni HAT 0x15; 9600 baud; newline"));
-  Serial.println(F("Software I2C: SDA=D4 (4), SCL=D5 (5); pull-ups to 3.3V"));
+  Serial.println(F("Software I2C: SDA=A0, SCL=A1; pull-ups to 3.3V"));
   Serial.println(F("help | probe | status | off | pan N | tilt N"));
   printRange(0); printRange(1);
   Serial.println(F("N: integer; one axis only; PWM off after 2s"));
