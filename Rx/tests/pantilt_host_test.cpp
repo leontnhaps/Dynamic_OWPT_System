@@ -22,14 +22,14 @@ int main() {
   assert((Wire.writes[2] == std::vector<uint8_t>{0x15, 1, 0xaa, 5})); // 1450us
   assert((Wire.writes[3] == std::vector<uint8_t>{0x15, 0, 1}));
   size_t before = Wire.writes.size();
-  send("pan 91\npan -91\ntilt -1\ntilt -55\ntilt 56\ntilt 90\n");
+  send("pan 91\npan -91\ntilt -91\ntilt 91\n");
   send("pan 1.5\npan 0 extra\npan\nfoo\noff x\n");
   send("pan 65536\ntilt 65536\npan -65536\n");
   send("pan 999999999999999999999999999999\n");
   send(std::string(60, 'x') + "pan 0\n");
   send(std::string("pan 0\0junk\n", 11));
   assert(Wire.writes.size() == before);
-  moveAxis(1, -1); moveAxis(2, 0); // Direct calls must also reject invalid angles/axes.
+  moveAxis(1, -91); moveAxis(2, 0); // Direct calls must also reject invalid angles/axes.
   assert(Wire.writes.size() == before);
   send("tilt 10\n");
   assert(enabledMask == 2 && commandedDeg[1] == 10);
@@ -37,9 +37,9 @@ int main() {
   fakeMs = 1999; loop(); assert(enabledMask == 2);
   fakeMs = 2000; loop(); assert(enabledMask == 0);
   // Inclusive endpoints and expected pulse bytes; these are NOT hardware tests.
-  const char *commands[] = {"pan -90\n", "pan 90\n", "tilt 0\n", "tilt 55\n"};
-  const int targets[] = {-90, 90, 0, 55};
-  const uint16_t pulses[] = {575, 2325, 1450, 1984};
+  const char *commands[] = {"pan -90\n", "pan 90\n", "tilt -90\n", "tilt 90\n"};
+  const int targets[] = {-90, 90, -90, 90};
+  const uint16_t pulses[] = {575, 2325, 575, 2325};
   for (int i = 0; i < 4; ++i) {
     before = Wire.writes.size();
     send(commands[i]);
@@ -50,7 +50,7 @@ int main() {
   }
   Serial.output.clear(); send("help\nstatus\n");
   assert(Serial.output.find("pan_command_range_deg=-90..90") != std::string::npos);
-  assert(Serial.output.find("tilt_command_range_deg=0..55") != std::string::npos);
+  assert(Serial.output.find("tilt_command_range_deg=-90..90") != std::string::npos);
   // Failure at each stage: disable, target, enable. No moves until explicit off.
   for (int stage = 0; stage < 3; ++stage) {
     for (int i = 0; i < stage; ++i) Wire.results.push_back(0);

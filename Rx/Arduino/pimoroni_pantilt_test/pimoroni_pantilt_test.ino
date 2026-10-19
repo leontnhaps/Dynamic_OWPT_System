@@ -6,7 +6,7 @@
 // Software I2C: board labels A0 = SDA, A1 = SCL. External pull-ups to 3.3V.
 #ifndef PANTILT_I2C
 #include "SoftI2c.h"
-SoftI2c hatBus(A0, A1); // 
+SoftI2c hatBus(A0, A1);
 #define PANTILT_I2C hatBus
 #endif
 #include <stdlib.h>
@@ -14,11 +14,10 @@ SoftI2c hatBus(A0, A1); //
 #include <errno.h>
 
 const uint8_t HAT_ADDRESS = 0x15;
-// Historical Pan sweep: -90..90. Historical standalone Tilt test: -55..55.
-// Inverted UAV mounting: test only nonnegative Tilt commands.
+// Manual range exploration: both axes use the driver's -90..90 mapping.
 // These are command limits, not a measured collision-free mechanical envelope.
-const int AXIS_MIN_DEG[2] = {-90, 0};
-const int AXIS_MAX_DEG[2] = {90, 55};
+const int AXIS_MIN_DEG[2] = {-90, -90};
+const int AXIS_MAX_DEG[2] = {90, 90};
 const unsigned long IDLE_MS = 2000;
 char lineBuffer[40];
 uint8_t lineLength = 0;
@@ -119,7 +118,7 @@ void help() {
   Serial.println(F("help | probe | status | off | pan N | tilt N"));
   printRange(0); printRange(1);
   Serial.println(F("N: integer; one axis only; PWM off after 2s"));
-  Serial.println(F("Inverted mount: negative Tilt rejected; verify physical direction with tilt 5."));
+  Serial.println(F("Range test: both signs enabled; approach mechanical limits in small steps."));
   Serial.println(F("First target may move far from unknown position. Support PV."));
 }
 

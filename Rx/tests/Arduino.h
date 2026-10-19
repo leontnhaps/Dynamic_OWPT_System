@@ -25,3 +25,7 @@ void digitalWrite(uint8_t pin, uint8_t value);
 int digitalRead(uint8_t pin);
 unsigned long micros();
 void delayMicroseconds(unsigned int us);
+
+// Arduino AVR standard variant analog pin aliases.
+static const uint8_t A0 = 14;
+static const uint8_t A1 = 15;
