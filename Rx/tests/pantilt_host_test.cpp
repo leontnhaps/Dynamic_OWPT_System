@@ -5,6 +5,7 @@
 unsigned long fakeMs = 0;
 FakeSerial Serial;
 FakeWire Wire;
+#define PANTILT_I2C Wire
 #include "../Arduino/pimoroni_pantilt_test/pimoroni_pantilt_test.ino"
 
 void send(const std::string &s) {

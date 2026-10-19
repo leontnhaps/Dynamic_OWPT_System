@@ -3,7 +3,12 @@
 // Register values and pulse conversion follow the official PanTilt driver.
 // No position feedback: every reported angle is a COMMAND, not a measurement.
 #include <Arduino.h>
-#include <Wire.h>
+// Software I2C: board labels 4 = SDA, 5 = SCL. External pull-ups to 3.3V.
+#ifndef PANTILT_I2C
+#include "SoftI2c.h"
+SoftI2c hatBus(4, 5);
+#define PANTILT_I2C hatBus
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -25,11 +30,11 @@ bool commandedValid[2] = {false, false};
 unsigned long lastMoveMs = 0;
 
 bool writeRegister(uint8_t reg, uint16_t value, bool word) {
-  Wire.beginTransmission(HAT_ADDRESS);
-  Wire.write(reg);
-  Wire.write((uint8_t)(value & 0xff));
-  if (word) Wire.write((uint8_t)(value >> 8)); // SMBus word: low byte first.
-  uint8_t result = Wire.endTransmission();
+  PANTILT_I2C.beginTransmission(HAT_ADDRESS);
+  PANTILT_I2C.write(reg);
+  PANTILT_I2C.write((uint8_t)(value & 0xff));
+  if (word) PANTILT_I2C.write((uint8_t)(value >> 8)); // SMBus word: low byte first.
+  uint8_t result = PANTILT_I2C.endTransmission();
   if (result != 0) {
     Serial.print(F("ERR I2C code="));
     Serial.println(result);
@@ -110,6 +115,7 @@ void status() {
 
 void help() {
   Serial.println(F("M4-1 Pimoroni HAT 0x15; 9600 baud; newline"));
+  Serial.println(F("Software I2C: SDA=D4 (4), SCL=D5 (5); pull-ups to 3.3V"));
   Serial.println(F("help | probe | status | off | pan N | tilt N"));
   printRange(0); printRange(1);
   Serial.println(F("N: integer; one axis only; PWM off after 2s"));
@@ -146,8 +152,8 @@ void handleLine(char *line) {
   else if (strcmp(cmd, "status") == 0) status();
   else if (strcmp(cmd, "off") == 0) stopOutputs();
   else if (strcmp(cmd, "probe") == 0) {
-    Wire.beginTransmission(HAT_ADDRESS);
-    uint8_t result = Wire.endTransmission();
+    PANTILT_I2C.beginTransmission(HAT_ADDRESS);
+    uint8_t result = PANTILT_I2C.endTransmission();
     Serial.println(result == 0 ? F("ACK 0x15 (identity not verified)") : F("ERR no ACK at 0x15"));
     if (result != 0) tripFault();
   } else Serial.println(F("ERR unknown command; use help"));
@@ -155,11 +161,7 @@ void handleLine(char *line) {
 
 void setup() {
   Serial.begin(9600);
-  Wire.begin();
-  Wire.setClock(100000);
-  // Arduino AVR Boards 1.8.6 provides this API without WIRE_HAS_TIMEOUT.
-  // Call the API directly; do not silently disable the bounded bus wait.
-  Wire.setWireTimeout(25000, true);
+  PANTILT_I2C.begin();
   stopOutputs(); // No home, centre, sweep, or servo enable on startup.
   help();
 }

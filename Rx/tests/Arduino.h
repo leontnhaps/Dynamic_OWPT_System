@@ -16,3 +16,12 @@ struct FakeSerial {
   template<typename T> void println(T v) { print(v); output += "\n"; }
 };
 extern FakeSerial Serial;
+#define LOW 0
+#define HIGH 1
+#define INPUT 0
+#define OUTPUT 1
+void pinMode(uint8_t pin, uint8_t mode);
+void digitalWrite(uint8_t pin, uint8_t value);
+int digitalRead(uint8_t pin);
+unsigned long micros();
+void delayMicroseconds(unsigned int us);
