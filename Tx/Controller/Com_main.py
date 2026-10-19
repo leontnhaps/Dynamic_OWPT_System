@@ -52,16 +52,34 @@ class App:
         logs.pack(side='bottom',fill='x',padx=6,pady=6)
         self.event_log=self.make_log(logs,'명령 · 응답 · 연결 · 오류')
         self.stats_log=self.make_log(logs,'실시간 수신 통계 (receive_stats)')
-        self.preview=ttk.Label(root,anchor='center');self.preview.pack(expand=True,fill='both')
+        # Let the layout allocate the viewport; the image must not request
+        # its own fixed height and get clipped between the tabs and logs.
+        self.preview_area=ttk.Frame(root,height=1)
+        self.preview_area.pack(expand=True,fill='both')
+        self.preview_area.pack_propagate(False)
+        self.preview=ttk.Label(self.preview_area,anchor='center')
+        self.preview.pack(expand=True,fill='both')
         def show_preview(event=None):
             if tabs.select()!=str(self.ook): self.ook.leave()
             if self.timing.profile.running and tabs.select()!=str(self.timing):
                 self.timing.profile.finish('탭 변경으로 처리 시간 측정 중단')
-            if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary)):self.preview.pack_forget()
-            else:self.preview.pack(expand=True,fill='both')
+            if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary)):self.preview_area.pack_forget()
+            else:self.preview_area.pack(expand=True,fill='both')
+            self.preview_frame=None
+            root.after_idle(self.fit_selected_tab)
         tabs.bind('<<NotebookTabChanged>>',show_preview)
         root.after(5,self.poll)
         root.after(33,self.render)
+    def fit_selected_tab(self):
+        # Notebook normally requests the maximum height of ALL its pages.
+        # Short camera/OOK pages should not inherit the tall SAC page height.
+        selected=self.tabs.select()
+        if selected:
+            panel=self.tabs.nametowidget(selected)
+            height=panel.winfo_reqheight()
+            if int(self.tabs.cget('height'))!=height:
+                self.tabs.configure(height=height)
+
     def make_log(self,parent,title):
         panel=ttk.LabelFrame(parent,text=title,padding=4)
         parent.add(panel,weight=1)
@@ -188,17 +206,23 @@ class App:
         if self.closing:return
         started=time.monotonic()
         try:
+            self.fit_selected_tab()
             selected=self.tabs.select()
             if selected==str(self.timing) and self.timing.profile.running:
                 self.timing.profile.render()
             elif selected in (str(self.detection),str(self.timing),str(self.stationary)):
                 panel=next(p for p in (self.detection,self.timing,self.stationary) if str(p)==selected)
                 panel.render()
-            elif self.current and self.current[2]!=self.preview_frame:
-                image=Image.open(io.BytesIO(self.current[0]))
-                image.thumbnail((1000,480),Image.Resampling.LANCZOS)
-                photo=ImageTk.PhotoImage(image);self.preview.configure(image=photo);self.preview.image=photo
-                self.preview_frame=self.current[2]
+            elif self.current and self.preview_area.winfo_ismapped():
+                bounds=(max(1,self.preview_area.winfo_width()-4),
+                        max(1,self.preview_area.winfo_height()-4))
+                preview_key=(self.current[2],bounds)
+                if preview_key!=self.preview_frame:
+                    with Image.open(io.BytesIO(self.current[0])) as source:
+                        image=source.copy()
+                    image.thumbnail(bounds,Image.Resampling.LANCZOS)
+                    photo=ImageTk.PhotoImage(image);self.preview.configure(image=photo);self.preview.image=photo
+                    self.preview_frame=preview_key
         except (ValueError,OSError,tk.TclError) as exc:
             self.record(dict(event='render_error',message=str(exc)))
             if self.timing.profile.running:self.timing.profile.finish('화면 갱신 오류: '+str(exc))
