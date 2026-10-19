@@ -1,4 +1,4 @@
-// M4-1: Arduino Pro Mini ATmega328P, 3.3 V / 8 MHz.
+// M4-3: Arduino Pro Mini ATmega328P, 3.3 V / 8 MHz.
 // Protocol: pimoroni/pantilthat-python, commit a209e8eb58dfe24569fd17680957c8c7e57a219f.
 // Register values and pulse conversion follow the official PanTilt driver.
 // No position feedback: every reported angle is a COMMAND, not a measurement.
@@ -14,10 +14,13 @@ SoftI2c hatBus(A0, A1);
 #include <errno.h>
 
 const uint8_t HAT_ADDRESS = 0x15;
-// Manual range exploration: both axes use the driver's -90..90 mapping.
-// These are command limits, not a measured collision-free mechanical envelope.
-const int AXIS_MIN_DEG[2] = {-90, -90};
-const int AXIS_MAX_DEG[2] = {90, 90};
+// User-selected command limits for the current mounting; retain pulse mapping.
+// Pan -20 is an approximate centre selected using 10-degree test increments.
+// In inverted UAV mounting, viewed from above, increasing Pan is clockwise.
+// Tilt 20: PV face nearly parallel to ground; 70: short of vertical for clearance.
+// User checked Pan travel at Tilt 70. These are not precision measured angles.
+const int AXIS_MIN_DEG[2] = {-90, 20};
+const int AXIS_MAX_DEG[2] = {50, 70};
 const unsigned long IDLE_MS = 2000;
 char lineBuffer[40];
 uint8_t lineLength = 0;
@@ -113,12 +116,15 @@ void status() {
 }
 
 void help() {
-  Serial.println(F("M4-1 Pimoroni HAT 0x15; 9600 baud; newline"));
+  Serial.println(F("M4-3 Pimoroni HAT 0x15; 9600 baud; newline"));
   Serial.println(F("Software I2C: SDA=A0, SCL=A1; pull-ups to 3.3V"));
   Serial.println(F("help | probe | status | off | pan N | tilt N"));
   printRange(0); printRange(1);
-  Serial.println(F("N: integer; one axis only; PWM off after 2s"));
-  Serial.println(F("Range test: both signs enabled; approach mechanical limits in small steps."));
+  Serial.println(F("N: absolute integer command; one axis only; PWM off after 2s"));
+  Serial.println(F("Out-of-range commands are rejected; no clamping or sign inversion."));
+  Serial.println(F("Pan approximate centre=-20 (10-deg test increments, not precision zero)."));
+  Serial.println(F("Inverted UAV mount, viewed from above: increasing Pan is clockwise."));
+  Serial.println(F("Tilt 20: PV nearly parallel to ground; 70: short of vertical for clearance."));
   Serial.println(F("First target may move far from unknown position. Support PV."));
 }
 
