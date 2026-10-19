@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from common.protocol import messages, send_json, send_frame
 from common.servo import Servo
+from common.laser_pattern import LaserPattern
 from common.capture import camera_config, capture_request, save_capture
 
 IR_CUT_PIN = 17  # BCM: day LOW / night HIGH, verified in DLC main.
@@ -39,6 +40,8 @@ class Agent:
         self.laser_level=0 if args.simulate else None
         self.gpio_revision=0
         self.servo=Servo(getattr(args,'servo_port',None),args.simulate)
+        self.pattern=LaserPattern(lambda level: self.set_output('laser',level),
+                                  lambda report: self.event(**dict(report,simulated=self.args.simulate)))
 
     def event(self,**obj):
         with self.output_lock: send_json(self.ctrl,obj)
@@ -60,7 +63,7 @@ class Agent:
             self.gpio_revision+=1
 
     def safe_off(self):
-        self.set_output('laser',0)
+        self.pattern.manual(0)
 
     def commands(self):
         try:
@@ -86,7 +89,12 @@ class Agent:
                     with self.lock:
                         if self.capture_busy and action not in ('ping','servo_status','hardware_status'):
                             raise ValueError('Still capture in progress; wait before changing settings or moving')
-                        if action in ('servo_status','servo_config','move','led_off'):
+                        if self.pattern.status()['pattern_active'] and action not in ('ping','hardware_status','servo_status'):
+                            raise ValueError('OOK pattern active; stop it before other output/camera/motion commands')
+                        if action=='laser_pattern':
+                            self.pattern.start(cmd)
+                            self.event(event='laser_pattern',state='started',request_id=cmd.get('request_id'),simulated=self.args.simulate)
+                        elif action in ('servo_status','servo_config','move','led_off'):
                             if action=='servo_config': result=self.servo.configure(cmd)
                             elif action=='led_off': result=self.servo.led_off()
                             elif action=='move': result=self.servo.move(cmd)
@@ -102,11 +110,13 @@ class Agent:
                             self.capture_busy=True
                             self.event(event='capture_accepted',request_id=request['request_id'])
                         elif action in ('ir_cut','laser'):
-                            self.set_output(action,cmd.get('level') if action=='ir_cut' else cmd.get('value'))
+                            if action=='laser': self.pattern.manual(cmd.get('value'))
+                            else: self.set_output(action,cmd.get('level'))
                             self.event(event=action,request_id=cmd.get('request_id'),**self.gpio_state())
                         elif action=='hardware_status':
                             self.event(event='hardware',request_id=cmd.get('request_id'),simulated=self.args.simulate,
-                                       ir_pin=self.args.ir_pin,laser_pin=self.args.laser_pin,**self.gpio_state())
+                                       ir_pin=self.args.ir_pin,laser_pin=self.args.laser_pin,
+                                       capabilities=['laser_pattern'],**self.pattern.status(),**self.gpio_state())
                         elif action=='ping': self.event(event='pong',token=cmd.get('token'))
                         else: raise ValueError('Unsupported command')
                 except (ValueError,TypeError,OSError,ImportError,RuntimeError) as exc:
@@ -183,7 +193,7 @@ class Agent:
             timing_samples=[]
             try:
                 self.event(event='ready',simulated=self.args.simulate,
-                           capabilities=['servo_status','servo_config','move','led_off','snap','ir_cut','laser','hardware_status'])
+                           capabilities=['servo_status','servo_config','move','led_off','snap','ir_cut','laser','hardware_status','laser_pattern'])
                 while not self.stop.is_set():
                     with self.lock:
                         cfg=self.cfg.copy() if self.cfg else None
@@ -299,3 +309,4 @@ def main():
         if agent.gpio: agent.gpio.cleanup([args.ir_pin,args.laser_pin])
 
 if __name__=='__main__': main()
+
