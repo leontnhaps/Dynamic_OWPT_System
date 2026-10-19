@@ -231,7 +231,7 @@ class App:
 
     def close(self):
         self.closing=True
-        self.ook.leave()
+        self.ook.close()
         self.stationary.close()
         self.timing.close()
         self.detection.close()
