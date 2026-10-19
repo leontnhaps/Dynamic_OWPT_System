@@ -1,5 +1,6 @@
 // M4-2: Pro Mini ATmega328P 3.3V / 8MHz, serial 9600 baud.
-// PV+ -- 47k -- A2 -- 10k -- GND; separate 100-ohm load across PV.
+// PV+ -- 47k -- A2 -- 10k -- GND; no separate 100-ohm load.
+// Near-open-circuit measurement: the divider still loads the PV with 57k ohm.
 // A0/A1 remain reserved for the gimbal. This sketch does not drive it.
 // Voltage estimates use nominal reference/resistors; calibrate before evaluation.
 // Serial-only wiring test: no EEPROM writes and no OOK decoding.
@@ -18,7 +19,7 @@ bool invalidCommand = false;
 
 void printHelp() {
   Serial.println(F("M4-2 PV voltage test; A2; 9600 baud; newline"));
-  Serial.println(F("100 ohm load; divider 47k/10k; INTERNAL nominal 1.1V"));
+  Serial.println(F("No 100 ohm load; divider 47k/10k; INTERNAL nominal 1.1V"));
   Serial.println(F("help | pv (one reading) | start (250ms) | stop"));
   Serial.println(F("Voltages are estimates; CLIPPED means out of ADC range."));
   Serial.println(F("No gimbal commands, EEPROM logging or OOK decoding."));
