@@ -121,6 +121,8 @@ void help() {
   Serial.println(F("help | probe | status | off | pan N | tilt N"));
   printRange(0); printRange(1);
   Serial.println(F("N: absolute integer command; one axis only; PWM off after 2s"));
+  Serial.println(F("Manual operation: use 10-deg target increments; integer inputs remain accepted."));
+  Serial.println(F("10 deg is an operating choice, not measured mechanical resolution."));
   Serial.println(F("Out-of-range commands are rejected; no clamping or sign inversion."));
   Serial.println(F("Pan approximate centre=-20 (10-deg test increments, not precision zero)."));
   Serial.println(F("Inverted UAV mount, viewed from above: increasing Pan is clockwise."));
