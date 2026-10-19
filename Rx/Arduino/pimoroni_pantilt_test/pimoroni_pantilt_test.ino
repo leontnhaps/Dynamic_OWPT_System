@@ -157,12 +157,9 @@ void setup() {
   Serial.begin(9600);
   Wire.begin();
   Wire.setClock(100000);
-  // Require an AVR Wire version with bounded bus waits.
-#if defined(WIRE_HAS_TIMEOUT)
+  // Arduino AVR Boards 1.8.6 provides this API without WIRE_HAS_TIMEOUT.
+  // Call the API directly; do not silently disable the bounded bus wait.
   Wire.setWireTimeout(25000, true);
-#else
-#error "Update Arduino AVR Boards: Wire timeout support is required."
-#endif
   stopOutputs(); // No home, centre, sweep, or servo enable on startup.
   help();
 }

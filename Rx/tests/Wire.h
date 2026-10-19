@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <vector>
 #include <deque>
-#define WIRE_HAS_TIMEOUT 1
+// Official AVR Wire has the timeout API but no WIRE_HAS_TIMEOUT macro.
 struct FakeWire {
   std::vector<std::vector<uint8_t> > writes;
   std::vector<uint8_t> current;
