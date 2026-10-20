@@ -26,7 +26,8 @@ inline void analogReference(int) {}
 struct SerialStub {
   std::string input, output;
   int credit=64;
-  void begin(int) {}
+  unsigned long baud=0;
+  void begin(unsigned long value) { baud=value; }
   int available() { return input.size(); }
   int read() { char c=input.front(); input.erase(0,1); return c; }
   int availableForWrite() { return credit; }
@@ -107,6 +108,47 @@ int main() {
   assert(std::strstr(outputBuffer,"off_V=0.612"));
   assert(std::strstr(outputBuffer,"level=HIGH"));
   assert(outputLength<sizeof(outputBuffer)-1);
+  // Raw path bypasses detector calibration and emits each actual sample.
+  streaming=false; rawStreaming=false;
+  outputLength=outputPosition=0; pendingMessage[0]=0; Serial.output.clear();
+  Serial.credit=64; Serial.input="raw\n"; loop();
+  for(int i=0;i<5;++i) loop();
+  assert(rawStreaming && streaming);
+  Serial.output.clear();
+  // Restrict draining to 3 bytes per 1ms iteration, below 38400 baud capacity.
+  Serial.credit=3;
+  for(int i=0;i<1000;++i) {
+    analogValue=(i/250)%2 ? 907 : 400;
+    clockMs+=1; loop();
+  }
+  for(int i=0;i<30;++i) loop();
+  unsigned long expected=0, previous=0;
+  size_t begin=0;
+  while(begin<Serial.output.size()) {
+    size_t end=Serial.output.find('\n',begin); assert(end!=std::string::npos);
+    std::string line=Serial.output.substr(begin,end-begin);
+    unsigned long seq,ms; int raw;
+    assert(std::sscanf(line.c_str(),"R1,%lu,%lu,%d",&seq,&ms,&raw)==3);
+    assert(seq==expected++);
+    if(previous) assert(ms-previous==10);
+    previous=ms; assert(raw==400 || raw==907);
+    begin=end+1;
+  }
+  assert(expected==100);
+  // UART stall skips output, not ADC; sequence exposes the loss on recovery.
+  Serial.credit=0;
+  unsigned long seqBefore=rawSequence;
+  for(int i=0;i<5;++i) { clockMs+=10; loop(); }
+  assert(rawSequence==seqBefore+5);
+  Serial.credit=64; for(int i=0;i<10;++i) loop();
+  Serial.output.clear(); clockMs+=10; loop();
+  unsigned long seq,ms; int raw;
+  assert(std::sscanf(Serial.output.c_str(),"R1,%lu,%lu,%d",&seq,&ms,&raw)==3);
+  assert(seq==seqBefore+5);
+  // A late loop emits one real sample, never catch-up records.
+  seqBefore=rawSequence; clockMs+=100; loop(); assert(rawSequence==seqBefore+1);
+  Serial.input="stop\n"; loop(); assert(!rawStreaming && !streaming);
+  setup(); assert(Serial.baud==38400);
   std::cout << "PV acquisition, noise, levels, rearm, clipping, commands and UART checks passed\n";
 }
 '''

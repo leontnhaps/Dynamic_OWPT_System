@@ -1,4 +1,4 @@
-// M4-4: Pro Mini ATmega328P 3.3V / 8MHz; serial 9600 baud.
+// M4-4: Pro Mini ATmega328P 3.3V / 8MHz; serial 38400 baud.
 // PV+ -- 47k -- A2 -- 10k -- GND; PV- -- GND; no 100-ohm load.
 // The 57k divider loads the PV: voltages are near-open-circuit estimates.
 // A0/A1 stay reserved for the gimbal. No servo, EEPROM or frame decoding.
@@ -27,6 +27,8 @@ const float BASELINE_ALPHA = 0.002f; // Slow tracking ONLY while waiting.
 enum DetectorState { IDLE, BASELINE, WAIT_RISE, ACQUIRE_ON, TRACK, CLIPPED };
 DetectorState detectorState = IDLE;
 bool streaming = false;
+bool rawStreaming = false;
+uint32_t rawSequence = 0;
 bool baselineValid = false;
 bool onValid = false;
 bool highLevel = false;
@@ -68,6 +70,7 @@ void addToWindow(int raw) {
 
 void startDetector(unsigned long now) {
   detectorState = BASELINE;
+  rawStreaming = false;
   streaming = true;
   baselineValid = onValid = highLevel = lowTimerActive = false;
   offAdc = onAdc = thresholdAdc = 0.0f;
@@ -78,7 +81,7 @@ void startDetector(unsigned long now) {
 void sampleDetector(int raw, unsigned long now) {
   latestAdc = raw;
   latestSampleMs = now;
-  if (!streaming || detectorState == CLIPPED) return;
+  if (!streaming || rawStreaming || detectorState == CLIPPED) return;
   if (raw >= 1023) {
     detectorState = CLIPPED; // Latched: correct illumination, then start again.
     baselineValid = onValid = highLevel = lowTimerActive = false;
@@ -202,6 +205,18 @@ void queueReading(int raw, unsigned long now) {
   outputPosition = 0;
 }
 
+// R1,sequence,Arduino_ms,ADC: at most 30 bytes/sample (3,000 B/s).
+// 38400 baud 8N1 carries 3,840 B/s. No float formatting in this path.
+void queueRawReading(int raw, unsigned long now) {
+  uint32_t sequence = rawSequence++;
+  // Never block sampling. A skipped record is visible as a sequence gap.
+  if (outputPosition < outputLength || pendingMessage[0]) return;
+  snprintf(outputBuffer, sizeof(outputBuffer), "R1,%lu,%lu,%d\n",
+           (unsigned long)sequence, now, raw);
+  outputLength = strlen(outputBuffer);
+  outputPosition = 0;
+}
+
 void drainOutput() {
   if (outputPosition >= outputLength && pendingMessage[0]) {
     queueMessage(pendingMessage);
@@ -213,12 +228,13 @@ void drainOutput() {
 }
 
 void printHelp() {
-  Serial.println(F("M4-4 PV voltage + automatic level test; A2; 9600 baud; newline"));
+  Serial.println(F("M4-4 PV voltage + automatic level test; A2; 38400 baud; newline"));
   Serial.println(F("47k/10k divider; no 100 ohm load; INTERNAL nominal 1.1V"));
-  Serial.println(F("help | pv | start | stop"));
+  Serial.println(F("help | pv | raw | start | stop"));
+  Serial.println(F("raw: 10ms raw ADC stream R1,sequence,ms,adc; no calibration or WAIT."));
   Serial.println(F("start: keep laser OFF until WAIT (about 1s stable baseline)."));
   Serial.println(F("Then aim laser: +0.600V PV rise, about 100ms stable ON acquisition."));
-  Serial.println(F("ADC 10ms; display 250ms; off/on/th are PV voltage estimates."));
+  Serial.println(F("start: ADC 10ms; display 250ms; off/on/th are PV voltage estimates."));
   Serial.println(F("LOW for 2s rearms; start resets all levels. CLIPPED requires restart."));
   Serial.println(F("HIGH/LOW are light levels, NOT decoded bits or laser identification."));
   Serial.println(F("No frame sync, CRC, EEPROM or servo control. Stop before help."));
@@ -236,13 +252,19 @@ void handleCommand() {
     if (streaming || outputPosition < outputLength || pendingMessage[0]) queueMessage("ERR stop and wait before help");
     else printHelp(); // Long, blocking text only while sampling is stopped.
   } else if (!strcmp(cmd, "pv")) {
-    if (streaming) queueReading(latestAdc, latestSampleMs);
+    if (rawStreaming) queueMessage("ERR raw active; stop before pv");
+    else if (streaming) queueReading(latestAdc, latestSampleMs);
     else queueReading(analogRead(PV_PIN), millis());
+  } else if (!strcmp(cmd, "raw")) {
+    startDetector(millis());
+    rawStreaming = true;
+    rawSequence = 0;
+    queueMessage("OK RAW10 R1 baud=38400 interval_ms=10");
   } else if (!strcmp(cmd, "start")) {
     startDetector(millis());
     queueMessage("OK BASELINE: laser OFF; wait for state=WAIT");
   } else if (!strcmp(cmd, "stop")) {
-    streaming = false;
+    streaming = rawStreaming = false;
     detectorState = IDLE;
     baselineValid = onValid = highLevel = lowTimerActive = false;
     queueMessage("OK stopped");
@@ -250,7 +272,7 @@ void handleCommand() {
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(38400);
   pinMode(PV_PIN, INPUT);
   digitalWrite(PV_PIN, LOW);
   analogReference(INTERNAL); // Do not drive AREF externally.
@@ -275,6 +297,7 @@ void loop() {
       lowTimerActive = false;
     }
     sampleDetector(analogRead(PV_PIN), now);
+    if (rawStreaming) queueRawReading(latestAdc, latestSampleMs);
   }
   for (uint8_t i = 0; i < 16 && Serial.available(); ++i) {
     const char c = (char)Serial.read();
@@ -290,7 +313,7 @@ void loop() {
     }
   }
   now = millis();
-  if (streaming && (unsigned long)(now - lastPrintMs) >= PRINT_INTERVAL_MS) {
+  if (streaming && !rawStreaming && (unsigned long)(now - lastPrintMs) >= PRINT_INTERVAL_MS) {
     lastPrintMs = now;
     if (!pendingMessage[0]) queueReading(latestAdc, latestSampleMs);
   }

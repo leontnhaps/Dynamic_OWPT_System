@@ -60,14 +60,14 @@ class OokPanel(ttk.Frame):
         for label, action in [('포트 새로고침', self.refresh_ports), ('Arduino 연결', self.connect_rx),
                               ('연결 해제', self.disconnect_rx)]:
             ttk.Button(row, text=label, command=lambda fn=action: self.guard(fn)).pack(side='left', padx=3)
-        self.rx_status = tk.StringVar(value='Arduino 미연결 · 9600 baud · IDE 시리얼 모니터를 닫고 연결하세요.')
+        self.rx_status = tk.StringVar(value='Arduino 미연결 · 38400 baud · IDE 시리얼 모니터를 닫고 연결하세요.')
         self.saved_status = tk.StringVar(value='저장: captures/M4-4/<시험 폴더>/')
         ttk.Label(self, textvariable=self.rx_status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, textvariable=self.saved_status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, text='1 = 레이저 ON, 0 = OFF · Pi에서 반복 실행 · 종료 후 OFF\n'
                   '자동 저장: OFF 확인 → Arduino 기록 시작 확인 → 바로 송신 (WAIT 대기 없음) → 종료 후 2.5초 기록\n'
-                  '수신 CSV는 250ms 간격 출력값입니다. 전체 10ms ADC 샘플이나 복원된 비트열이 아닙니다.\n'
-                  '전압 비교 시험: BASELINE/NA여도 송신·저장합니다. HIGH/LOW는 판정 결과로 사용하지 않습니다.\n'
+                  '수신 CSV: 10ms 목표 간격의 원시 ADC·전압. 누락은 sequence_gap·sample_dt_ms로 확인합니다.\n'
+                  '원시 기록 모드: 주변광 초기화·HIGH/LOW 판정 없이 송신·저장합니다.\n'
                   '현재는 원시 ON/OFF 시험이며, 7비트 각도 명령·Manchester·오류 검사 프레임은 미구현입니다.\n'
                   '아래 공통 영상으로 조준 상태를 확인하세요. GPIO 상태는 실제 광출력 피드백이 아닙니다.').pack(anchor='w')
 
@@ -151,7 +151,7 @@ class OokPanel(ttk.Frame):
                 break
             kind = event['kind']
             if kind == 'connected':
-                self.rx_status.set(f"Arduino 연결됨: {event['port']} · 9600 baud")
+                self.rx_status.set(f"Arduino 연결됨: {event['port']} · 38400 baud")
             elif kind == 'error':
                 self.rx_status.set('Arduino 오류: ' + event['message'])
                 if self.capture:
@@ -159,7 +159,7 @@ class OokPanel(ttk.Frame):
             if not self.capture:
                 continue
             self.write_log(dict(event='arduino', **event))
-            if kind == 'command_sent' and event.get('command') == 'start' and event.get('token') == self.trial_id:
+            if kind == 'command_sent' and event.get('command') == 'raw' and event.get('token') == self.trial_id:
                 self.rx_start_sent = True
                 continue
             if kind != 'line' or not self.rx_start_sent:
@@ -176,6 +176,10 @@ class OokPanel(ttk.Frame):
                 continue
             if reading is None:
                 continue
+            if reading.get('sample_seq') is None:
+                self.abort_capture('firmware_mismatch')
+                self.rx_status.set('Arduino 스케치를 최신 RAW10 버전으로 업로드하세요.')
+                continue
             self.capture.write(event, reading)
             now = time.monotonic()
             # The UI can lag the reader; stale queued data must not arm TX.
@@ -187,7 +191,7 @@ class OokPanel(ttk.Frame):
                 continue
             self.rx_last_ms = ms
             self.rx_status.set(f"Rx: {reading['state']} / {reading['level']} · PV={reading['pv_V']} V · "
-                               f"OFF={reading['off_V']} V · ON={reading['on_V']} V · {self.capture.rows}행")
+                               f"ADC={reading['adc']} · {self.capture.rows}행 · 누락 {self.capture.missing_records}")
             if reading['clipped']:
                 self.abort_capture('adc_clipped')
                 continue
@@ -362,7 +366,7 @@ class OokPanel(ttk.Frame):
                     self.abort_capture('off_not_confirmed')
                     return
                 try:
-                    self.arduino.send('start', self.trial_id)
+                    self.arduino.send('raw', self.trial_id)
                 except OSError:
                     self.abort_capture('arduino_start_failed')
                     return
@@ -385,6 +389,7 @@ class OokPanel(ttk.Frame):
                 self.finish_capture('completed')
             else:
                 self.abort_capture('rx_preparation_timeout')
+                self.rx_status.set('전압 기록 시작 실패 · 최신 Arduino 스케치 업로드와 38400 baud 연결 확인')
         if (self.capture and self.rx_phase in ('sending', 'tail') and
                 (self.rx_last_seen is None or now - self.rx_last_seen > 3)):
             self.abort_capture('rx_data_timeout')

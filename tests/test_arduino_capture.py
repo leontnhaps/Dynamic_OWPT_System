@@ -9,13 +9,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from Tx.Controller.arduino_capture import ArduinoSerial, parse_reading
+from Tx.Controller.arduino_capture import ArduinoSerial, RxCapture, parse_reading, ARDUINO_BAUD
 from tests import test_ook_panel as panel_fixture
 
 
-def reading(ms=1250, state='WAIT', level='NA', adc=100):
+def legacy_reading(ms=1250, state='WAIT', level='NA', adc=100):
     return (f'ms={ms} adc={adc} a2_V=0.107 pv_V=0.612 state={state} '
             f'off_V=0.612 on_V=NA th_V=NA level={level}')
+
+
+def reading(ms=1250, state='RAW', level='NA', adc=100, seq=None):
+    if seq is None:
+        seq = max(0, (ms - 1250) // 10)
+    return f'R1,{seq},{ms},{adc}'
 
 
 class FakeArduino:
@@ -57,11 +63,11 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(p.arduino.commands, [])
         token = p.pending[0]
         p.event(dict(event='laser', request_id=token, laser_gpio_level=0))
-        self.assertEqual(p.arduino.commands, [('start', p.trial_id)])
+        self.assertEqual(p.arduino.commands, [('raw', p.trial_id)])
 
     def ready(self, p):
-        p.arduino.emit(kind='command_sent', command='start', token=p.trial_id)
-        p.arduino.emit(kind='line', line='OK BASELINE: laser OFF; wait for state=WAIT')
+        p.arduino.emit(kind='command_sent', command='raw', token=p.trial_id)
+        p.arduino.emit(kind='line', line='OK RAW10 R1 baud=38400 interval_ms=10')
         p.arduino.emit(kind='line', line=reading(state='BASELINE').replace('off_V=0.612', 'off_V=NA'))
         p.tick()
 
@@ -94,11 +100,11 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(rows[0]['arduino_ms'], '1250')
         self.assertEqual(rows[0]['on_V'], '')
         self.assertEqual(rows[0]['off_V'], '')
-        self.assertEqual(rows[0]['state'], 'BASELINE')
+        self.assertEqual(rows[0]['state'], 'RAW')
         self.assertTrue(rows[0]['pc_receive_monotonic_ns'])
         summary = json.loads((folder / 'summary.json').read_text())
         self.assertEqual(summary['end_reason'], 'completed')
-        self.assertEqual(summary['high_rows'], 1)
+        self.assertEqual(summary['high_rows'], 0)
         self.assertIsNone(summary['ber'])
         self.assertIn('"trace"', (folder / 'events.jsonl').read_text())
 
@@ -126,14 +132,14 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(json.loads((folder / 'summary.json').read_text())['end_reason'], 'user_stop')
 
     def ready_events(self, p):
-        p.arduino.emit(kind='command_sent', command='start', token=p.trial_id)
+        p.arduino.emit(kind='command_sent', command='raw', token=p.trial_id)
         p.arduino.emit(kind='line', line=reading(250, 'BASELINE'))
         p.arduino.emit(kind='line', line=reading())
 
     def test_clipping_keeps_row_and_aborts(self):
         p = self.panel(); self.arm(p); self.ready(p)
         folder = p.capture.folder
-        p.arduino.emit(kind='line', line=reading(1500, 'CLIPPED', adc=1023) + ' CLIPPED')
+        p.arduino.emit(kind='line', line=reading(1500, 'CLIPPED', adc=1023))
         p.tick()
         self.assertIsNone(p.capture)
         self.assertEqual(self.sent[-1]['cmd'], 'laser')
@@ -192,13 +198,40 @@ class CaptureTests(unittest.TestCase):
     def test_parser_na_and_rejects_incomplete_nonfinite(self):
         self.assertIsNone(parse_reading('help | pv | start | stop'))
         self.assertIsNone(parse_reading(reading())['on_V'])
-        for line in ('ms=100 adc=1', reading().replace('pv_V=0.612', 'pv_V=nan')):
+        for line in ('ms=100 adc=1', legacy_reading().replace('pv_V=0.612', 'pv_V=nan')):
             with self.assertRaises(ValueError):
                 parse_reading(line)
 
+    def test_fast_parser_voltage_and_invalid_records(self):
+        r = parse_reading('R1,0,10,907')
+        self.assertAlmostEqual(r['pv_V'], 5.553603515625, places=5)
+        self.assertIsNone(parse_reading('R1,1,20,1023')['pv_V'])
+        for bad in ('R1,1,2', 'R1,1,2,1024', 'R1,-1,20,5', 'R1,1,2,3,4',
+                    'R1,4294967296,2,3', 'R1,1,2,nan'):
+            with self.assertRaises(ValueError): parse_reading(bad)
+
+    def test_sequence_loss_and_sample_gap_are_saved(self):
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        c = RxCapture(folder, {}, 'TEST', 'trial')
+        for line in ('R1,0,10,400', 'R1,1,20,907', 'R1,4,60,400'):
+            c.write(dict(line=line, pc_receive_unix_ns=1, pc_receive_monotonic_ns=1), parse_reading(line))
+        c.finish('completed', 'completed')
+        summary = json.loads((folder / 'summary.json').read_text())
+        self.assertEqual(summary['missing_records'], 2)
+        self.assertEqual(summary['max_sample_dt_ms'], 40)
+        self.assertEqual(summary['long_sample_gaps'], 1)
+
+    def test_old_firmware_cannot_silently_start_fast_capture(self):
+        p = self.panel(); self.arm(p)
+        p.arduino.emit(kind='command_sent', command='raw', token=p.trial_id)
+        p.arduino.emit(kind='line', line=legacy_reading())
+        p.tick()
+        self.assertIsNone(p.capture)
+        self.assertFalse(any(x['cmd'] == 'laser_pattern' for x in self.sent))
+
 
 class SerialWorkerTests(unittest.TestCase):
-    def test_fragmented_serial_and_start_command(self):
+    def test_fragmented_serial_and_raw_command(self):
         class Port:
             def __init__(self, *args, **kwargs):
                 self.chunks = queue.Queue(); self.writes = []; self.closed = False
@@ -210,9 +243,12 @@ class SerialWorkerTests(unittest.TestCase):
             def write(self, data): self.writes.append(data); return len(data)
             def close(self): self.closed = True
         port = Port()
-        serial = ArduinoSerial('TEST', factory=lambda *a, **k: port, settle_seconds=0)
+        def factory(*args, **kwargs):
+            self.assertEqual(kwargs['baudrate'], ARDUINO_BAUD)
+            return port
+        serial = ArduinoSerial('TEST', factory=factory, settle_seconds=0)
         self.assertEqual(serial.events.get(timeout=1)['kind'], 'connected')
-        serial.send('start', 'trial')
+        serial.send('raw', 'trial')
         event = serial.events.get(timeout=1)
         self.assertEqual((event['kind'], event['token']), ('command_sent', 'trial'))
         line = reading()
@@ -223,7 +259,7 @@ class SerialWorkerTests(unittest.TestCase):
         serial.close(); serial.worker.join(timeout=1)
         self.assertFalse(serial.worker.is_alive())
         self.assertTrue(port.closed)
-        self.assertIn(b'start\n', port.writes)
+        self.assertIn(b'raw\n', port.writes)
         self.assertEqual(port.writes[-1], b'stop\n')
 
 
