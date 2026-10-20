@@ -16,7 +16,7 @@ class PanelStateTests(unittest.TestCase):
         p.online=True; p.hardware={}; p.pending=None; p.run_id=None
         p.deadline=None; p.output_requested=False; p.logpath=None; p.state=Value()
         p.trial_paths={}; p.arduino=None; p.capture=None; p.rx_phase=None; p.rx_deadline=None
-        p.rx_start_sent=False; p.rx_baseline_seen=False; p.rx_last_seen=None; p.rx_last_ms=None
+        p.rx_start_sent=False; p.rx_last_seen=None; p.rx_last_ms=None
         p.trial_settings=None; p.trial_id=None; p.tx_state=None
         p.rx_status=Value(); p.saved_status=Value(); p.rx_save=Value(True)
         p.bits=Value('00100110'); p.bit_ms=Value('500'); p.repeats=Value('1')

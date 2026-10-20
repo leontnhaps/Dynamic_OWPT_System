@@ -28,7 +28,6 @@ class OokPanel(ttk.Frame):
         self.rx_phase = None
         self.rx_deadline = None
         self.rx_start_sent = False
-        self.rx_baseline_seen = False
         self.rx_last_seen = None
         self.rx_last_ms = None
         self.trial_settings = None
@@ -66,8 +65,9 @@ class OokPanel(ttk.Frame):
         ttk.Label(self, textvariable=self.rx_status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, textvariable=self.saved_status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, text='1 = 레이저 ON, 0 = OFF · Pi에서 반복 실행 · 종료 후 OFF\n'
-                  '자동 저장: OFF 확인 → Arduino start → WAIT 확인 → 송신 → 종료 후 2.5초 기록\n'
+                  '자동 저장: OFF 확인 → Arduino 기록 시작 확인 → 바로 송신 (WAIT 대기 없음) → 종료 후 2.5초 기록\n'
                   '수신 CSV는 250ms 간격 출력값입니다. 전체 10ms ADC 샘플이나 복원된 비트열이 아닙니다.\n'
+                  '전압 비교 시험: BASELINE/NA여도 송신·저장합니다. HIGH/LOW는 판정 결과로 사용하지 않습니다.\n'
                   '현재는 원시 ON/OFF 시험이며, 7비트 각도 명령·Manchester·오류 검사 프레임은 미구현입니다.\n'
                   '아래 공통 영상으로 조준 상태를 확인하세요. GPIO 상태는 실제 광출력 피드백이 아닙니다.').pack(anchor='w')
 
@@ -114,7 +114,7 @@ class OokPanel(ttk.Frame):
     def finish_capture(self, reason):
         capture, self.capture = self.capture, None
         self.rx_phase = self.rx_deadline = None
-        self.rx_start_sent = self.rx_baseline_seen = False
+        self.rx_start_sent = False
         if self.arduino and self.arduino.connected:
             try:
                 self.arduino.send('stop')
@@ -128,7 +128,7 @@ class OokPanel(ttk.Frame):
                 self.saved_status.set(f'저장 오류 · 일부 파일만 남았을 수 있음: {exc}')
 
     def abort_capture(self, reason):
-        # Cancel before consuming any more WAIT records. OFF remains independent
+        # Cancel before consuming any more serial records. OFF remains independent
         # of disk/USB failures; late serial messages cannot launch a pattern.
         self.rx_phase = None
         self.deadline = None
@@ -168,8 +168,6 @@ class OokPanel(ttk.Frame):
             if line.startswith('M4-4 PV'):
                 self.abort_capture('arduino_reset')
                 continue
-            if line.startswith('OK BASELINE'):
-                self.rx_baseline_seen = True
             try:
                 reading = parse_reading(line)
             except (ValueError, OverflowError):
@@ -193,10 +191,10 @@ class OokPanel(ttk.Frame):
             if reading['clipped']:
                 self.abort_capture('adc_clipped')
                 continue
-            if reading['state'] == 'BASELINE':
-                self.rx_baseline_seen = True
-            if (self.rx_phase == 'baseline' and self.rx_baseline_seen and reading['state'] == 'WAIT'
-                    and reading['off_V'] is not None and age < 1.0):
+            # Raw voltage experiment: only confirm that fresh samples arrive.
+            # Detector calibration and HIGH/LOW classification do not gate TX.
+            if (self.rx_phase == 'recording_start' and reading['state'] != 'IDLE'
+                    and reading['pv_V'] is not None and age < 1.0):
                 if not self.online or self.pending or not self.app.current or now - self.app.current[2] > 2:
                     self.abort_capture('tx_not_ready')
                     continue
@@ -268,7 +266,7 @@ class OokPanel(ttk.Frame):
             self.trial_settings, self.trial_id = settings, token
             self.tx_state = 'not_sent'
             self.rx_last_seen = self.rx_last_ms = None
-            self.rx_start_sent = self.rx_baseline_seen = False
+            self.rx_start_sent = False
             self.rx_phase = 'off'
             self.rx_deadline = time.monotonic() + 5
             if not self.request(dict(cmd='laser', value=0)):
@@ -279,6 +277,7 @@ class OokPanel(ttk.Frame):
         self.transmit(settings, token)
 
     def transmit(self, settings, token):
+        self.write_log(dict(event='pattern_send_requested', request_id=token, settings=settings))
         if self.app.send(dict(cmd='laser_pattern', request_id=token, **settings)):
             self.tx_state = 'requested'
             self.run_id = token
@@ -367,9 +366,9 @@ class OokPanel(ttk.Frame):
                 except OSError:
                     self.abort_capture('arduino_start_failed')
                     return
-                self.rx_phase = 'baseline'
-                self.rx_deadline = time.monotonic() + 15
-                self.state.set('Arduino 주변광 측정 중 · WAIT 후 자동 송신')
+                self.rx_phase = 'recording_start'
+                self.rx_deadline = time.monotonic() + 5
+                self.state.set('Arduino 첫 전압 기록 확인 후 바로 송신 · WAIT 대기 없음')
 
     def tick(self):
         try:

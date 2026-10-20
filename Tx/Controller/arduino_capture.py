@@ -149,13 +149,16 @@ class RxCapture:
         self.invalid_lines = 0
         self.closed = False
         self.file = None
-        config = dict(schema_version=1, request_id=request_id, settings=settings,
+        config = dict(schema_version=2, request_id=request_id, settings=settings,
+                      capture_mode='raw_voltage_pattern',
+                      tx_start_condition='first_fresh_voltage_record_after_start; no WAIT gate',
+                      detector_levels_validated=False,
                       arduino_port=port, arduino_baud=9600,
                       created_pc_unix_ns=time.time_ns(),
                       rx_adc_interval_ms=10, rx_report_interval_ms=250,
                       rx_rise_pv_v=0.6, rx_firmware='M4-4 automatic PV level test',
                       timing_note='Arduino ms, PC receive times and Pi GPIO times have independent clocks.',
-                      scope='Reported PV samples/levels only; no bit decoding, BER or optical latency measurement.')
+                      scope='Raw voltage comparison; calibration may overlap TX. Detector levels are diagnostic only, not validated bits. No BER or optical latency measurement.')
         (folder / 'config.json').write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding='utf-8')
         self.file = (folder / 'rx.csv').open('w', newline='', encoding='utf-8-sig')
         try:
@@ -181,10 +184,11 @@ class RxCapture:
             return
         try:
             self.file.close()
-            result = dict(schema_version=1, end_reason=reason, tx_state=tx_state,
+            result = dict(schema_version=2, end_reason=reason, tx_state=tx_state,
                           rows=self.rows, high_rows=self.high_rows, low_rows=self.low_rows,
                           clipped_rows=self.clipped_rows, invalid_lines=self.invalid_lines,
                           finished_pc_unix_ns=time.time_ns(),
+                          capture_mode='raw_voltage_pattern', detector_levels_validated=False,
                           bit_decoding_implemented=False, ber=None,
                           note='HIGH/LOW counts are reported sample counts, not received bit counts.')
             (self.folder / 'summary.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')

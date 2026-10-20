@@ -62,7 +62,7 @@ class CaptureTests(unittest.TestCase):
     def ready(self, p):
         p.arduino.emit(kind='command_sent', command='start', token=p.trial_id)
         p.arduino.emit(kind='line', line='OK BASELINE: laser OFF; wait for state=WAIT')
-        p.arduino.emit(kind='line', line=reading())
+        p.arduino.emit(kind='line', line=reading(state='BASELINE').replace('off_V=0.612', 'off_V=NA'))
         p.tick()
 
     def test_complete_trial_saves_settings_times_values_and_trace(self):
@@ -86,11 +86,15 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(p.arduino.commands[-1][0], 'stop')
         config = json.loads((folder / 'config.json').read_text())
         self.assertEqual(config['settings']['bits'], '00100110')
+        self.assertEqual(config['capture_mode'], 'raw_voltage_pattern')
+        self.assertFalse(config['detector_levels_validated'])
         with (folder / 'rx.csv').open(encoding='utf-8-sig') as stream:
             rows = list(csv.DictReader(stream))
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]['arduino_ms'], '1250')
         self.assertEqual(rows[0]['on_V'], '')
+        self.assertEqual(rows[0]['off_V'], '')
+        self.assertEqual(rows[0]['state'], 'BASELINE')
         self.assertTrue(rows[0]['pc_receive_monotonic_ns'])
         summary = json.loads((folder / 'summary.json').read_text())
         self.assertEqual(summary['end_reason'], 'completed')
@@ -98,7 +102,22 @@ class CaptureTests(unittest.TestCase):
         self.assertIsNone(summary['ber'])
         self.assertIn('"trace"', (folder / 'events.jsonl').read_text())
 
-    def test_stop_during_baseline_never_fires_on_late_wait(self):
+    def test_unstable_baseline_still_sends_once_and_records_voltage(self):
+        p = self.panel(); self.arm(p); self.ready(p)
+        folder = p.capture.folder
+        token = p.run_id
+        p.event(dict(event='laser_pattern', state='started', request_id=token))
+        for i, adc in enumerate((382, 430, 392, 425, 388, 428)):
+            line = reading(1500 + i * 250, 'BASELINE', adc=adc).replace('off_V=0.612', 'off_V=NA')
+            p.arduino.emit(kind='line', line=line)
+        p.tick()
+        self.assertEqual(p.capture.rows, 7)
+        self.assertEqual(sum(x['cmd'] == 'laser_pattern' for x in self.sent), 1)
+        p.event(dict(event='laser_pattern', state='completed', request_id=token))
+        p.rx_deadline = time.monotonic() - 1; p.tick()
+        self.assertEqual(json.loads((folder / 'summary.json').read_text())['end_reason'], 'completed')
+
+    def test_stop_before_first_record_never_fires_on_late_data(self):
         p = self.panel(); self.arm(p)
         folder = p.capture.folder
         self.ready_events(p)
@@ -136,7 +155,7 @@ class CaptureTests(unittest.TestCase):
                 self.assertTrue((folder / 'summary.json').exists())
                 self.assertEqual(self.sent[-1]['value'], 0)
 
-    def test_no_wait_times_out_without_sending(self):
+    def test_no_serial_data_times_out_without_sending(self):
         p = self.panel(); self.arm(p)
         p.rx_deadline = time.monotonic() - 1; p.tick()
         self.assertFalse(any(x['cmd'] == 'laser_pattern' for x in self.sent))
