@@ -1,4 +1,4 @@
-"""Slow raw OOK test patterns. GPIO command timing is not optical timing."""
+"""Raw OOK test patterns. GPIO command timing is not optical timing."""
 import math
 import threading
 import time
@@ -9,8 +9,9 @@ def pattern_settings(cmd):
     if not isinstance(bits, str) or not 1 <= len(bits) <= 256 or set(bits) - {'0', '1'}:
         raise ValueError('Pattern must contain 1..256 binary digits')
     ms, repeats = cmd.get('bit_ms'), cmd.get('repeats')
-    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not math.isfinite(ms) or not 100 <= ms <= 5000:
-        raise ValueError('Raw test bit duration must be 100..5000 ms (not a measured hardware limit)')
+    # No experimental speed floor: actual scheduling is checked by run().
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not math.isfinite(ms) or not 0 < ms <= 5000:
+        raise ValueError('Raw test bit duration must be > 0 and <= 5000 ms; decimals allowed')
     if type(repeats) is not int or not 1 <= repeats <= 100:
         raise ValueError('Repeats must be 1..100')
     if len(bits) * repeats > 256:

@@ -12,10 +12,18 @@ from Tx.RaspberryPi.Rasp_main import Agent
 class PatternTests(unittest.TestCase):
     def test_invalid_requests_do_not_start(self):
         for change in ({'bits':'102'}, {'bits':''}, {'bit_ms':float('nan')},
-                       {'bit_ms':0}, {'repeats':True}, {'repeats':100},
+                       {'bit_ms':0}, {'bit_ms':-1}, {'bit_ms':True},
+                       {'bit_ms':float('inf')}, {'bit_ms':5001},
+                       {'repeats':True}, {'repeats':100},
                        {'bit_ms':5000,'bits':'1'*30}):
             with self.assertRaises(ValueError):
                 pattern_settings(dict(dict(bits='1010',bit_ms=100,repeats=1), **change))
+
+    def test_short_bit_durations_are_preserved(self):
+        for ms in (50, 20, 10, 1, 0.5, 0.01):
+            with self.subTest(bit_ms=ms):
+                settings = pattern_settings(dict(bits='1010', bit_ms=ms, repeats=1))
+                self.assertEqual(settings['bit_ms'], ms)
 
     def engine(self, output=None):
         calls, reports = [], []

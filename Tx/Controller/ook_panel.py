@@ -65,6 +65,7 @@ class OokPanel(ttk.Frame):
         ttk.Label(self, textvariable=self.rx_status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, textvariable=self.saved_status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, text='1 = 레이저 ON, 0 = OFF · Pi에서 반복 실행 · 종료 후 OFF\n'
+                  '비트 시간: 0 초과~5000ms (소수 허용) · 송신 지연 시 timing_overrun으로 중단\n'
                   '자동 저장: OFF 확인 → Arduino 기록 시작 확인 → 바로 송신 (WAIT 대기 없음) → 종료 후 2.5초 기록\n'
                   '수신 CSV: 10ms 목표 간격의 원시 ADC·전압. 누락은 sequence_gap·sample_dt_ms로 확인합니다.\n'
                   '원시 기록 모드: 주변광 초기화·HIGH/LOW 판정 없이 송신·저장합니다.\n'
