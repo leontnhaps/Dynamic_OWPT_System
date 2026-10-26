@@ -34,6 +34,8 @@ class ProcessingProfile:
         self.display=None;self.rendered_frame=None;self.receipts=[]
 
     def start(self):
+        if getattr(getattr(self.app,'sweep',None),'busy',False):
+            raise ValueError('M5-1 준비·편도·저장을 먼저 종료하세요.')
         if getattr(getattr(self.app,'stationary',None),'busy',False):
             raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         p=self.panel

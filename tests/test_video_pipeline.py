@@ -24,7 +24,8 @@ class VideoPipelineTests(unittest.TestCase):
         a.servo=Mock()
         a.detection=Mock(name='detection');a.timing=Mock(name='timing')
         a.stationary=Mock(name='stationary')
-        for p in (a.detection,a.timing,a.stationary):p.guard=lambda fn:fn()
+        a.sweep=Mock(name='sweep')
+        for p in (a.detection,a.timing,a.stationary,a.sweep):p.guard=lambda fn:fn()
         a.timing.profile.running=False
         return a
 
@@ -48,6 +49,7 @@ class VideoPipelineTests(unittest.TestCase):
         a.render()
         a.detection.render.assert_called_once()
         a.stationary.render.assert_not_called();a.timing.render.assert_not_called()
+        a.sweep.render.assert_not_called()
         a.preview.configure.assert_not_called()
         a.root.after.assert_called_once()
 

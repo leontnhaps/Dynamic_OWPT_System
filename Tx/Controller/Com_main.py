@@ -16,6 +16,7 @@ from Tx.Controller.servo_panel import ServoPanel
 from Tx.Controller.detection_panel import DetectionPanel
 from Tx.Controller.timing_panel import TimingPanel
 from Tx.Controller.stationary_panel import StationaryPanel
+from Tx.Controller.sweep_panel import SweepPanel
 
 class App:
     def __init__(self,root,args):
@@ -33,6 +34,7 @@ class App:
         self.detection=DetectionPanel(tabs,self);tabs.add(self.detection,text='M1-3 (PV 검출)')
         self.timing=TimingPanel(tabs,self);tabs.add(self.timing,text='M1-5 (응답 · 제어 시간)')
         self.stationary=StationaryPanel(tabs,self);tabs.add(self.stationary,text='M3-2 (정지 PV · SAC)')
+        self.sweep=SweepPanel(tabs,self);tabs.add(self.sweep,text='M5-1 (이동 실험 · 수집)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -54,7 +56,7 @@ class App:
         def show_preview(event=None):
             if self.timing.profile.running and tabs.select()!=str(self.timing):
                 self.timing.profile.finish('탭 변경으로 처리 시간 측정 중단')
-            if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary)):self.preview.pack_forget()
+            if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary),str(self.sweep)):self.preview.pack_forget()
             else:self.preview.pack(expand=True,fill='both')
         tabs.bind('<<NotebookTabChanged>>',show_preview)
         root.after(5,self.poll)
@@ -83,6 +85,14 @@ class App:
         if follow.get():widget.see('end')
         widget.configure(state='disabled')
     def send(self,cmd,tracking=False):
+        sweep=getattr(self,'sweep',None)
+        if (sweep is not None and cmd.get('cmd') in ('move','servo_config','preview','snap','outputs_off','ir_cut')
+                and not str(cmd.get('request_id','')).startswith('m5-1-')):
+            if sweep.busy and cmd.get('cmd')!='outputs_off':
+                self.record(dict(event='command_blocked',reason='M5-1 편도·준비·저장·응답 완료 후 실행',command=cmd))
+                return False
+            if sweep.busy or sweep.hardware_ready:
+                sweep.invalidate('external_command: '+cmd.get('cmd'))
         stationary=getattr(self,'stationary',None)
         if stationary is not None and (stationary.active or getattr(stationary,'preparing',None)) and cmd.get('cmd') in ('move','servo_config','preview','snap','outputs_off'):
             if not str(cmd.get('request_id','')).startswith('m3-2-'):
@@ -139,6 +149,7 @@ class App:
                 self.servo.event(event)
                 self.timing.event(event)
                 self.stationary.event(event)
+                self.sweep.guard(lambda: self.sweep.event(event))
                 if kind=='network':self.links[str(event['port'])]=event['state']
                 if kind in ('hello','agent'):self.links['Pi']=event.get('agent_state',event.get('state'))
                 if kind=='pong':
@@ -161,6 +172,7 @@ class App:
         self.detection.guard(self.detection.poll)
         self.timing.guard(self.timing.poll)
         self.stationary.guard(self.stationary.poll)
+        self.sweep.guard(self.sweep.poll)
         if now-self.mark>=1:
             self.fps=(count-self.previous)/(now-self.mark);self.previous=count;self.mark=now
             self.record(dict(event='receive_stats',fps=self.fps,total=count))
@@ -177,8 +189,8 @@ class App:
             selected=self.tabs.select()
             if selected==str(self.timing) and self.timing.profile.running:
                 self.timing.profile.render()
-            elif selected in (str(self.detection),str(self.timing),str(self.stationary)):
-                panel=next(p for p in (self.detection,self.timing,self.stationary) if str(p)==selected)
+            elif selected in (str(self.detection),str(self.timing),str(self.stationary),str(self.sweep)):
+                panel=next(p for p in (self.detection,self.timing,self.stationary,self.sweep) if str(p)==selected)
                 panel.render()
             elif self.current and self.current[2]!=self.preview_frame:
                 image=Image.open(io.BytesIO(self.current[0]))
@@ -193,6 +205,7 @@ class App:
 
     def close(self):
         self.closing=True
+        self.sweep.close()
         self.stationary.close()
         self.timing.close()
         self.detection.close()
@@ -201,6 +214,6 @@ class App:
         self.net.close();self.root.destroy()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders, including M3-2')
+    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders, including M3-2 and M6-1')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()

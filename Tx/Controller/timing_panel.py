@@ -112,6 +112,8 @@ class TimingPanel(DetectionPanel):
         self.prepare(False)
 
     def prepare(self, auto_measure):
+        if getattr(getattr(self.app,'sweep',None),'busy',False):
+            raise ValueError('M5-1 준비·편도·저장을 먼저 종료하세요.')
         if getattr(getattr(self.app,'stationary',None),'busy',False):
             raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         if self.profile.running:raise ValueError("처리 시간 측정을 먼저 종료하세요.")
