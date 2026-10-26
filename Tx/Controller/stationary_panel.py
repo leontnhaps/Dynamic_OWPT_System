@@ -144,7 +144,7 @@ class StationaryPanel(ttk.Frame):
             note = '이어서 학습: checkpoint에 저장된 주기를 자동 적용합니다.'
         else:
             values = ('저장값', *(f'{v:.3f}' for v in EVALUATION_CONTROL_PERIODS_S))
-            note = '고정 모델 평가: 저장값 또는 비교 주기를 선택하세요. 0.600 / 0.500 s는 이동 중 명령 갱신이 가능한 실험값입니다.'
+            note = '고정 모델 평가: 저장값(학습 주기) 또는 0.720 / 0.800 / 0.600 / 0.500 s. 짧은 주기는 이동 중 명령 갱신 비교값입니다.'
         self.period_combo.configure(values=values, state='disabled' if locked or mode == '이어서 학습' else 'readonly')
         self.timing_note.set(note)
 
@@ -284,6 +284,8 @@ class StationaryPanel(ttk.Frame):
             training_period = cfg.dt if cfg is not None else None
             if mode != 'new':
                 _, _, saved_cfg = checkpoint_info(source)
+                if saved_cfg.observation_size != 8:
+                    raise ValueError('M3-2 정지 탭에는 8차원 정지 모델을 선택하세요. 이동 10차원 모델은 호환되지 않습니다.')
                 training_period = saved_cfg.dt
                 selected = checkpoint_run_config(saved_cfg, mode, period)
             detector = PVDetector(path, yolo_device)

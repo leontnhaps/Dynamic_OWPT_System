@@ -7,10 +7,10 @@ from common.servo import limits_from, number
 from common.tx_setup import TX_OPERATING_LIMITS, TX_CAMERA_SETTINGS
 from common.tx_tracking import TrackingConfig
 
-SCHEMA = 'm5-1-sweep-v1'
+SCHEMA = 'm5-1-sweep-v2'
 KF_MODE = '칼만필터 최적화용 수집 + YOLO 야외 Test'
 YOLO_MODE = 'YOLO 야외 Test (이미지 수집)'
-LEARNING_MODE = '이동환경 학습 (준비 중)'
+LEARNING_MODE = '이동환경 SAC 제어 (연결 예정)'
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,9 @@ class SweepSettings:
     tilt_max: float = TX_OPERATING_LIMITS['tilt_max']
     pan_step: float = -2
     tilt_step: float = 0
+    tilt_motion: str = 'linear'
+    tilt_osc_min: float = -2
+    tilt_osc_max: float = 2
     dt: float = PRIMARY_CONTROL_PERIOD_S
     settle_s: float = 2
     confidence: float = TrackingConfig().confidence
@@ -37,14 +40,18 @@ class SweepSettings:
     @classmethod
     def from_text(cls, values):
         defaults = asdict(cls())
-        result = cls(**{k: number(str(values.get(k, '')).strip() or default, k)
+        result = cls(**{k: (str(values.get(k, '')).strip() or default) if isinstance(default, str)
+                        else number(str(values.get(k, '')).strip() or default, k)
                         for k, default in defaults.items()})
         result.validate()
         return result
 
     def validate(self):
         for key, value in asdict(self).items():
-            number(value, key)
+            if key != 'tilt_motion':
+                number(value, key)
+        if self.tilt_motion not in ('linear', 'oscillate'):
+            raise ValueError('Tilt 이동 방식은 linear / oscillate입니다.')
         limits_from(self.limits)
         for axis in ('pan', 'tilt'):
             for key in (axis, axis+'_min', axis+'_max', axis+'_step'):
@@ -54,13 +61,20 @@ class SweepSettings:
                 raise ValueError(f'최초 {axis}가 입력한 운용 범위를 벗어납니다.')
         if self.pan_step == self.tilt_step == 0:
             raise ValueError('편도 이동을 위해 적어도 한 축의 이동각은 0이 아니어야 합니다.')
+        if self.tilt_motion == 'oscillate':
+            if (not self.pan_step or not self.tilt_step
+                    or not self.tilt_min <= self.tilt_osc_min <= self.tilt <= self.tilt_osc_max <= self.tilt_max
+                    or self.tilt_osc_min >= self.tilt_osc_max
+                    or not all(float(v).is_integer() for v in (self.tilt_osc_min, self.tilt_osc_max))):
+                raise ValueError('Tilt 왕복은 Pan 이동과 0이 아닌 Tilt 이동각, 초기각을 포함하는 정수 왕복 범위가 필요합니다.')
         if self.dt not in CONTROL_PERIODS_S or self.settle_s < self.dt:
             raise ValueError('주기는 0.720 / 0.800 s, 초기 대기는 주기 이상이어야 합니다.')
         if not 0 < self.confidence <= 1 or self.class_id < 0 or not float(self.class_id).is_integer():
             raise ValueError('Confidence와 PV class ID를 확인하세요.')
         if (self.speed, self.acc) != (TrackingConfig().speed, TrackingConfig().acc):
             raise ValueError('확정된 speed/acc 100/1을 사용하세요.')
-        if self.next_pose((self.pan, self.tilt), 1) == (self.pan, self.tilt):
+        if (self.tilt_motion == 'oscillate' and self.pan == (self.pan_max if self.pan_step > 0 else self.pan_min)
+                or self.tilt_motion == 'linear' and self.next_pose((self.pan, self.tilt), 1) == (self.pan, self.tilt)):
             raise ValueError('최초 위치가 이미 진행 방향 끝점입니다. 이동 부호나 최초각을 바꾸세요.')
 
     def next_pose(self, pose, direction):
@@ -100,6 +114,7 @@ class SweepRun:
         self.finalize()
         self.test += 1
         self.direction = 1 if self.test % 2 else -1
+        self.tilt_direction = 1 if self.direction*self.cfg.tilt_step > 0 else -1
         self.step = self.saved = self.detected = self.valid = 0
         self.started = self.clock()
         self.start_pose = self.pose
@@ -209,7 +224,22 @@ class SweepRun:
         if row['status'] == 'error':
             self.abort('inference_error')
             return
-        target = self.cfg.next_pose(self.pose, self.direction)
+        if self.cfg.tilt_motion == 'oscillate':
+            pan = self.cfg.next_pose(self.pose, self.direction)[0]
+            if pan == self.pose[0]:
+                self.finish('range_complete')
+                return
+            lo, hi = self.cfg.tilt_osc_min, self.cfg.tilt_osc_max
+            # Reverse at an endpoint without repeating it. Clamp a nondivisible
+            # final increment; the actual applied delta is logged for learning.
+            if self.pose[1] >= hi:
+                self.tilt_direction = -1
+            elif self.pose[1] <= lo:
+                self.tilt_direction = 1
+            tilt = max(lo, min(hi, self.pose[1]+self.tilt_direction*abs(self.cfg.tilt_step)))
+            target = (pan, tilt)
+        else:
+            target = self.cfg.next_pose(self.pose, self.direction)
         if target == self.pose:
             self.finish('range_complete')
             return

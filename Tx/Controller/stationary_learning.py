@@ -20,6 +20,10 @@ SAC_SETTINGS = dict(learning_rate=3e-4, buffer_size=1_000_000, batch_size=256,
                     target_entropy=-2., target_update_interval=1)
 
 
+def sac_settings(cfg):
+    return dict(SAC_SETTINGS, learning_starts=cfg.learning_starts)
+
+
 def json_value(value):
     if isinstance(value, np.ndarray):
         return value.tolist()
@@ -124,7 +128,7 @@ def make_policy(cfg, device, seed):
     from stable_baselines3.common.logger import configure
 
     class CameraSpaces(gym.Env):
-        observation_space = gym.spaces.Box(-1., 1., (8,), np.float32)
+        observation_space = gym.spaces.Box(-1., 1., (cfg.observation_size,), np.float32)
         action_space = gym.spaces.Box(-1., 1., (2,), np.float32)
 
         def reset(self, **kwargs):
@@ -133,7 +137,7 @@ def make_policy(cfg, device, seed):
         def step(self, action):
             raise RuntimeError('Transitions come from real post-command observations')
 
-    policy = SAC('MlpPolicy', CameraSpaces(), device=device, seed=seed, **SAC_SETTINGS,
+    policy = SAC('MlpPolicy', CameraSpaces(), device=device, seed=seed, **sac_settings(cfg),
                  policy_kwargs=dict(net_arch=[256, 256], activation_fn=torch.nn.ReLU, n_critics=2),
                  train_freq=1, gradient_steps=1, verbose=0)
     policy.set_logger(configure(folder=None, format_strings=[]))
@@ -145,8 +149,9 @@ def checkpoint_info(path):
     if path.is_file():
         path = path.parent
     manifest = json.loads((path/'manifest.json').read_text(encoding='utf-8'))
-    if manifest.get('schema') != SCHEMA:
-        raise ValueError('M3-2 8차원 checkpoint를 선택하세요. 구형 6차원 모델은 호환되지 않습니다.')
+    from common.tx_moving import MOVING_SCHEMA, MovingConfig
+    if manifest.get('schema') not in (SCHEMA, MOVING_SCHEMA):
+        raise ValueError('지원되는 정지 8차원 / 이동 10차원 checkpoint가 아닙니다.')
     required = {'model.zip', 'replay.npz', 'state.json', 'rng.npz'}
     if set(manifest.get('files', {})) != required:
         raise ValueError('완전한 checkpoint 구성 파일이 필요합니다.')
@@ -154,10 +159,13 @@ def checkpoint_info(path):
         if digest(path/name) != expected:
             raise ValueError('Checkpoint 무결성 불일치: '+name)
     state = json.loads((path/'state.json').read_text(encoding='utf-8'))
-    cfg = TrackingConfig(**state['tracking'])
+    config_class = MovingConfig if manifest['schema'] == MOVING_SCHEMA else TrackingConfig
+    cfg = config_class(**state['tracking'])
     cfg.validate()
-    if state['checkpoint_id'] != manifest['checkpoint_id'] or state['sac'] != SAC_SETTINGS:
+    if state['checkpoint_id'] != manifest['checkpoint_id'] or state['sac'] != sac_settings(cfg):
         raise ValueError('모델·버퍼·설정 checkpoint 식별 불일치')
+    if cfg.observation_size == 10 and state.get('normalization') != cfg.normalization:
+        raise ValueError('이동 모델의 입력 정규화 정의가 일치하지 않습니다.')
     return path, state, cfg
 
 
@@ -171,18 +179,20 @@ class SACLearner:
         self.rng = np.random.default_rng(seed)
         self.total_transitions = self.updates = self.executed_actions = self.episodes = 0
         self.source = None
+        self.experiment_context = None
         if mode == 'new':
             self.policy = make_policy(cfg, device, seed)
         else:
             source, state, saved_cfg = checkpoint_info(checkpoint)
+            self.experiment_context = state.get('experiment_context')
             if cfg != checkpoint_run_config(saved_cfg, mode, cfg.dt):
                 raise ValueError('저장된 정규화·보상·각도 설정과 학습 재개의 제어주기를 유지해야 합니다.')
             from stable_baselines3 import SAC
             from stable_baselines3.common.logger import configure
             self.source = str(source.resolve())
             self.policy = SAC.load(source/'model.zip', device=device)
-            if self.policy.observation_space.shape != (8,) or self.policy.action_space.shape != (2,):
-                raise ValueError('8차원 관측 / 2차원 action 모델 필요')
+            if self.policy.observation_space.shape != (cfg.observation_size,) or self.policy.action_space.shape != (2,):
+                raise ValueError(f'{cfg.observation_size}차원 관측 / 2차원 action 모델 필요')
             self.policy.set_logger(configure(folder=None, format_strings=[]))
             for key in ('total_transitions', 'updates', 'executed_actions', 'episodes'):
                 setattr(self, key, int(state[key]))
@@ -212,9 +222,13 @@ class SACLearner:
 
     def finish_episode(self, summary, log, ratio):
         summary = dict(summary, mode=self.mode)
-        allowed = summary['reason'] in ('step_limit', 'target_lost', 'initial_target_lost')
+        cfg = getattr(self, 'cfg', TrackingConfig())
+        reasons = ('step_limit', 'target_lost', 'initial_target_lost')
+        if cfg.observation_size == 10:
+            reasons += ('range_complete', 'manual_leg_end', 'initial_dataset')
+        allowed = summary['reason'] in reasons
         planned = (math.floor(summary['new_transitions']*ratio)
-                   if self.mode != 'evaluate' and allowed and self.total_transitions >= SAC_SETTINGS['learning_starts'] else 0)
+                   if self.mode != 'evaluate' and allowed and self.total_transitions >= cfg.learning_starts else 0)
         completed, started = 0, time.monotonic()
         log.event('update_start', episode=summary['episode'], planned=planned)
         error = None
@@ -267,17 +281,18 @@ class SACLearner:
         if torch.cuda.is_available():
             torch_rng.update({f'cuda_{i}': v.cpu().numpy() for i, v in enumerate(torch.cuda.get_rng_state_all())})
         np.savez_compressed(temp/'rng.npz', **torch_rng)
-        state = dict(schema=SCHEMA, checkpoint_id=checkpoint_id, tracking=asdict(self.cfg), sac=SAC_SETTINGS,
+        state = dict(schema=self.cfg.schema, checkpoint_id=checkpoint_id, tracking=asdict(self.cfg), sac=sac_settings(self.cfg),
                      total_transitions=self.total_transitions, updates=self.updates,
                      executed_actions=self.executed_actions, episodes=self.episodes,
                      reset_action_rng=self.rng.bit_generator.state,
                      numpy_rng=[numpy_rng[0], numpy_rng[1].tolist(), *numpy_rng[2:]],
                      python_rng=random.getstate(), source=self.source,
-                     normalization=[696, 588, 1296, 972, 5, 5], action_grid='round_half_away_from_zero',
+                     experiment_context=getattr(self, 'experiment_context', None),
+                     normalization=self.cfg.normalization, action_grid='round_half_away_from_zero',
                      versions={p: importlib.metadata.version(p) for p in ('numpy', 'torch', 'gymnasium', 'stable-baselines3')})
         dump(temp/'state.json', state)
         files = {name: digest(temp/name) for name in ('model.zip', 'replay.npz', 'state.json', 'rng.npz')}
-        dump(temp/'manifest.json', dict(schema=SCHEMA, checkpoint_id=checkpoint_id, files=files))
+        dump(temp/'manifest.json', dict(schema=self.cfg.schema, checkpoint_id=checkpoint_id, files=files))
         final = root/name
         os.replace(temp, final)
         latest = Path(folder)/'latest.tmp'

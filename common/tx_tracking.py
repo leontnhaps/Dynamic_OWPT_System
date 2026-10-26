@@ -45,6 +45,26 @@ class TrackingConfig:
     def limits(self):
         return {k: getattr(self, k) for k in ('pan_min', 'pan_max', 'tilt_min', 'tilt_max')}
 
+    @property
+    def action_scale(self):
+        return np.array([self.delta_deg, self.delta_deg], dtype=float)
+
+    @property
+    def observation_size(self):
+        return 8
+
+    @property
+    def schema(self):
+        return SCHEMA
+
+    @property
+    def learning_starts(self):
+        return 1000
+
+    @property
+    def normalization(self):
+        return [696, 588, 1296, 972, *self.action_scale.tolist()]
+
     def validate(self, *, evaluation=False):
         if not all(math.isfinite(v) for v in asdict(self).values()):
             raise ValueError('설정은 유한한 수치여야 합니다.')
@@ -173,7 +193,7 @@ def observation(sample, command, previous_delta, previous_error, cfg):
     change = np.zeros(2) if previous_error is None else error-previous_error
     raw = np.r_[error, change, previous_delta, command].astype(float)
     normalized = raw.copy()
-    normalized[:6] /= [696, 588, 1296, 972, 5, 5]
+    normalized[:6] /= [696, 588, 1296, 972, *cfg.action_scale]
     normalized[6:] = 2*(raw[6:]-cfg.low)/(cfg.high-cfg.low)-1
     return raw, normalized.astype(np.float32)
 
@@ -182,7 +202,7 @@ def action_command(action, command, cfg):
     action = np.asarray(action, dtype=float)
     if action.shape != (2,) or not np.isfinite(action).all() or np.any(np.abs(action) > 1.000001):
         raise ValueError('SAC action must be finite normalized 2D values in [-1,1]')
-    degrees = np.clip(action, -1, 1)*cfg.delta_deg
+    degrees = np.clip(action, -1, 1)*cfg.action_scale
     quantized = np.sign(degrees)*np.floor(np.abs(degrees)+.5)
     target = np.clip(np.asarray(command)+quantized, cfg.low, cfg.high)
     return degrees, target, target-command

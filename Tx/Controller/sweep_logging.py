@@ -19,6 +19,8 @@ OBSERVATION_FIELDS = (
     'arrival_verified', 'width', 'height', 'count', 'confidence',
     'u', 'v', 'x1', 'y1', 'x2', 'y2', 'alpha_rad', 'beta_rad', 'alpha_deg', 'beta_deg',
     'jpeg_sha256', 'note')
+OBSERVATION_FIELDS += ('training_ready', 'training_exclusion', 'reward', 'error_px', 'intensity_mean',
+                       'hit_23px', 'kf_nis', 'predicted_delta_alpha_deg', 'predicted_delta_beta_deg')
 LEG_FIELDS = ('test', 'reason', 'direction', 'start_s', 'stop_s', 'start_pan',
               'start_tilt', 'end_pan', 'end_tilt', 'images', 'detected', 'kf_eligible', 'note')
 
@@ -41,6 +43,14 @@ class SweepLog:
         self.folder = Path(folder)
         self.folder.mkdir(parents=True, exist_ok=False)
         write_json(self.folder/'config.json', config)
+        self.experience = None
+        if config.get('moving_training'):
+            from common.tx_moving import MovingConfig
+            from Tx.Controller.sweep_training import SweepExperience
+            self.experience = SweepExperience(MovingConfig(**config['moving_training']['tracking']),
+                                               config.get('fixed_kalman'))
+            for name in ('rl_samples.jsonl', 'rl_transitions.jsonl'):
+                (self.folder/name).touch(exist_ok=False)
         for name, fields in [('observations.csv', OBSERVATION_FIELDS),
                              ('kalman_observations.csv', OBSERVATION_FIELDS), ('legs.csv', LEG_FIELDS)]:
             with (self.folder/name).open('x', newline='', encoding='utf-8') as stream:
@@ -88,16 +98,39 @@ class SweepLog:
         name = (f"T{row['test']:03d}_S{row['step']:04d}"
                 f"_pan{row['pan_command_deg']:+g}_tilt{row['tilt_command_deg']:+g}_{row['status']}.jpeg")
         row['image'] = name
+        training = None
+        if self.experience:
+            try:
+                training = self.experience.process(row)
+                transition = training['transition']
+                row.update(training_ready=bool(transition and transition['ready_for_replay']),
+                           training_exclusion=training['exclusion_reason'])
+                for key in ('reward', 'error_px', 'intensity_mean', 'hit_23px'):
+                    row[key] = training[key]
+                kf = training.get('kalman')
+                if kf and kf['initialized']:
+                    row.update(kf_nis=kf['nis'], predicted_delta_alpha_deg=kf['predicted_displacement_deg'][0],
+                               predicted_delta_beta_deg=kf['predicted_displacement_deg'][1])
+            except Exception as exc:
+                row.update(status='error', error='training_metadata: '+str(exc), training_ready=False)
+                name = name.replace('_detected.jpeg', '_error.jpeg').replace('_missing.jpeg', '_error.jpeg')
+                row['image'] = name
         # Exclusive creation prevents a duplicate test/step from silently overwriting evidence.
         with (self.folder/name).open('xb') as stream:
             stream.write(frame[0])
         row['saved_s'] = time.monotonic()
-        write_json((self.folder/name).with_suffix('.json'), dict(observation=row, frame_metadata=frame[1],
+        write_json((self.folder/name).with_suffix('.json'), dict(observation=row, frame_metadata=frame[1], training=training,
             clock_note='Host monotonic timestamps share one clock. Pi wall/sensor clocks are not synchronized.',
             annotation_note='YOLO predictions are not manually verified ground-truth labels.'))
         self.append('observations.csv', OBSERVATION_FIELDS, row)
         if row['kf_eligible']:
             self.append('kalman_observations.csv', OBSERVATION_FIELDS, row)
+        if training is not None:
+            with (self.folder/'rl_samples.jsonl').open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(training, ensure_ascii=False, allow_nan=False)+'\n')
+            if training['transition'] is not None:
+                with (self.folder/'rl_transitions.jsonl').open('a', encoding='utf-8') as stream:
+                    stream.write(json.dumps(training['transition'], ensure_ascii=False, allow_nan=False)+'\n')
         if result is None:
             # A failed inference must still display the saved raw frame when decodable.
             try:
