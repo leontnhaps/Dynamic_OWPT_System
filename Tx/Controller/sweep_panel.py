@@ -114,7 +114,7 @@ class SweepPanel(ttk.Frame):
         self.progress = tk.StringVar(value='목표각은 명령값입니다. 실제 각도/도달/드론 위치는 측정하지 않습니다.')
         for var in (self.status, self.progress):
             ttk.Label(self, textvariable=var, wraplength=1120).pack(anchor='w')
-        ttk.Label(self, text='captures/M6-1/날짜_시각/ · 원본 이미지 + JSON + CSV · 아래 영상은 최근 저장 샘플 (준비 후에는 원본 미리보기)').pack(anchor='w')
+        ttk.Label(self, text='captures/M5-1/날짜_시각/ · 원본 이미지 + JSON + CSV · 아래 영상은 최근 저장 샘플 (준비 후에는 원본 미리보기)').pack(anchor='w')
         self.canvas = ttk.Label(self, anchor='center'); self.canvas.pack(fill='both', expand=True)
 
     @property
@@ -170,7 +170,7 @@ class SweepPanel(ttk.Frame):
         cfg = MovingConfig(dt=float(self.vars['dt'].get().strip() or '.720')); cfg.validate()
         self.stop_other_panels()
         self.training_cancel.clear()
-        output = self.app.stage_dir('M6-1')/('pretraining_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+        output = self.app.stage_dir('M5-1')/('pretraining_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
         self.pretraining_folder = output
         self.pretraining_status = None
         self.job_kind = 'pretrain'
@@ -265,7 +265,7 @@ class SweepPanel(ttk.Frame):
         if not servo.online or servo.simulated is not False or servo.limits != self.cfg.limits:
             raise ValueError('실제 Pi와 적용 범위를 확인하고 다시 자동 준비하세요.')
         if self.run is None:
-            self.log = SweepLog(self.app.stage_dir('M6-1')/datetime.now().strftime('%Y%m%d_%H%M%S_%f'), self.config(frame))
+            self.log = SweepLog(self.app.stage_dir('M5-1')/datetime.now().strftime('%Y%m%d_%H%M%S_%f'), self.config(frame))
             self.run = SweepRun(self.cfg, self.log, self.app.send)
         self.run.start_leg(self.note.get().strip())
         self.pretraining_status = None

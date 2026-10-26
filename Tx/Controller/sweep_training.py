@@ -231,7 +231,7 @@ def main():
     args = parser.parse_args()
     cfg = MovingConfig(dt=args.period); cfg.validate()
     kalman, _ = load_kalman_config(args.kalman)
-    output = args.output or Path('captures/M6-1')/('pretraining_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+    output = args.output or Path('captures/M5-1')/('pretraining_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
     result = pretrain(args.source, kalman, cfg, output, args.device)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
