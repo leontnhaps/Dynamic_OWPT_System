@@ -7,7 +7,7 @@ from common.servo import limits_from, number
 from common.tx_setup import TX_OPERATING_LIMITS, TX_CAMERA_SETTINGS
 from common.tx_tracking import TrackingConfig
 
-SCHEMA = 'm5-1-sweep-v2'
+SCHEMA = 'm5-1-sweep-v3'
 KF_MODE = '칼만필터 최적화용 수집 + YOLO 야외 Test'
 YOLO_MODE = 'YOLO 야외 Test (이미지 수집)'
 LEARNING_MODE = '이동환경 SAC 제어 (연결 예정)'

@@ -150,6 +150,8 @@ def checkpoint_info(path):
         path = path.parent
     manifest = json.loads((path/'manifest.json').read_text(encoding='utf-8'))
     from common.tx_moving import MOVING_SCHEMA, MovingConfig
+    if manifest.get('schema') == 'tx-moving-v1':
+        raise ValueError('이전 tanh 정규화 이동 모델입니다. 원본 수집 데이터를 재처리하여 초기 모델을 다시 학습하세요.')
     if manifest.get('schema') not in (SCHEMA, MOVING_SCHEMA):
         raise ValueError('지원되는 정지 8차원 / 이동 10차원 checkpoint가 아닙니다.')
     required = {'model.zip', 'replay.npz', 'state.json', 'rng.npz'}

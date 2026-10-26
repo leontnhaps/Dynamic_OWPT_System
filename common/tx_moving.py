@@ -11,8 +11,31 @@ from pathlib import Path
 import numpy as np
 from common.tx_tracking import TrackingConfig, observation
 
-MOVING_SCHEMA = 'tx-moving-v1'
+MOVING_SCHEMA = 'tx-moving-v2'
 KALMAN_SCHEMA = 'tx-bearing-kalman-v1'
+
+
+class PredictionInputError(ValueError):
+    """Keep a KF diagnostic, but exclude its invalid policy observation."""
+
+
+def wrap_azimuth_rad(angle):
+    """Signed shortest difference in [-pi, pi); a half turn maps to -pi."""
+    return (angle+np.pi) % (2*np.pi)-np.pi
+
+
+def prediction_displacement_deg(current_bearing_rad, predicted_bearing_rad):
+    current = np.asarray(current_bearing_rad, dtype=float)
+    predicted = np.asarray(predicted_bearing_rad, dtype=float)
+    if (current.shape != (2,) or predicted.shape != (2,)
+            or not np.isfinite(current).all() or not np.isfinite(predicted).all()):
+        raise PredictionInputError('현재·예측 target bearing에 유한한 방위각·고도각 rad 값이 필요합니다.')
+    if abs(current[1]) > np.pi/2 or abs(predicted[1]) > np.pi/2:
+        raise PredictionInputError('현재·예측 고도각이 물리 범위 [-90,90]°를 벗어났습니다.')
+    delta = predicted-current
+    delta[0] = wrap_azimuth_rad(delta[0])
+    # Elevation is not circular: two valid elevations can differ by ±180°.
+    return np.degrees(delta)
 
 
 @dataclass(frozen=True)
@@ -21,8 +44,6 @@ class MovingConfig(TrackingConfig):
     pan_max: int = 90
     pan_delta_deg: float = 90.
     tilt_delta_deg: float = 5.
-    prediction_pan_scale_deg: float = 90.
-    prediction_tilt_scale_deg: float = 5.
 
     @property
     def action_scale(self):
@@ -30,7 +51,8 @@ class MovingConfig(TrackingConfig):
 
     @property
     def prediction_scale(self):
-        return np.array([self.prediction_pan_scale_deg, self.prediction_tilt_scale_deg])
+        # Angular feature ranges, independent of servo action limits.
+        return np.array([180., 180.])
 
     @property
     def observation_size(self):
@@ -47,8 +69,11 @@ class MovingConfig(TrackingConfig):
     @property
     def normalization(self):
         return dict(base_divisors=super().normalization, command='affine operating limits to [-1,1]',
-                    prediction='tanh(predicted displacement in degrees / scale)',
+                    prediction='linear: prediction displacement in degrees / 180',
                     prediction_scale_deg=self.prediction_scale.tolist(),
+                    prediction_azimuth='shortest signed difference in [-180,180); +180 maps to -180',
+                    prediction_elevation='ordinary difference; current and predicted elevation in [-90,90]',
+                    invalid_prediction='exclude replay observation; retain raw KF diagnostics; no clipping',
                     prediction_reference='posterior target bearing; not Tx pointing angle',
                     order=['e_u', 'e_v', 'delta_e_u', 'delta_e_v', 'previous_delta_pan',
                            'previous_delta_tilt', 'pan_command', 'tilt_command',
@@ -62,18 +87,13 @@ class MovingConfig(TrackingConfig):
             raise ValueError('이동 학습의 Tilt 운용 범위는 -15~40° 안이어야 합니다.')
         if (self.pan_delta_deg, self.tilt_delta_deg) != (90, 5):
             raise ValueError('이동 SAC의 요청 이동량은 Pan ±90° / Tilt ±5°입니다.')
-        if np.any(self.prediction_scale <= 0):
-            raise ValueError('예측 변화량 정규화 기준은 양수여야 합니다.')
 
 
-def moving_observation(sample, command, previous_delta, previous_error, displacement_deg, cfg):
+def moving_observation(sample, command, previous_delta, previous_error,
+                       current_bearing_rad, predicted_bearing_rad, cfg):
     raw, normalized = observation(sample, command, previous_delta, previous_error, cfg)
-    displacement = np.asarray(displacement_deg, dtype=float)
-    if displacement.shape != (2,) or not np.isfinite(displacement).all():
-        raise ValueError('유효한 예측 방위각·고도각 변화량 두 개가 필요합니다.')
-    # Smooth bounded normalization preserves the sign and does not hard-clip
-    # large predictions to an action limit. Raw values remain in the logs.
-    return np.r_[raw, displacement], np.r_[normalized, np.tanh(displacement/cfg.prediction_scale)].astype(np.float32)
+    displacement = prediction_displacement_deg(current_bearing_rad, predicted_bearing_rad)
+    return np.r_[raw, displacement], np.r_[normalized, displacement/cfg.prediction_scale].astype(np.float32)
 
 
 def _covariance(value, size, name, *, positive=False):
@@ -154,7 +174,7 @@ There are no guessed, optimized or automatically adapted noise parameters.
             innovation = innovation_covariance = gain = nis = None
             if z is not None:
                 innovation = z-prior[:2]
-                innovation[0] = (innovation[0]+np.pi)%(2*np.pi)-np.pi
+                innovation[0] = wrap_azimuth_rad(innovation[0])
                 innovation_covariance = prior_p[:2, :2]+self.R
                 gain = np.linalg.solve(innovation_covariance, prior_p[:2, :]).T
                 self.x = prior+gain@innovation

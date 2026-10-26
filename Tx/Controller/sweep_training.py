@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
 from common.tx_bearing import BEARING_MODEL
-from common.tx_moving import MovingConfig, BearingKalman, load_kalman_config, moving_observation
+from common.tx_moving import MovingConfig, BearingKalman, PredictionInputError, load_kalman_config, moving_observation
 from common.tx_tracking import BeamMap, observation
 from Tx.Controller.stationary_learning import SACLearner, RunLog, digest, dump
 
@@ -35,11 +35,11 @@ one frozen KF configuration. No future-frame smoothing is used as input.
         detected = row['status'] == 'detected'
         kf = (self.kalman.step([row['alpha_rad'], row['beta_rad']] if detected else None,
                               row['receive_s'], self.cfg.dt) if self.kalman else None)
-        record = dict(test=row['test'], step=row['step'], frame_id=row.get('frame_id'),
+        record = dict(schema=self.cfg.schema, test=row['test'], step=row['step'], frame_id=row.get('frame_id'),
                       image=row.get('image'), receive_s=row['receive_s'],
                       raw8=None, normalized8=None, raw10=None, normalized10=None,
                       reward=None, error_px=None, intensity_mean=None, hit_23px=None,
-                      kalman=kf, transition=None, exclusion_reason='initial_observation')
+                      kalman=kf, prediction_error=None, transition=None, exclusion_reason='initial_observation')
         if not detected:
             record['exclusion_reason'] = row['status']
             self.previous, self.previous_row = None, row.copy()
@@ -62,12 +62,21 @@ one frozen KF configuration. No future-frame smoothing is used as input.
                        and np.all(command <= self.cfg.high) and np.all(np.abs(delta) <= self.cfg.action_scale)
                        and row.get('width') == self.cfg.width and row.get('height') == self.cfg.height
                        and row.get('confidence', 0) >= self.cfg.confidence)
+        prediction_valid = True
         if state_valid and kf and kf['initialized']:
-            raw10, normalized10 = moving_observation(sample, command, delta, previous_error,
-                                                    kf['predicted_displacement_deg'], self.cfg)
-            record.update(raw10=raw10.tolist(), normalized10=normalized10.tolist())
+            try:
+                raw10, normalized10 = moving_observation(sample, command, delta, previous_error,
+                    kf['posterior_state'][:2], kf['predicted_bearing_rad'], self.cfg)
+                record.update(raw10=raw10.tolist(), normalized10=normalized10.tolist())
+            except PredictionInputError as exc:
+                # A bad forecast must not stop image collection, become a
+                # clipped input, or bridge the two surrounding transitions.
+                prediction_valid = False
+                record['prediction_error'] = str(exc)
         if not state_valid:
             record['exclusion_reason'] = 'outside_moving_contract'
+        elif not prediction_valid:
+            record['exclusion_reason'] = 'invalid_kalman_prediction'
         elif consecutive:
             sent = row.get('command_sent_s')
             previous = self.previous_row
@@ -84,7 +93,7 @@ one frozen KF configuration. No future-frame smoothing is used as input.
                 # Fixed sweep controller: the exact applied integer command is
                 # represented by its inverse scale, including endpoint clamping.
                 action = delta/self.cfg.action_scale
-                record['transition'] = dict(episode=row['test'], step=row['step'],
+                record['transition'] = dict(schema=self.cfg.schema, episode=row['test'], step=row['step'],
                     before_image=previous.get('image'), after_image=row.get('image'),
                     observation8=self.previous['raw8'], next_observation8=raw.tolist(),
                     observation=self.previous['normalized10'], next_observation=record['normalized10'],
@@ -94,7 +103,7 @@ one frozen KF configuration. No future-frame smoothing is used as input.
                 record['exclusion_reason'] = None if record['transition']['ready_for_replay'] else 'needs_fixed_kalman_reprocessing'
         elif row['step'] != 0:
             record['exclusion_reason'] = 'missing_or_nonconsecutive_pre_observation'
-        self.previous = record if state_valid else None
+        self.previous = record if state_valid and prediction_valid else None
         self.previous_row = row.copy()
         return record
 
@@ -131,7 +140,7 @@ def build_dataset(folders, cfg, kalman_config, cancel=None):
         if cancel is not None and cancel.is_set():
             raise ValueError('초기 데이터 재처리가 취소되었습니다.')
         config = json.loads((folder/'config.json').read_text(encoding='utf-8'))
-        if config.get('schema') not in ('m5-1-sweep-v1', 'm5-1-sweep-v2'):
+        if config.get('schema') not in ('m5-1-sweep-v1', 'm5-1-sweep-v2', 'm5-1-sweep-v3'):
             raise ValueError(f'편도 수집 결과 폴더가 아닙니다: {folder}')
         settings = config['settings']
         if settings['dt'] != cfg.dt or config.get('bearing_model') != BEARING_MODEL:

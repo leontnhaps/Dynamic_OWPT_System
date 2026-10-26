@@ -287,7 +287,7 @@ class SweepPanel(ttk.Frame):
         return dict(schema=SCHEMA, mode=self.prepared_mode, settings=asdict(self.cfg), model=self.identity,
             target_selection=TARGET_SELECTION, bearing_model=BEARING_MODEL, camera=TX_CAMERA_SETTINGS,
             initial_camera_metadata=frame[1], python=platform.python_version(), packages=packages,
-            moving_training=dict(tracking=asdict(moving_cfg), normalization=moving_cfg.normalization,
+            moving_training=dict(schema=moving_cfg.schema, tracking=asdict(moving_cfg), normalization=moving_cfg.normalization,
                 purpose='fixed sweep experience for later initial replay; not learned control',
                 replay_policy='valid adjacent observations only; reset history each leg; no missing-gap bridges'),
             fixed_kalman=self.__dict__.get('fixed_kalman'), kalman_file=self.__dict__.get('kalman_identity'),

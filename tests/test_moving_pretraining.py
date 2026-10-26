@@ -14,11 +14,12 @@ from PIL import Image
 import io
 import numpy as np
 from common.tx_bearing import BEARING_MODEL
-from common.tx_moving import MovingConfig, BearingKalman, KALMAN_SCHEMA, moving_observation, validate_kalman_config
+from common.tx_moving import (MovingConfig, BearingKalman, KALMAN_SCHEMA, PredictionInputError,
+                              moving_observation, prediction_displacement_deg, validate_kalman_config)
 from common.tx_tracking import TrackingConfig, action_command
 from Tx.Controller.sweep_core import SweepSettings, SweepRun
 from Tx.Controller.sweep_training import SweepExperience, build_dataset, pretrain
-from Tx.Controller.stationary_learning import SACLearner, sac_settings
+from Tx.Controller.stationary_learning import SACLearner, sac_settings, checkpoint_info, digest, dump
 import test_sweep_collection as sweep_fixtures
 
 
@@ -68,18 +69,43 @@ class MovingMathTests(unittest.TestCase):
         np.testing.assert_allclose(action_command([-1/180, -.1], [0, 0], cfg)[1], [-1, -1])
         np.testing.assert_allclose(action_command([1, 1], [0, 0], TrackingConfig())[1], [5, 5])
 
-    def test_observation_normalization_and_no_prediction_hard_clip(self):
+    def test_linear_prediction_normalization_independent_of_action_scale(self):
         cfg = MovingConfig()
         sample = SimpleNamespace(target=dict(center=[696, 384]))
-        raw, normalized = moving_observation(sample, [45, 12.5], [45, 2.5], None, [180, -10], cfg)
+        raw, normalized = moving_observation(sample, [45, 12.5], [45, 2.5], None,
+            np.radians([170, 20]), np.radians([-170, 10]), cfg)
         self.assertEqual(len(raw), 10)
         np.testing.assert_allclose(normalized[4:8], [.5, .5, .5, 0])
-        np.testing.assert_allclose(normalized[-2:], np.tanh([2, -2]))
+        np.testing.assert_allclose(normalized[-2:], [20/180, -10/180])
         self.assertTrue(np.all(np.abs(normalized) <= 1))
-        np.testing.assert_allclose(raw[-2:], [180, -10])
+        np.testing.assert_allclose(raw[-2:], [20, -10])
         self.assertEqual(sac_settings(cfg)['learning_starts'], 0)
         self.assertEqual(sac_settings(TrackingConfig())['learning_starts'], 1000)
         with self.assertRaises(ValueError): replace(cfg, pan_min=-180).validate()
+
+    def test_azimuth_boundaries_both_directions_and_half_turn_tie(self):
+        for current, predicted, expected in [(350, 10, 20), (10, 350, -20),
+                (179, -179, 2), (-179, 179, -2), (0, 180, -180), (0, -180, -180),
+                (180, -180, 0), (720, 1081, 1)]:
+            with self.subTest(current=current, predicted=predicted):
+                delta = prediction_displacement_deg(np.radians([current, 0]), np.radians([predicted, 0]))
+                self.assertAlmostEqual(delta[0], expected)
+                # Normalize absolute azimuths first, then wrap the difference
+                # into the period-2 interval: identical to wrap-then-divide.
+                first = current/180-1; future = predicted/180-1
+                self.assertAlmostEqual(delta[0]/180, (future-first+1) % 2-1)
+
+    def test_elevation_is_linear_non_circular_and_invalid_forecasts_are_rejected(self):
+        sample = SimpleNamespace(target=dict(center=[696, 384]))
+        for current, predicted, expected in [(-90, 90, 1), (90, -90, -1), (-80, 80, 160/180)]:
+            raw, normalized = moving_observation(sample, [0, 0], [0, 0], None,
+                np.radians([0, current]), np.radians([0, predicted]), MovingConfig())
+            self.assertAlmostEqual(raw[-1], predicted-current)
+            self.assertAlmostEqual(normalized[-1], expected)
+        for current, predicted in [([0, 91], [0, 0]), ([0, 0], [0, -91]),
+                                   ([0, 0], [np.nan, 0]), ([0, 0], [0, np.inf])]:
+            with self.subTest(current=current, predicted=predicted), self.assertRaises(PredictionInputError):
+                prediction_displacement_deg(np.radians(current), np.radians(predicted))
 
 
 class KalmanTests(unittest.TestCase):
@@ -112,6 +138,18 @@ class KalmanTests(unittest.TestCase):
         initial = kf.step([0, 0], 5, .72)
         np.testing.assert_allclose(initial['predicted_displacement_rad'], [0, 0])
 
+    def test_boundary_crossings_keep_continuous_state_and_correct_velocity(self):
+        for direction in (-1, 1):
+            kf = BearingKalman(kalman_config())
+            for i in range(12):
+                unwrapped = direction*(175+2*i)
+                measured = (unwrapped+180) % 360-180
+                result = kf.step(np.radians([measured, 0]), i*.72, .72)
+            self.assertAlmostEqual(math.degrees(result['posterior_state'][0]), unwrapped, places=3)
+            self.assertAlmostEqual(result['predicted_displacement_deg'][0], direction*2, places=3)
+            delta = prediction_displacement_deg(result['posterior_state'][:2], result['predicted_bearing_rad'])
+            self.assertAlmostEqual(delta[0], direction*2, places=3)
+
     def test_continuous_noise_uses_actual_elapsed_time(self):
         kf = BearingKalman(kalman_config('continuous_white_acceleration'))
         kf.step([0, 0], 0, .72)
@@ -122,6 +160,20 @@ class KalmanTests(unittest.TestCase):
 
 
 class ExperienceTests(unittest.TestCase):
+    def test_invalid_prediction_is_logged_and_breaks_replay_without_aborting_collection(self):
+        exp = SweepExperience(MovingConfig(), kalman_config())
+        exp.process(row(0))
+        invalid = exp.process(dict(row(1), beta_rad=math.radians(89)))
+        self.assertEqual(invalid['exclusion_reason'], 'invalid_kalman_prediction')
+        self.assertIn('고도각', invalid['prediction_error'])
+        self.assertGreater(invalid['kalman']['predicted_bearing_rad'][1], np.pi/2)
+        self.assertIsNotNone(invalid['raw8']); self.assertIsNotNone(invalid['reward'])
+        self.assertIsNone(invalid['raw10']); self.assertIsNone(invalid['transition'])
+        recovered = exp.process(row(2))
+        self.assertIsNotNone(recovered['normalized10'])
+        self.assertIsNone(recovered['transition'])
+        self.assertIsNotNone(exp.process(row(3))['transition'])
+
     def test_raw_collection_can_be_completed_with_frozen_filter(self):
         raw = SweepExperience(MovingConfig())
         raw.process(row(0)); unfinished = raw.process(row(1))
@@ -212,6 +264,28 @@ class OscillationTests(unittest.TestCase):
 
 
 class MovingLearningTests(unittest.TestCase):
+    def test_checkpoint_rejects_old_tanh_and_mismatched_linear_metadata(self):
+        with TemporaryDirectory() as temp:
+            folder = Path(temp)
+            dump(folder/'manifest.json', dict(schema='tx-moving-v1'))
+            with self.assertRaisesRegex(ValueError, 'tanh'):
+                checkpoint_info(folder)
+            cfg = MovingConfig()
+            state = dict(schema=cfg.schema, checkpoint_id='paired', tracking=asdict(cfg),
+                         sac=sac_settings(cfg), normalization=cfg.normalization)
+            for name in ('model.zip', 'replay.npz', 'rng.npz'):
+                (folder/name).write_bytes(b'synthetic-checkpoint')
+            def save_metadata():
+                dump(folder/'state.json', state)
+                dump(folder/'manifest.json', dict(schema=cfg.schema, checkpoint_id='paired',
+                    files={name:digest(folder/name) for name in ('model.zip', 'replay.npz', 'state.json', 'rng.npz')}))
+            save_metadata()
+            self.assertEqual(checkpoint_info(folder)[2], cfg)
+            state['normalization']['prediction'] = 'tanh'
+            save_metadata()
+            with self.assertRaisesRegex(ValueError, '정규화'):
+                checkpoint_info(folder)
+
     def learner(self, total):
         learner = SACLearner.__new__(SACLearner)
         learner.cfg = MovingConfig()
