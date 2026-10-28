@@ -16,6 +16,7 @@ class OokExperimentMixin:
         self.experiment_root = None
         self.last_experiment = None
         self.batch_index = 0
+        self.batch_tx_failures = 0
         self.next_trial_at = None
         self.active_spec = None
         self.analysis_worker = None
@@ -76,6 +77,7 @@ class OokExperimentMixin:
         (root/'experiment.json').write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
         self.experiment, self.experiment_root, self.last_experiment = plan, root, root
         self.batch_index = 0
+        self.batch_tx_failures = 0
         self.next_trial_at = time.monotonic()
         self.rx_save.set(True)
         self.experiment_status.set(f'총 {len(plan["trials"])}회 준비 · 조건 순서 무작위 · 종료 후 자동 분석')
@@ -84,16 +86,23 @@ class OokExperimentMixin:
         plan, self.experiment = self.experiment, None
         self.next_trial_at = None
         if plan:
-            self.experiment_status.set(f'반복 실험 종료: {reason} · 저장 폴더: {self.experiment_root}')
-            (self.experiment_root/'run.json').write_text(json.dumps(dict(reason=reason,
-                finished_trials=self.batch_index, planned_trials=len(plan['trials'])), indent=2), encoding='utf-8')
+            self.experiment_status.set(f'반복 실험 종료: {reason} · 송신 시간 초과 {self.batch_tx_failures}회 · 저장 폴더: {self.experiment_root}')
+            (self.experiment_root/'run.json').write_text(json.dumps(dict(schema_version=2, reason=reason,
+                finished_trials=self.batch_index, planned_trials=len(plan['trials']),
+                completed_trials=self.batch_index-self.batch_tx_failures,
+                timing_overrun_trials=self.batch_tx_failures), indent=2), encoding='utf-8')
 
     def trial_finished(self, reason):
         if not self.experiment:
             return
-        if reason != 'completed':
+        if reason not in ('completed', 'tx_timing_overrun'):
             self.cancel_experiment(reason)
             return
+        # Only a Pi terminal timing_overrun with confirmed OFF is allowed here.
+        # Retain this invalid TX attempt; never count it as an optical failure,
+        # retry it invisibly, or relax the Pi's timing deadline.
+        if reason == 'tx_timing_overrun':
+            self.batch_tx_failures += 1
         self.batch_index += 1
         if self.batch_index == len(self.experiment['trials']):
             root = self.experiment_root
@@ -120,7 +129,8 @@ class OokExperimentMixin:
             self.active_spec = dict(spec, rules_version=RULES['version'])
             folder = self.experiment_root / f'trial_{self.batch_index+1:05d}'
             self.experiment_status.set(f'{self.batch_index+1}/{len(self.experiment["trials"])} · '
-                f'비트 {spec["settings"]["bit_ms"]} ms · 측정 {spec["sample_ms"]} ms')
+                f'비트 {spec["settings"]["bit_ms"]} ms · 측정 {spec["sample_ms"]} ms · '
+                f'송신 시간 초과 {self.batch_tx_failures}회')
             self.begin_trial(spec['settings'], spec['sample_ms'], folder=folder, experiment=self.active_spec)
         except (ValueError, OSError) as exc:
             self.abort_capture('experiment_error')

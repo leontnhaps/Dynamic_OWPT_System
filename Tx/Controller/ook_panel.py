@@ -1,5 +1,6 @@
 """M4-4 laser controls and raw OOK tests; no command-frame encoding yet."""
 import json
+import math
 import time
 import uuid
 import queue
@@ -373,6 +374,15 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
                     if event.get('state') == 'completed':
                         self.rx_phase = 'tail'
                         self.rx_deadline = time.monotonic() + 2.5
+                    elif event.get('state') == 'timing_overrun':
+                        off_ms = event.get('off_call_done_ms')
+                        confirmed = (isinstance(off_ms, (int, float)) and not isinstance(off_ms, bool)
+                                     and math.isfinite(off_ms) and off_ms >= 0)
+                        if confirmed:
+                            self.finish_capture('tx_timing_overrun')
+                        else:
+                            self.output_requested = True
+                            self.abort_capture('tx_off_unconfirmed')
                     else:
                         self.finish_capture('tx_' + event.get('state', 'unknown'))
         if not self.pending or event.get('request_id') != self.pending[0]:

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import numpy as np
-from common.ook_experiment import HEADER, RULES, make_plan, number_list
+from common.ook_experiment import HEADER, RULES, LEGACY_RULES, make_plan, number_list
 from Tx.Controller.ook_analysis import decode, score_payload, analyze_experiment, aggregate
 from Tx.Controller.arduino_capture import RxCapture, parse_reading
 from tests import test_arduino_capture as capture_fixture
@@ -37,6 +37,34 @@ class DecoderTests(unittest.TestCase):
         self.assertEqual(score['bit_errors'], 1)
         self.assertFalse(score['success'])
         self.assertTrue(score_payload(result['decoded'], damaged)['success'])
+
+    def test_header_settling_cannot_pull_decisions_to_bit_ends(self):
+        # v1 falsely decoded 14/32 and 4/32 bits here. This synthetic signal has
+        # mild clock mismatch and settling in the marker, but no payload errors.
+        payload = '00111001010010101001010011101111'
+        bits = HEADER + payload + '0000'
+        for sample_ms in (5, 10):
+            t = np.arange(0, 7000, sample_ms, dtype=float)
+            position = (t-140.7)/99.6
+            indices = np.floor(position).astype(int)
+            phase = position-indices
+            y = np.array([400+32*int(bits[i]) if 0 <= i < len(bits) else 400
+                          for i in indices], dtype=float)
+            for j, i in enumerate(indices):
+                if 16 <= i < len(HEADER):
+                    y[j] += (1-2*int(bits[i]))*10*np.exp(-5*phase[j])
+            result = decode(t, y, 100)
+            self.assertTrue(score_payload(result['decoded'], payload)['success'])
+            self.assertLess(abs(result['origin_ms']-140.7), 15)
+
+    def test_payload_changes_cannot_change_header_phase_or_threshold(self):
+        results = []
+        for payload in ('0'*32, '1'*32, '10110010'*4):
+            t, y = self.signal(payload=payload)
+            results.append(decode(t, y, 30))
+        self.assertTrue(all(r['sync'] for r in results))
+        self.assertEqual(len({r['origin_ms'] for r in results}), 1)
+        self.assertEqual(len({r['threshold_adc'] for r in results}), 1)
 
     def test_missing_sample_is_erasure_not_interpolated(self):
         t, y = self.signal()
@@ -79,8 +107,11 @@ class DecoderTests(unittest.TestCase):
     def test_complete_artifact_analysis(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); plan = make_plan([30], [5], 1, 9)
-            (root/'experiment.json').write_text(json.dumps(plan))
-            spec = dict(plan['trials'][0], rules_version=RULES['version'])
+            # Reanalyze the original v1 frame format without rewriting its rules/data.
+            plan['rules'] = LEGACY_RULES
+            original_plan = json.dumps(plan)
+            (root/'experiment.json').write_text(original_plan)
+            spec = dict(plan['trials'][0], rules_version=LEGACY_RULES['version'])
             folder = root/'trial_00001'; folder.mkdir()
             capture = RxCapture(folder, spec['settings'], 'TEST', 'id', 5, spec)
             capture.confirm_interval('OK RAW2 R1 baud=250000 interval_ms=5')
@@ -96,16 +127,71 @@ class DecoderTests(unittest.TestCase):
             result = json.loads((out/'analysis.json').read_text())
             self.assertEqual(result['conditions'][0]['block_success_pct'], 100)
             self.assertEqual(result['conditions'][0]['decided_bits'], 32)
+            self.assertEqual(result['source_rules'], LEGACY_RULES)
+            self.assertEqual(result['rules'], RULES)
+            self.assertTrue(result['reanalysis'])
+            self.assertEqual((root/'experiment.json').read_text(), original_plan)
             self.assertTrue((out/'rates.csv').exists())
             self.assertGreater((out/'block_success.png').stat().st_size, 1000)
             # Reanalysis creates a new output directory, preserving the prior result.
             self.assertNotEqual(out, analyze_experiment(root))
+
+    def test_unknown_rules_not_silently_reinterpreted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plan = make_plan([30], [5], 1, 9)
+            plan['rules'] = dict(RULES, decision_phase=.9)
+            (root/'experiment.json').write_text(json.dumps(plan))
+            with self.assertRaises(ValueError):
+                analyze_experiment(root)
 
 
 class BatchTests(unittest.TestCase):
     panel = capture_fixture.CaptureTests.panel
     arm = capture_fixture.CaptureTests.arm
     ready = capture_fixture.CaptureTests.ready
+
+    def launch_batch_trial(self, p):
+        p.next_trial_at = time.monotonic()-1
+        p.tick()
+        p.event(dict(event='laser', request_id=p.pending[0], laser_gpio_level=0))
+        self.ready(p)
+        p.rx_deadline = time.monotonic()-1
+        p.tick()
+        token = p.run_id
+        p.event(dict(event='laser_pattern', state='started', request_id=token))
+        return token
+
+    def test_timing_overrun_is_saved_then_next_condition_runs(self):
+        p = self.panel(); p.sweep_samples.set('5'); p.sweep_bits.set('5'); p.sweep_count.set('2')
+        p.start_experiment('sweep'); root = p.experiment_root
+        with patch.object(p, 'start_analysis') as analyze:
+            token = self.launch_batch_trial(p)
+            p.event(dict(event='laser_pattern', state='timing_overrun', request_id=token, off_call_done_ms=2.55))
+            self.assertIsNotNone(p.experiment)
+            self.assertEqual(p.batch_tx_failures, 1)
+            self.assertEqual(p.batch_index, 1)
+            self.assertEqual(json.loads((root/'trial_00001/summary.json').read_text())['end_reason'], 'tx_timing_overrun')
+            # The next trial must obtain a new OFF acknowledgement before TX.
+            token = self.launch_batch_trial(p)
+            p.event(dict(event='laser_pattern', state='completed', request_id=token))
+            p.rx_deadline = time.monotonic()-1; p.tick()
+            self.assertIsNone(p.experiment)
+            analyze.assert_called_once_with(root)
+        result = json.loads((root/'run.json').read_text())
+        self.assertEqual(result['finished_trials'], 2)
+        self.assertEqual(result['completed_trials'], 1)
+        self.assertEqual(result['timing_overrun_trials'], 1)
+
+    def test_overrun_without_off_confirmation_cancels_batch(self):
+        p = self.panel(); p.sweep_samples.set('5'); p.start_experiment('sweep')
+        token = self.launch_batch_trial(p)
+        p.event(dict(event='laser_pattern', state='timing_overrun', request_id=token))
+        self.assertIsNone(p.experiment)
+        self.assertTrue(p.output_requested)
+        self.assertEqual(self.sent[-1]['cmd'], 'laser')
+        self.assertEqual(self.sent[-1]['value'], 0)
+        self.assertIsNone(p.next_trial_at)
 
     def test_batch_completes_in_order_and_analyzes(self):
         p = self.panel(); p.sweep_bits.set('30'); p.sweep_samples.set('5'); p.sweep_count.set('2')

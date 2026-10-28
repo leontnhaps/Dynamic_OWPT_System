@@ -3,15 +3,19 @@ import math
 import random
 from common.laser_pattern import pattern_settings
 
-VERSION = 'ook-test-v1'
+VERSION = 'ook-test-v2'
 HEADER = '00000000' + '11111111' + '1111100110101'
 PAYLOAD_BITS = 32
-RULES = dict(version=VERSION, header=HEADER, payload_bits=PAYLOAD_BITS,
+LEGACY_RULES = dict(version='ook-test-v1', header=HEADER, payload_bits=PAYLOAD_BITS,
              decision_phase=0.5, nearest_sample_window_bits=0.25,
              min_contrast_adc=6, max_header_errors=1,
              threshold='midpoint of median OFF/ON training samples',
              sync='minimum normalized header error; payload excluded',
              missing='no interpolation; missing decision sample is an erasure')
+RULES = dict(LEGACY_RULES, version=VERSION,
+             sync='header acquisition then median transition phase; payload excluded',
+             edge_search_window_bits=0.55,
+             clock='configured bit period; phase from header transition brackets only')
 
 
 def interval_value(value):

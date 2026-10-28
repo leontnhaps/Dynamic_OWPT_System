@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 import uuid
 import numpy as np
-from common.ook_experiment import HEADER, PAYLOAD_BITS, RULES, VERSION
+from common.ook_experiment import HEADER, PAYLOAD_BITS, RULES, LEGACY_RULES, VERSION
 
 
 def read_json(path):
@@ -39,10 +39,45 @@ def nearest(t, y, points, bit_ms):
     return np.where(abs(t[idx]-points) <= bit_ms * RULES['nearest_sample_window_bits'], values, np.nan)
 
 
+def header_phase(t, y, threshold, coarse_origin, bit_ms):
+    """Locate all seven known header transitions, without consulting payload bits.
+
+    A bracket midpoint estimates a threshold crossing; it is not a new ADC
+    sample. Payload decisions still use only actual samples. The bit period
+    remains the requested test setting, not a payload-fitted clock.
+    """
+    edges = np.asarray([i for i in range(1, len(HEADER)) if HEADER[i] != HEADER[i-1]])
+    signs = [int(HEADER[i])-int(HEADER[i-1]) for i in edges]
+    levels = (y >= threshold).astype(int)
+    changes = np.flatnonzero(np.diff(levels)) + 1
+    times = (t[changes-1] + t[changes]) / 2
+    directions = levels[changes]-levels[changes-1]
+    selected = []
+    window = bit_ms * RULES['edge_search_window_bits']
+    for bit_index, sign in zip(edges, signs):
+        candidates = np.flatnonzero(directions == sign)
+        if not len(candidates):
+            return None
+        target = coarse_origin + bit_index * bit_ms
+        index = int(candidates[np.argmin(abs(times[candidates]-target))])
+        if abs(times[index]-target) > window:
+            return None
+        selected.append(index)
+    if len(set(selected)) != len(selected) or np.any(np.diff(selected) <= 0):
+        return None
+    phase_candidates = times[selected]-edges*bit_ms
+    origin = float(np.median(phase_candidates))
+    residual = float(np.max(abs(phase_candidates-origin)))
+    if residual > window:
+        return None
+    return origin, residual
+
+
 def decode(t, y, bit_ms):
     """Use HEADER only for acquisition. Expected payload is not an argument."""
     result = dict(status='sync_failed', sync=False, origin_ms=None, threshold_adc=None,
-                  contrast_adc=None, decoded=None, decision_adc=None)
+                  contrast_adc=None, decoded=None, decision_adc=None,
+                  header_edge_residual_ms=None)
     frame_bits = len(HEADER) + PAYLOAD_BITS
     if len(t) < 2 or t[-1] < frame_bits * bit_ms:
         return result
@@ -93,10 +128,17 @@ def decode(t, y, bit_ms):
     header_values = nearest(t, y, origin+(np.arange(len(HEADER))+.5)*bit_ms, bit_ms)
     low, high = float(np.median(header_values[:8])), float(np.median(header_values[8:16]))
     threshold, contrast = (low+high)/2, high-low
+    # Header-amplitude MSE finds a burst but cannot reliably find its bit
+    # boundaries: noise/settling can make the end of a bit score best.
+    phase = header_phase(t, y, threshold, origin, bit_ms)
+    if phase is None:
+        return result
+    origin, edge_residual = phase
     values = nearest(t, y, origin + (len(HEADER)+np.arange(PAYLOAD_BITS)+.5)*bit_ms, bit_ms)
     bits = ''.join('?' if not math.isfinite(v) else str(int(v >= threshold)) for v in values)
     result.update(status='decoded', sync=True, origin_ms=origin, threshold_adc=threshold,
                   contrast_adc=contrast, decoded=bits,
+                  header_edge_residual_ms=edge_residual,
                   decision_adc=[float(v) if math.isfinite(v) else None for v in values])
     return result
 
@@ -155,7 +197,7 @@ def analyze_trial(folder):
     timing_valid = bool(trace and all(isinstance(v, (int, float)) and math.isfinite(v)
                                    for v in gpio_times+scheduled))
     gpio_dt = np.diff(gpio_times) if timing_valid else np.array([])
-    row = dict(trial=folder.name, mode=experiment.get('mode', 'manual'),
+    row = dict(trial=folder.name, decoder_version=VERSION, mode=experiment.get('mode', 'manual'),
                bit_ms=settings['bit_ms'], bitrate_bps=1000/settings['bit_ms'],
                sample_ms=config['rx_adc_interval_ms'], rows=len(t),
                median_dt_ms=float(np.median(dt)) if len(dt) else None,
@@ -171,7 +213,7 @@ def analyze_trial(folder):
     if tx_complete and summary['end_reason'] == 'completed' and len(t):
         if row['mode'] != 'sweep':
             row['status'] = 'waveform_only'
-        elif experiment.get('rules_version') != VERSION:
+        elif experiment.get('rules_version') not in (LEGACY_RULES['version'], VERSION):
             row['status'] = 'unsupported_rules'
         else:
             decoded = decode(t, adc, settings['bit_ms'])
@@ -264,7 +306,7 @@ def make_plots(out, rows, aggregates, folders):
 def analyze_experiment(root):
     root = Path(root)
     manifest = read_json(root/'experiment.json')
-    if manifest['rules'] != RULES:
+    if manifest['rules'] not in (LEGACY_RULES, RULES):
         raise ValueError('실험 판정 버전이 현재 분석 코드와 다릅니다. 해당 버전 코드를 사용하세요.')
     folders = sorted(p for p in root.iterdir() if p.is_dir() and (p/'summary.json').exists())
     if not folders:
@@ -274,9 +316,13 @@ def analyze_experiment(root):
     rows = [analyze_trial(p)[0] for p in folders]
     aggregates = aggregate(rows)
     write_csv(out/'trials.csv', rows); write_csv(out/'rates.csv', aggregates)
-    write_json(out/'analysis.json', dict(rules=RULES, decoder_location='offline_host', bit_decoding_implemented=True, planned_trials=len(manifest['trials']),
+    write_json(out/'analysis.json', dict(schema_version=2, rules=RULES, source_rules=manifest['rules'],
+        reanalysis=manifest['rules'] != RULES,
+        decoder_location='offline_host', bit_decoding_implemented=True, planned_trials=len(manifest['trials']),
         saved_trials=len(rows), conditions=aggregates,
         notes=['Test-frame decoder only; no servo commands or final protocol.',
+               'v2 fixes phase selection using header transitions. Raw files and old analyses are unchanged.',
+               'Threshold and timing use header only; supplied payload is used only after decisions for scoring.',
                'BER is conditional on synchronization and decided samples. Sync failures and erasures are separate.',
                'Acquisition gaps count as block failures; incomplete TX is reported separately.',
                'Voltage difference uses known payload labels after decoding, conditional on acquired frames.',
