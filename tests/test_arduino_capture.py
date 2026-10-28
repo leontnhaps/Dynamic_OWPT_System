@@ -63,11 +63,11 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(p.arduino.commands, [])
         token = p.pending[0]
         p.event(dict(event='laser', request_id=token, laser_gpio_level=0))
-        self.assertEqual(p.arduino.commands, [('raw', p.trial_id)])
+        self.assertEqual(p.arduino.commands, [('raw 5', p.trial_id)])
 
     def ready(self, p):
-        p.arduino.emit(kind='command_sent', command='raw', token=p.trial_id)
-        p.arduino.emit(kind='line', line='OK RAW10 R1 baud=38400 interval_ms=10')
+        p.arduino.emit(kind='command_sent', command='raw 5', token=p.trial_id)
+        p.arduino.emit(kind='line', line='OK RAW2 R1 baud=250000 interval_ms=5')
         p.arduino.emit(kind='line', line=reading(state='BASELINE').replace('off_V=0.612', 'off_V=NA'))
         p.tick()
 
@@ -132,7 +132,7 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(json.loads((folder / 'summary.json').read_text())['end_reason'], 'user_stop')
 
     def ready_events(self, p):
-        p.arduino.emit(kind='command_sent', command='raw', token=p.trial_id)
+        p.arduino.emit(kind='command_sent', command='raw 5', token=p.trial_id)
         p.arduino.emit(kind='line', line=reading(250, 'BASELINE'))
         p.arduino.emit(kind='line', line=reading())
 
@@ -223,7 +223,7 @@ class CaptureTests(unittest.TestCase):
 
     def test_old_firmware_cannot_silently_start_fast_capture(self):
         p = self.panel(); self.arm(p)
-        p.arduino.emit(kind='command_sent', command='raw', token=p.trial_id)
+        p.arduino.emit(kind='command_sent', command='raw 5', token=p.trial_id)
         p.arduino.emit(kind='line', line=legacy_reading())
         p.tick()
         self.assertIsNone(p.capture)
@@ -264,3 +264,4 @@ class SerialWorkerTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+

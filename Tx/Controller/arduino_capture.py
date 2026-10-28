@@ -3,10 +3,11 @@ import csv
 import json
 import math
 import queue
+import re
 import threading
 import time
 
-ARDUINO_BAUD = 38400
+ARDUINO_BAUD = 250000
 ADC_REFERENCE_V = 1.1
 DIVIDER_GAIN = 5.7
 
@@ -88,7 +89,7 @@ class ArduinoSerial:
             raise OSError('Arduino receive queue overflow; capture stopped') from exc
 
     def send(self, command, token=None):
-        if command not in ('raw', 'start', 'stop'):
+        if command not in ('raw', 'start', 'stop') and not re.fullmatch(r'raw ([1-9][0-9]{0,2}|1000)', command):
             raise ValueError('Unsupported Arduino command')
         if not self.connected or self.stopping.is_set():
             raise OSError('Arduino가 연결되지 않았습니다.')
@@ -118,7 +119,7 @@ class ArduinoSerial:
                 except queue.Empty:
                     command = None
                 if command:
-                    if command in ('raw', 'start'):
+                    if command in ('raw', 'start') or command.startswith('raw '):
                         port.reset_input_buffer()
                         partial = b''
                     data = (command + '\n').encode('ascii')
@@ -158,8 +159,9 @@ class RxCapture:
                'adc', 'a2_V', 'pv_V', 'off_V', 'on_V', 'th_V', 'state', 'level',
                'clipped', 'sample_seq', 'sequence_gap', 'sample_dt_ms', 'raw_line')
 
-    def __init__(self, folder, settings, port, request_id):
+    def __init__(self, folder, settings, port, request_id, sample_ms=5, experiment=None):
         self.folder = folder
+        self.sample_ms = sample_ms
         self.rows = 0
         self.high_rows = 0
         self.low_rows = 0
@@ -172,18 +174,20 @@ class RxCapture:
         self.long_sample_gaps = 0
         self.closed = False
         self.file = None
-        config = dict(schema_version=3, request_id=request_id, settings=settings,
+        config = dict(schema_version=4, request_id=request_id, settings=settings,
                       capture_mode='raw_voltage_pattern',
-                      tx_start_condition='first_fresh_voltage_record_after_raw; no WAIT gate',
+                      tx_start_condition='first_fresh_confirmed_sample_then_requested_launch_delay; no WAIT gate',
                       detector_levels_validated=False,
                       arduino_port=port, arduino_baud=ARDUINO_BAUD,
                       created_pc_unix_ns=time.time_ns(),
-                      rx_adc_interval_ms=10, rx_report_interval_ms=10,
-                      rx_rise_pv_v=None, rx_firmware='M4-4 RAW10 R1',
+                      rx_adc_interval_ms=sample_ms, rx_report_interval_ms=sample_ms,
+                      interval_confirmed=False, experiment=experiment,
+                      rx_rise_pv_v=None, rx_firmware='M4-4 RAW2 R1',
                       serial_format='R1,sequence,Arduino_ms,ADC',
                       adc_reference_v=ADC_REFERENCE_V, divider_gain=DIVIDER_GAIN,
                       timing_note='Arduino ms, PC receive times and Pi GPIO times have independent clocks.',
-                      scope='Raw 10ms voltage comparison; no calibration or level classification. Sequence gaps indicate missing records; timestamps show sampling gaps. No BER or optical latency measurement.')
+                      scope='Raw ADC capture. Offline test-frame analysis is separate. Sequence gaps indicate missing records; timestamps show sampling gaps. No optical latency measurement.')
+        self.config = config
         (folder / 'config.json').write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding='utf-8')
         self.file = (folder / 'rx.csv').open('w', newline='', encoding='utf-8-sig')
         try:
@@ -193,6 +197,13 @@ class RxCapture:
         except OSError:
             self.file.close()
             raise
+
+    def confirm_interval(self, line):
+        expected = f'OK RAW2 R1 baud={ARDUINO_BAUD} interval_ms={self.sample_ms}'
+        if line != expected:
+            raise OSError('Arduino firmware/interval mismatch; upload current pv_voltage_test sketch')
+        self.config['interval_confirmed'] = True
+        (self.folder / 'config.json').write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding='utf-8')
 
     def write(self, event, reading):
         row = dict(reading, pc_receive_unix_ns=event['pc_receive_unix_ns'],
@@ -208,7 +219,7 @@ class RxCapture:
             self.missing_records += gap
             if dt is not None:
                 self.max_sample_dt_ms = max(self.max_sample_dt_ms, dt)
-                self.long_sample_gaps += dt > 20
+                self.long_sample_gaps += dt > 2 * self.sample_ms
             self.last_seq, self.last_ms = seq, reading['arduino_ms']
         self.writer.writerow(row)
         self.file.flush()
@@ -222,7 +233,7 @@ class RxCapture:
             return
         try:
             self.file.close()
-            result = dict(schema_version=3, end_reason=reason, tx_state=tx_state,
+            result = dict(schema_version=4, end_reason=reason, tx_state=tx_state,
                           rows=self.rows, missing_records=self.missing_records,
                           max_sample_dt_ms=self.max_sample_dt_ms, long_sample_gaps=self.long_sample_gaps,
                           high_rows=self.high_rows, low_rows=self.low_rows,
@@ -230,7 +241,8 @@ class RxCapture:
                           finished_pc_unix_ns=time.time_ns(),
                           capture_mode='raw_voltage_pattern', detector_levels_validated=False,
                           bit_decoding_implemented=False, ber=None,
-                          note='HIGH/LOW counts are reported sample counts, not received bit counts.')
+                          note='Raw capture summary only. Offline test-frame decoding is saved separately. HIGH/LOW counts are samples, not received bits.')
             (self.folder / 'summary.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
         finally:
             self.closed = True
+

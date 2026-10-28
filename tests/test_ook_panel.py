@@ -1,4 +1,5 @@
 import unittest
+import queue
 from types import SimpleNamespace
 from Tx.Controller.ook_panel import OokPanel
 
@@ -19,6 +20,11 @@ class PanelStateTests(unittest.TestCase):
         p.rx_start_sent=False; p.rx_last_seen=None; p.rx_last_ms=None
         p.trial_settings=None; p.trial_id=None; p.tx_state=None
         p.rx_status=Value(); p.saved_status=Value(); p.rx_save=Value(True)
+        p.sample_ms=Value('5'); p.experiment=None; p.experiment_root=None; p.last_experiment=None
+        p.batch_index=0; p.next_trial_at=None; p.active_spec=None
+        p.analysis_worker=None; p.analysis_events=queue.Queue(); p.experiment_status=Value()
+        p.sweep_bits=Value('30,10'); p.sweep_samples=Value('5,10'); p.sweep_count=Value('1')
+        p.sweep_seed=Value('42'); p.sweep_pattern=Value('난수32bit'); p.condition_note=Value('test')
         p.bits=Value('00100110'); p.bit_ms=Value('500'); p.repeats=Value('1')
         return p
 
@@ -49,3 +55,4 @@ class PanelStateTests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+

@@ -111,12 +111,12 @@ int main() {
   // Raw path bypasses detector calibration and emits each actual sample.
   streaming=false; rawStreaming=false;
   outputLength=outputPosition=0; pendingMessage[0]=0; Serial.output.clear();
-  Serial.credit=64; Serial.input="raw\n"; loop();
+  Serial.credit=64; Serial.input="raw 2\n"; loop();
   for(int i=0;i<5;++i) loop();
   assert(rawStreaming && streaming);
   Serial.output.clear();
-  // Restrict draining to 3 bytes per 1ms iteration, below 38400 baud capacity.
-  Serial.credit=3;
+  // Restrict draining to 25 bytes per 1ms iteration, below 250000 baud capacity.
+  Serial.credit=25;
   for(int i=0;i<1000;++i) {
     analogValue=(i/250)%2 ? 907 : 400;
     clockMs+=1; loop();
@@ -130,11 +130,16 @@ int main() {
     unsigned long seq,ms; int raw;
     assert(std::sscanf(line.c_str(),"R1,%lu,%lu,%d",&seq,&ms,&raw)==3);
     assert(seq==expected++);
-    if(previous) assert(ms-previous==10);
+    if(previous) assert(ms-previous==2);
     previous=ms; assert(raw==400 || raw==907);
     begin=end+1;
   }
-  assert(expected==100);
+  assert(expected==500);
+  Serial.input="raw 0\n"; loop();
+  assert(rawIntervalMs==2); // Invalid input cannot alter a running acquisition.
+  Serial.input="raw 1001\n"; loop(); assert(rawIntervalMs==2);
+  Serial.input="raw 2.5\n"; loop(); assert(rawIntervalMs==2);
+  for(int i=0;i<20;++i) loop();
   // UART stall skips output, not ADC; sequence exposes the loss on recovery.
   Serial.credit=0;
   unsigned long seqBefore=rawSequence;
@@ -148,7 +153,7 @@ int main() {
   // A late loop emits one real sample, never catch-up records.
   seqBefore=rawSequence; clockMs+=100; loop(); assert(rawSequence==seqBefore+1);
   Serial.input="stop\n"; loop(); assert(!rawStreaming && !streaming);
-  setup(); assert(Serial.baud==38400);
+  setup(); assert(Serial.baud==250000);
   std::cout << "PV acquisition, noise, levels, rearm, clipping, commands and UART checks passed\n";
 }
 '''
@@ -170,3 +175,4 @@ class PvVoltageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

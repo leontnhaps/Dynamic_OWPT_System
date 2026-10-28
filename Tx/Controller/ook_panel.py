@@ -9,12 +9,15 @@ from tkinter import ttk, messagebox
 from common.laser_pattern import pattern_settings
 from common.tx_setup import TX_CAMERA_SETTINGS
 from Tx.Controller.arduino_capture import ArduinoSerial, RxCapture, parse_reading, serial_ports
+from Tx.Controller.ook_experiment_panel import OokExperimentMixin
+from common.ook_experiment import interval_value
 
 
-class OokPanel(ttk.Frame):
+class OokPanel(OokExperimentMixin, ttk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent, padding=8)
         self.app = app
+        self.init_experiment()
         self.online = False
         self.hardware = None
         self.pending = None
@@ -37,7 +40,7 @@ class OokPanel(ttk.Frame):
         ttk.Label(self, textvariable=self.state).pack(anchor='w')
         row = ttk.Frame(self); row.pack(fill='x', pady=5)
         for label, action in [('카메라 시작 / 상태 조회', self.prepare),
-                              ('상태 조회', lambda: self.request(dict(cmd='hardware_status'))),
+                              ('상태 조회', self.query_status),
                               ('레이저 ON', self.laser_on), ('레이저 OFF / 시험 중지', self.off),
                               ('IR LOW', lambda: self.ir(0)), ('IR HIGH', lambda: self.ir(1))]:
             ttk.Button(row, text=label, command=lambda fn=action: self.guard(fn)).pack(side='left', padx=3)
@@ -46,7 +49,7 @@ class OokPanel(ttk.Frame):
         self.bit_ms = tk.StringVar(value='500')
         self.repeats = tk.StringVar(value='1')
         for label, variable, width in [('ON/OFF 패턴', self.bits, 30),
-                                       ('한 비트 길이(ms)', self.bit_ms, 8), ('반복', self.repeats, 5)]:
+                                       ('한 비트 길이(ms)', self.bit_ms, 8), ('반복', self.repeats, 5), ('측정(ms)', self.sample_ms, 5)]:
             ttk.Label(row, text=label).pack(side='left', padx=3)
             ttk.Entry(row, textvariable=variable, width=width).pack(side='left')
         ttk.Button(row, text='패턴 송신', command=lambda: self.guard(self.start)).pack(side='left', padx=6)
@@ -60,21 +63,17 @@ class OokPanel(ttk.Frame):
         for label, action in [('포트 새로고침', self.refresh_ports), ('Arduino 연결', self.connect_rx),
                               ('연결 해제', self.disconnect_rx)]:
             ttk.Button(row, text=label, command=lambda fn=action: self.guard(fn)).pack(side='left', padx=3)
-        self.rx_status = tk.StringVar(value='Arduino 미연결 · 38400 baud · IDE 시리얼 모니터를 닫고 연결하세요.')
+        self.rx_status = tk.StringVar(value='Arduino 미연결 · 250000 baud · IDE 시리얼 모니터를 닫고 연결하세요.')
         self.saved_status = tk.StringVar(value='저장: captures/M4-4/<시험 폴더>/')
         ttk.Label(self, textvariable=self.rx_status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, textvariable=self.saved_status, wraplength=1100).pack(anchor='w')
-        ttk.Label(self, text='1 = 레이저 ON, 0 = OFF · Pi에서 반복 실행 · 종료 후 OFF\n'
-                  '비트 시간: 0 초과~5000ms (소수 허용) · 송신 지연 시 timing_overrun으로 중단\n'
-                  '자동 저장: OFF 확인 → Arduino 기록 시작 확인 → 바로 송신 (WAIT 대기 없음) → 종료 후 2.5초 기록\n'
-                  '수신 CSV: 10ms 목표 간격의 원시 ADC·전압. 누락은 sequence_gap·sample_dt_ms로 확인합니다.\n'
-                  '원시 기록 모드: 주변광 초기화·HIGH/LOW 판정 없이 송신·저장합니다.\n'
-                  '현재는 원시 ON/OFF 시험이며, 7비트 각도 명령·Manchester·오류 검사 프레임은 미구현입니다.\n'
-                  '아래 공통 영상으로 조준 상태를 확인하세요. GPIO 상태는 실제 광출력 피드백이 아닙니다.').pack(anchor='w')
+        self.build_experiment_controls()
+        ttk.Label(self, text='1=ON, 0=OFF · Pi에서 송신 · 시험 종료 시 OFF · 자동 저장은 WAIT 대기 없음\n'
+                  '측정 간격은 목표값입니다. 누락·실제 간격을 결과에서 확인하세요. 각도 제어는 하지 않습니다.').pack(anchor='w')
 
     @property
     def busy(self):
-        return self.output_requested or self.run_id is not None or self.rx_phase is not None
+        return self.experiment is not None or self.output_requested or self.run_id is not None or self.rx_phase is not None
 
     def guard(self, fn):
         try:
@@ -106,6 +105,8 @@ class OokPanel(ttk.Frame):
         self.rx_status.set('Arduino 연결 중 · 보드 초기화 대기…')
 
     def disconnect_rx(self):
+        if self.experiment and not self.capture:
+            self.cancel_experiment('arduino_disconnected')
         if self.capture:
             self.abort_capture('arduino_disconnected')
         if self.arduino:
@@ -127,10 +128,17 @@ class OokPanel(ttk.Frame):
                 self.saved_status.set(f'저장 완료 ({reason}, {capture.rows}행): {capture.folder}')
             except OSError as exc:
                 self.saved_status.set(f'저장 오류 · 일부 파일만 남았을 수 있음: {exc}')
+                reason = 'recording_error'
+        self.trial_finished(reason)
 
     def abort_capture(self, reason):
         # Cancel before consuming any more serial records. OFF remains independent
         # of disk/USB failures; late serial messages cannot launch a pattern.
+        # Cancel the queue before OFF, even if writing run.json fails.
+        try:
+            self.cancel_experiment(reason)
+        except OSError:
+            pass
         self.rx_phase = None
         self.deadline = None
         self.run_id = None
@@ -152,7 +160,7 @@ class OokPanel(ttk.Frame):
                 break
             kind = event['kind']
             if kind == 'connected':
-                self.rx_status.set(f"Arduino 연결됨: {event['port']} · 38400 baud")
+                self.rx_status.set(f"Arduino 연결됨: {event['port']} · 250000 baud")
             elif kind == 'error':
                 self.rx_status.set('Arduino 오류: ' + event['message'])
                 if self.capture:
@@ -160,12 +168,18 @@ class OokPanel(ttk.Frame):
             if not self.capture:
                 continue
             self.write_log(dict(event='arduino', **event))
-            if kind == 'command_sent' and event.get('command') == 'raw' and event.get('token') == self.trial_id:
+            if kind == 'command_sent' and event.get('command') == f'raw {self.capture.sample_ms}' and event.get('token') == self.trial_id:
                 self.rx_start_sent = True
                 continue
             if kind != 'line' or not self.rx_start_sent:
                 continue
             line = event['line']
+            if line.startswith('OK RAW'):
+                self.capture.confirm_interval(line)
+                continue
+            if line.startswith('ERR'):
+                self.abort_capture('arduino_command_error')
+                continue
             if line.startswith('M4-4 PV'):
                 self.abort_capture('arduino_reset')
                 continue
@@ -177,9 +191,9 @@ class OokPanel(ttk.Frame):
                 continue
             if reading is None:
                 continue
-            if reading.get('sample_seq') is None:
+            if reading.get('sample_seq') is None or not self.capture.config['interval_confirmed']:
                 self.abort_capture('firmware_mismatch')
-                self.rx_status.set('Arduino 스케치를 최신 RAW10 버전으로 업로드하세요.')
+                self.rx_status.set('Arduino 스케치를 최신 RAW2 / 250000 baud 버전으로 업로드하세요.')
                 continue
             self.capture.write(event, reading)
             now = time.monotonic()
@@ -203,9 +217,14 @@ class OokPanel(ttk.Frame):
                 if not self.online or self.pending or not self.app.current or now - self.app.current[2] > 2:
                     self.abort_capture('tx_not_ready')
                     continue
-                self.rx_phase = 'sending'
-                self.rx_deadline = None
-                self.transmit(self.trial_settings, self.trial_id)
+                delay = (self.capture.config.get('experiment') or {}).get('launch_delay_ms', 0)
+                if delay:
+                    self.rx_phase = 'launch_delay'
+                    self.rx_deadline = now + delay/1000
+                else:
+                    self.rx_phase = 'sending'
+                    self.rx_deadline = None
+                    self.transmit(self.trial_settings, self.trial_id)
         if self.capture and not self.arduino.worker.is_alive():
             self.abort_capture('arduino_connection_lost')
 
@@ -216,14 +235,20 @@ class OokPanel(ttk.Frame):
             return token
         return None
 
-    def check_ready(self):
+    def check_ready(self, for_experiment=False):
         if not self.online or not self.hardware or self.pending:
             raise ValueError('Pi 연결 및 상태 조회 응답을 확인하세요.')
         frame = self.app.current
         if not frame or time.monotonic() - frame[2] > 2:
             raise ValueError('카메라 시작 후 최근 영상을 확인하세요.')
-        if self.busy or self.hardware.get('pattern_active'):
+        active = self.output_requested or self.run_id is not None or self.rx_phase is not None
+        if active or (self.experiment is not None and not for_experiment) or self.hardware.get('pattern_active'):
             raise ValueError('레이저 OFF / 시험 중지 후 다시 실행하세요.')
+
+    def query_status(self):
+        if self.busy or self.pending:
+            raise ValueError('진행 중인 시험을 중지하거나 응답을 기다리세요.')
+        self.request(dict(cmd='hardware_status'))
 
     def prepare(self):
         if self.busy or self.pending:
@@ -243,6 +268,10 @@ class OokPanel(ttk.Frame):
         self.request(dict(cmd='ir_cut', level=level))
 
     def off(self):
+        try:
+            self.cancel_experiment('user_stop')
+        except OSError:
+            pass
         # Available during pending requests; stale responses no longer match.
         if self.capture:
             self.abort_capture('user_stop')
@@ -256,17 +285,20 @@ class OokPanel(ttk.Frame):
             raise ValueError('Pi도 M4-4 코드로 업데이트하고 재시작하세요.')
         settings = pattern_settings(dict(bits=self.bits.get().strip(),
                                          bit_ms=float(self.bit_ms.get()), repeats=int(self.repeats.get())))
-        save_rx = self.rx_save.get()
+        self.begin_trial(settings, interval_value(self.sample_ms.get()))
+
+    def begin_trial(self, settings, sample_ms, folder=None, experiment=None):
+        save_rx = experiment is not None or self.rx_save.get()
         if save_rx and (self.arduino is None or not self.arduino.connected):
             raise ValueError('Arduino를 연결하세요. 원시 송신만 하려면 수신 자동 저장을 해제하세요.')
         token = 'm4-4-' + uuid.uuid4().hex
-        folder = self.app.stage_dir('M4-4') / (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + token[-6:])
+        folder = folder or self.app.stage_dir('M4-4') / (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + token[-6:])
         folder.mkdir()
         self.logpath = folder / 'events.jsonl'
         self.trial_paths[token] = self.logpath
         self.write_log(dict(event='requested', request_id=token, settings=settings, hardware=self.hardware))
         if save_rx:
-            self.capture = RxCapture(folder, settings, self.arduino.port, token)
+            self.capture = RxCapture(folder, settings, self.arduino.port, token, sample_ms, experiment)
             self.saved_status.set(f'기록 중: {folder}')
             self.trial_settings, self.trial_id = settings, token
             self.tx_state = 'not_sent'
@@ -321,6 +353,7 @@ class OokPanel(ttk.Frame):
         disconnected = (kind == 'network' and event.get('port') == 7600 and event.get('state') != 'connected') or (
             kind in ('hello', 'agent') and not self.online)
         if disconnected:
+            self.cancel_experiment('pi_disconnected')
             if self.capture:
                 self.finish_capture('pi_disconnected')
             self.write_log(dict(event='connection_lost', request_id=self.run_id))
@@ -367,7 +400,7 @@ class OokPanel(ttk.Frame):
                     self.abort_capture('off_not_confirmed')
                     return
                 try:
-                    self.arduino.send('raw', self.trial_id)
+                    self.arduino.send(f'raw {self.capture.sample_ms}', self.trial_id)
                 except OSError:
                     self.abort_capture('arduino_start_failed')
                     return
@@ -378,6 +411,7 @@ class OokPanel(ttk.Frame):
     def tick(self):
         try:
             self.tick_capture()
+            self.tick_experiment()
         except OSError as exc:
             self.abort_capture('recording_error')
             self.rx_status.set('수신/저장 오류: ' + str(exc))
@@ -386,12 +420,19 @@ class OokPanel(ttk.Frame):
         self.poll_rx()
         now = time.monotonic()
         if self.capture and self.rx_deadline and now > self.rx_deadline:
-            if self.rx_phase == 'tail':
+            if self.rx_phase == 'launch_delay':
+                if not self.online or self.pending or not self.app.current or now-self.app.current[2]>2:
+                    self.abort_capture('tx_not_ready')
+                else:
+                    self.rx_phase = 'sending'
+                    self.rx_deadline = None
+                    self.transmit(self.trial_settings, self.trial_id)
+            elif self.rx_phase == 'tail':
                 self.finish_capture('completed')
             else:
                 self.abort_capture('rx_preparation_timeout')
-                self.rx_status.set('전압 기록 시작 실패 · 최신 Arduino 스케치 업로드와 38400 baud 연결 확인')
-        if (self.capture and self.rx_phase in ('sending', 'tail') and
+                self.rx_status.set('전압 기록 시작 실패 · 최신 Arduino 스케치 업로드와 250000 baud 연결 확인')
+        if (self.capture and self.rx_phase in ('launch_delay', 'sending', 'tail') and
                 (self.rx_last_seen is None or now - self.rx_last_seen > 3)):
             self.abort_capture('rx_data_timeout')
         if self.pending and now - self.pending[1] > 5:
@@ -416,3 +457,4 @@ class OokPanel(ttk.Frame):
         self.leave()
         if self.arduino:
             self.arduino.close()
+

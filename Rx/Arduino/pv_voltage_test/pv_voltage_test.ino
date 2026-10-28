@@ -1,4 +1,4 @@
-// M4-4: Pro Mini ATmega328P 3.3V / 8MHz; serial 38400 baud.
+// M4-4: Pro Mini ATmega328P 3.3V / 8MHz; serial 250000 baud.
 // PV+ -- 47k -- A2 -- 10k -- GND; PV- -- GND; no 100-ohm load.
 // The 57k divider loads the PV: voltages are near-open-circuit estimates.
 // A0/A1 stay reserved for the gimbal. No servo, EEPROM or frame decoding.
@@ -8,6 +8,7 @@
 #include <Arduino.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 const uint8_t PV_PIN = A2;
 const float ADC_REFERENCE_V = 1.1f;
@@ -17,10 +18,11 @@ const float RISE_PV_V = 0.6f; // Rise above ambient, NOT absolute PV voltage.
 const float RISE_COUNTS = RISE_PV_V / PV_VOLTS_PER_COUNT;
 const float STABLE_COUNTS = 0.12f / PV_VOLTS_PER_COUNT;
 const float HYSTERESIS_COUNTS = 0.03f / PV_VOLTS_PER_COUNT;
-const unsigned long SAMPLE_INTERVAL_MS = 5;
+const unsigned long SAMPLE_INTERVAL_MS = 5; // Preserve the existing detector sampling setting.
+unsigned long rawIntervalMs = 5; // raw <ms> changes this without recompiling.
 const unsigned long PRINT_INTERVAL_MS = 250;
-const uint8_t BASELINE_SAMPLES = 100; // About 1s with laser OFF.
-const uint8_t ON_SAMPLES = 10;        // About 100ms stable, elevated signal.
+const uint8_t BASELINE_SAMPLES = 100; // About 500ms with laser OFF.
+const uint8_t ON_SAMPLES = 10;        // About 50ms stable, elevated signal.
 const unsigned long REARM_LOW_MS = 2000;
 const float BASELINE_ALPHA = 0.002f; // Slow tracking ONLY while waiting.
 
@@ -28,6 +30,7 @@ enum DetectorState { IDLE, BASELINE, WAIT_RISE, ACQUIRE_ON, TRACK, CLIPPED };
 DetectorState detectorState = IDLE;
 bool streaming = false;
 bool rawStreaming = false;
+bool rawArming = false;
 uint32_t rawSequence = 0;
 bool baselineValid = false;
 bool onValid = false;
@@ -205,8 +208,9 @@ void queueReading(int raw, unsigned long now) {
   outputPosition = 0;
 }
 
-// R1,sequence,Arduino_ms,ADC: at most 30 bytes/sample (3,000 B/s).
-// 38400 baud 8N1 carries 3,840 B/s. No float formatting in this path.
+// R1 record: at most 30 bytes. At 2ms: 15,000 B/s; 250000 8N1: 25,000 B/s.
+// 1ms is accepted for exploration but can lose records; inspect sequence gaps.
+// 250000 baud is exact at 8MHz. No float formatting in this path.
 void queueRawReading(int raw, unsigned long now) {
   uint32_t sequence = rawSequence++;
   // Never block sampling. A skipped record is visible as a sequence gap.
@@ -228,13 +232,13 @@ void drainOutput() {
 }
 
 void printHelp() {
-  Serial.println(F("M4-4 PV voltage + automatic level test; A2; 38400 baud; newline"));
+  Serial.println(F("M4-4 PV voltage + automatic level test; A2; 250000 baud; newline"));
   Serial.println(F("47k/10k divider; no 100 ohm load; INTERNAL nominal 1.1V"));
-  Serial.println(F("help | pv | raw | start | stop"));
-  Serial.println(F("raw: 10ms raw ADC stream R1,sequence,ms,adc; no calibration or WAIT."));
-  Serial.println(F("start: keep laser OFF until WAIT (about 1s stable baseline)."));
-  Serial.println(F("Then aim laser: +0.600V PV rise, about 100ms stable ON acquisition."));
-  Serial.println(F("start: ADC 10ms; display 250ms; off/on/th are PV voltage estimates."));
+  Serial.println(F("help | pv | raw [1..1000 ms] | start | stop"));
+  Serial.println(F("raw: default 5ms; raw 2 / raw 5 / raw 10; R1,sequence,ms,adc."));
+  Serial.println(F("start: keep laser OFF until WAIT (about 500ms stable baseline)."));
+  Serial.println(F("Then aim laser: +0.600V PV rise, about 50ms stable ON acquisition."));
+  Serial.println(F("start: ADC 5ms; display 250ms; off/on/th are PV voltage estimates."));
   Serial.println(F("LOW for 2s rearms; start resets all levels. CLIPPED requires restart."));
   Serial.println(F("HIGH/LOW are light levels, NOT decoded bits or laser identification."));
   Serial.println(F("No frame sync, CRC, EEPROM or servo control. Stop before help."));
@@ -244,7 +248,8 @@ void handleCommand() {
   commandBuffer[commandLength] = '\0';
   char *cmd = strtok(commandBuffer, " \t");
   if (!cmd) return;
-  if (strtok(NULL, " \t")) {
+  char *arg = strtok(NULL, " \t");
+  if (strtok(NULL, " \t") || (arg && strcmp(cmd, "raw"))) {
     queueMessage("ERR unexpected argument; use help");
     return;
   }
@@ -256,10 +261,23 @@ void handleCommand() {
     else if (streaming) queueReading(latestAdc, latestSampleMs);
     else queueReading(analogRead(PV_PIN), millis());
   } else if (!strcmp(cmd, "raw")) {
+    unsigned long interval = 5;
+    if (arg) {
+      for (char *c = arg; *c; ++c) {
+        if (*c < '0' || *c > '9') { queueMessage("ERR raw interval 1..1000 ms integer"); return; }
+      }
+      if (strlen(arg) > 4) { queueMessage("ERR raw interval 1..1000 ms integer"); return; }
+      interval = strtoul(arg, NULL, 10);
+      if (interval < 1 || interval > 1000) { queueMessage("ERR raw interval 1..1000 ms integer"); return; }
+    }
+    rawIntervalMs = interval;
     startDetector(millis());
     rawStreaming = true;
+    rawArming = true;
     rawSequence = 0;
-    queueMessage("OK RAW10 R1 baud=38400 interval_ms=10");
+    char response[80];
+    snprintf(response, sizeof(response), "OK RAW2 R1 baud=250000 interval_ms=%lu", rawIntervalMs);
+    queueMessage(response);
   } else if (!strcmp(cmd, "start")) {
     startDetector(millis());
     queueMessage("OK BASELINE: laser OFF; wait for state=WAIT");
@@ -272,7 +290,7 @@ void handleCommand() {
 }
 
 void setup() {
-  Serial.begin(38400);
+  Serial.begin(250000);
   pinMode(PV_PIN, INPUT);
   digitalWrite(PV_PIN, LOW);
   analogReference(INTERNAL); // Do not drive AREF externally.
@@ -284,10 +302,16 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
-  if (streaming && (unsigned long)(now - lastSampleMs) >= SAMPLE_INTERVAL_MS) {
+  // Drain the configuration acknowledgement before starting the recorded sequence.
+  if (rawStreaming && rawArming && outputPosition >= outputLength && !pendingMessage[0]) {
+    rawArming = false;
+    lastSampleMs = now;
+  }
+  const unsigned long interval = rawStreaming ? rawIntervalMs : SAMPLE_INTERVAL_MS;
+  if (streaming && (!rawStreaming || !rawArming) && (unsigned long)(now - lastSampleMs) >= interval) {
     unsigned long gap = now - lastSampleMs;
     lastSampleMs = now; // No catch-up samples with invented timestamps.
-    if (gap > 2 * SAMPLE_INTERVAL_MS) {
+    if (gap > 2 * interval) {
       // A sampling gap must not count as consecutive calibration samples.
       if (detectorState == BASELINE) resetWindow();
       else if (detectorState == ACQUIRE_ON) {
@@ -319,3 +343,4 @@ void loop() {
   }
   drainOutput();
 }
+
