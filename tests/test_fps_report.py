@@ -1,5 +1,5 @@
 import unittest
-from analysis.fps_report import analyze
+from tools.analysis.fps_report import analyze
 
 def event(t, **kw):return dict(gui_unix_ns=int(t*1e9),**kw)
 def start(t):return event(t,event='preview',state='started',requested={'width':640,'height':480,'fps':30})

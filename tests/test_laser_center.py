@@ -1,5 +1,5 @@
 import unittest
-from calibration.laser_center import summarize
+from tools.calibration.laser_center import summarize
 
 class LaserCenterTests(unittest.TestCase):
     def row(self, u, v, **changes):
