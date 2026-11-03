@@ -112,7 +112,7 @@ def parser():
     result.add_argument('--model', type=Path, default=DEFAULT_YOLO_PATH, help='기존 PV .pt (기본값: 공통 M1-3 best.pt)')
     result.add_argument('--data', type=Path, default=DEFAULT_DATA, help='images/train, images/val을 지정한 YOLO YAML')
     result.add_argument('--output', type=Path, default=DEFAULT_OUTPUT, help='실행별 새 폴더를 만들 상위 경로')
-    result.add_argument('--epochs', type=int, default=100)
+    result.add_argument('--epochs', type=int, default=500)
     result.add_argument('--patience', type=int, default=20)
     result.add_argument('--imgsz', type=int, default=960)
     result.add_argument('--batch', type=int, default=8)
