@@ -4,4 +4,5 @@ Pillow>=10
 torch>=2.2,<3
 gymnasium>=0.29,<2
 stable-baselines3>=2.3,<3
-ultralytics>=8.3
+ultralytics>=8.4.0,<9
+PyYAML>=6

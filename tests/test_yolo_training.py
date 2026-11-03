@@ -1,6 +1,7 @@
 """Exercise data integrity and training orchestration without a GPU or real model updates."""
 import builtins
 from contextlib import redirect_stdout
+from copy import deepcopy
 import csv
 import io
 import json
@@ -22,17 +23,21 @@ from tools import train_yolo
 
 class FakeBackend:
     """Emulate the public calls, including inference fusion and saved best weights."""
-    def __init__(self, original, fail_training=False, names=None):
+    def __init__(self, original, fail_training=False, names=None, architecture_error=None,
+                 mutate_architecture=False, version='8.4.201'):
         self.original = Path(original)
         self.fail_training = fail_training
         self.instances = []
         self.validations = []
         self.training_calls = []
+        self.architecture_calls = []
         self.torch = ModuleType('torch')
         self.torch.__version__ = 'test-torch'
         self.torch.cuda = SimpleNamespace(is_available=lambda: False, device_count=lambda: 0)
         self.ultralytics = ModuleType('ultralytics')
-        self.ultralytics.__version__ = 'test-ultralytics'
+        self.ultralytics.__version__ = version
+        self.nn = ModuleType('ultralytics.nn')
+        self.tasks = ModuleType('ultralytics.nn.tasks')
         backend = self
 
         class Model:
@@ -40,6 +45,8 @@ class FakeBackend:
                 self.path = Path(path)
                 self.task = 'detect'
                 self.names = {0: 'pv_cell'} if names is None else names
+                self.model = SimpleNamespace(yaml={
+                    'nc': 1, 'backbone': [[-1, 1, 'SPPF', [256, 5, 3, True]]], 'head': []})
                 self.fused = False
                 backend.instances.append(self)
 
@@ -63,8 +70,22 @@ class FakeBackend:
 
         self.ultralytics.YOLO = Model
 
+        def detection_model(cfg, *, nc, ch, verbose):
+            backend.architecture_calls.append(dict(cfg=cfg, original_cfg=deepcopy(cfg),
+                                                   nc=nc, ch=ch, verbose=verbose))
+            if mutate_architecture:
+                cfg['backbone'][0][3].append('constructor mutation')
+            if architecture_error is not None:
+                raise architecture_error
+            return SimpleNamespace()
+
+        self.tasks.DetectionModel = detection_model
+        self.nn.tasks = self.tasks
+        self.ultralytics.nn = self.nn
+
     def installed(self):
-        return patch.dict(sys.modules, {'torch': self.torch, 'ultralytics': self.ultralytics})
+        return patch.dict(sys.modules, {'torch': self.torch, 'ultralytics': self.ultralytics,
+                                       'ultralytics.nn': self.nn, 'ultralytics.nn.tasks': self.tasks})
 
 
 class YoloTrainingTests(unittest.TestCase):
@@ -230,6 +251,40 @@ class YoloTrainingTests(unittest.TestCase):
             self.run_quietly(self.args())
         self.assertFalse(self.output.exists())
         self.assertFalse(backend.training_calls)
+
+    def test_sppf_constructor_mismatch_stops_before_evaluation_and_outputs(self):
+        underlying = 'SPPF.__init__() takes from 3 to 4 positional arguments but 6 were given'
+        backend = FakeBackend(self.weights, architecture_error=TypeError(underlying), version='8.3.203')
+        with backend.installed(), self.assertRaises(ValueError) as caught:
+            self.run_quietly(self.args())
+        message = str(caught.exception)
+        self.assertIn('8.3.203', message)
+        self.assertIn('SPPF', message)
+        self.assertIn(underlying, message)
+        self.assertIn('-m pip install', message)
+        self.assertIn('ultralytics', message)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(backend.validations)
+        self.assertFalse(backend.training_calls)
+        self.assertEqual(len(backend.architecture_calls), 1)
+        self.assertEqual(self.weights.read_bytes(), b'original model bytes')
+
+    def test_architecture_preflight_uses_a_deep_copy_without_changing_checkpoint_config(self):
+        backend = FakeBackend(self.weights, mutate_architecture=True)
+        with backend.installed():
+            run_dir = self.run_quietly(self.args())
+        self.assertEqual(len(backend.architecture_calls), 1)
+        call = backend.architecture_calls[0]
+        self.assertEqual(call['nc'], 1)
+        self.assertEqual(call['ch'], 3)
+        self.assertFalse(call['verbose'])
+        self.assertEqual(backend.instances[0].model.yaml, call['original_cfg'])
+        self.assertIsNot(call['cfg'], backend.instances[0].model.yaml)
+        self.assertNotEqual(call['cfg'], backend.instances[0].model.yaml)
+        self.assertEqual(self.weights.read_bytes(), b'original model bytes')
+        self.assertTrue((run_dir / 'comparison.json').is_file())
+        config = json.loads((run_dir / 'config.json').read_text())
+        self.assertEqual(config['compatibility'], {'architecture_reconstructed': True, 'device': 'cpu'})
 
 
 if __name__ == '__main__':

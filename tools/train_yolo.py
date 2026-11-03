@@ -1,5 +1,6 @@
 """Fine-tune existing PV detector weights and compare before/after on the same validation split."""
 import argparse
+from copy import deepcopy
 import csv
 from datetime import datetime
 import hashlib
@@ -149,6 +150,25 @@ def assert_pv_model(model):
         raise ValueError('입력 모델은 0: pv_cell 단일 클래스 Detection 모델이어야 합니다.')
 
 
+def check_training_compatibility(model, version):
+    """Rebuild the checkpoint architecture on CPU before trusting validation or training."""
+    from ultralytics.nn.tasks import DetectionModel
+
+    try:
+        # Training reconstructs from YAML; loading a .pt for inference does not test this.
+        # Never edit checkpoint arguments to make an older SPPF implementation accept them.
+        DetectionModel(deepcopy(model.model.yaml), nc=1, ch=3, verbose=False)
+    except (TypeError, AttributeError, KeyError) as exc:
+        raise ValueError(
+            f'Ultralytics {version}에서 입력 모델 구조(SPPF 등)를 재구성하지 못했습니다.\n'
+            'YOLO26에는 Ultralytics 8.4.0 이상이 필요합니다. 같은 Python 환경에서 업데이트하세요:\n'
+            'python -m pip install --upgrade "ultralytics>=8.4.0,<9" "PyYAML>=6"\n'
+            f'실행 Python: {sys.executable}\n'
+            f'원래 오류: {type(exc).__name__}: {exc}\n'
+            '평가·학습을 시작하지 않았으며 입력 가중치는 수정하지 않았습니다.'
+        ) from exc
+
+
 def metric_values(metrics):
     values = dict(precision=float(metrics.box.mp), recall=float(metrics.box.mr),
                   mAP50=float(metrics.box.map50), mAP50_95=float(metrics.box.map))
@@ -174,6 +194,8 @@ def run(args):
     original_hash = digest(model_path)
     baseline_model = YOLO(str(model_path))
     assert_pv_model(baseline_model)
+    check_training_compatibility(baseline_model, ultralytics.__version__)
+    print('CPU 모델 구조 재구성 통과. 학습 전 평가를 시작합니다.', flush=True)
     output.mkdir(parents=True, exist_ok=True)
     run_dir = output / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     run_dir.mkdir(exist_ok=False)
@@ -195,6 +217,7 @@ def run(args):
     config = dict(schema='pv-yolo-finetune-v1', input_model=str(model_path), input_model_sha256=original_hash,
                   source_data=str(data_path), source_yaml_sha256=digest(data_path), dataset=summary,
                   versions=dict(python=sys.version, ultralytics=ultralytics.__version__, torch=torch.__version__),
+                  compatibility=dict(architecture_reconstructed=True, device='cpu'),
                   training=training, validation=validation,
                   metric_note='Metrics are fractions. Precision/recall use the Ultralytics best-F1 threshold for each model, not the GUI confidence threshold. mAP is the primary before/after comparison. This is validation, not an independent test.',
                   status='running')
