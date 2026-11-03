@@ -162,7 +162,8 @@ def check_training_compatibility(model, version):
         raise ValueError(
             f'Ultralytics {version}에서 입력 모델 구조(SPPF 등)를 재구성하지 못했습니다.\n'
             'YOLO26에는 Ultralytics 8.4.0 이상이 필요합니다. 같은 Python 환경에서 업데이트하세요:\n'
-            'python -m pip install --upgrade "ultralytics>=8.4.0,<9" "PyYAML>=6"\n'
+            'python -m pip install --upgrade "ultralytics>=8.4.0,<9" "PyYAML>=6" '
+            '"numpy>=1.26,<2" "opencv-python>=4.7,<4.12"\n'
             f'실행 Python: {sys.executable}\n'
             f'원래 오류: {type(exc).__name__}: {exc}\n'
             '평가·학습을 시작하지 않았으며 입력 가중치는 수정하지 않았습니다.'
