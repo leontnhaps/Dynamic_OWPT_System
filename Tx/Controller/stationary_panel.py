@@ -150,7 +150,7 @@ class StationaryPanel(ttk.Frame):
 
     def check_manual_available(self):
         if getattr(getattr(self.app,'sweep',None),'busy',False):
-            raise ValueError('M5-1 준비·편도·저장을 먼저 종료하세요.')
+            raise ValueError('M5-3 준비·편도·저장을 먼저 종료하세요.')
         if self.busy:
             raise ValueError('자동 준비·학습·평가·저장이 끝난 뒤 수동 이동하세요.')
         if not self.hardware_ready:
@@ -233,7 +233,7 @@ class StationaryPanel(ttk.Frame):
 
     def stop_other_panels(self):
         if getattr(getattr(self.app,'sweep',None),'busy',False):
-            raise ValueError('M5-1 준비·편도·저장을 먼저 종료하세요.')
+            raise ValueError('M5-3 준비·편도·저장을 먼저 종료하세요.')
         if self.app.timing.active or self.app.timing.preparing or self.app.timing.profile.running:
             raise ValueError('M1-5 측정을 먼저 종료하세요.')
         if self.app.servo.pending:

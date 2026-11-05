@@ -1,4 +1,4 @@
-"""M5-1 one-way data collection; no drone commands or learned controller."""
+"""M5-3 one-way data collection; no drone commands or learned controller."""
 from dataclasses import dataclass, asdict
 import time
 import uuid

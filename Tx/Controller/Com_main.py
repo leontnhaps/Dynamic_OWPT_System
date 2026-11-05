@@ -34,7 +34,7 @@ class App:
         self.detection=DetectionPanel(tabs,self);tabs.add(self.detection,text='M1-3 (PV 검출)')
         self.timing=TimingPanel(tabs,self);tabs.add(self.timing,text='M1-5 (응답 · 제어 시간)')
         self.stationary=StationaryPanel(tabs,self);tabs.add(self.stationary,text='M3-2 (정지 PV · SAC)')
-        self.sweep=SweepPanel(tabs,self);tabs.add(self.sweep,text='M5-1 (이동 실험 · 수집)')
+        self.sweep=SweepPanel(tabs,self);tabs.add(self.sweep,text='M5-3 (이동 실험 · 수집)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -89,7 +89,7 @@ class App:
         if (sweep is not None and cmd.get('cmd') in ('move','servo_config','preview','snap','outputs_off','ir_cut')
                 and not str(cmd.get('request_id','')).startswith('m5-1-')):
             if sweep.busy and cmd.get('cmd')!='outputs_off':
-                self.record(dict(event='command_blocked',reason='M5-1 편도·준비·저장·응답 완료 후 실행',command=cmd))
+                self.record(dict(event='command_blocked',reason='M5-3 편도·준비·저장·응답 완료 후 실행',command=cmd))
                 return False
             if sweep.busy or sweep.hardware_ready:
                 sweep.invalidate('external_command: '+cmd.get('cmd'))
@@ -214,6 +214,6 @@ class App:
         self.net.close();self.root.destroy()
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders, including M3-2 and M5-1')
+    parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders, including M3-2 and M5-3')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()

@@ -124,7 +124,7 @@ class YoloTrainingTests(unittest.TestCase):
             os.chdir(self.root)
             args = train_yolo.parser().parse_args([])
             self.assertEqual(args.model, DEFAULT_YOLO_PATH)
-            self.assertEqual(args.data, REPOSITORY_ROOT / 'captures/M5-1/yolo_outdoor_dataset/data.yaml')
+            self.assertEqual(args.data, REPOSITORY_ROOT / 'captures/M5-3/yolo_outdoor_dataset/data.yaml')
             self.assertEqual(train_yolo.repository_path('captures/example'), REPOSITORY_ROOT / 'captures/example')
             _, _, _, dataset, _, _ = train_yolo.prepare(self.args())
             self.assertEqual(Path(dataset['train']), self.data / 'images/train')

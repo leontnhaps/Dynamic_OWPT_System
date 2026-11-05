@@ -16,8 +16,8 @@ if __package__ in (None, ''):
 from common.model_paths import DEFAULT_YOLO_PATH, REPOSITORY_ROOT, resolve_yolo_path
 
 
-DEFAULT_DATA = REPOSITORY_ROOT / 'captures/M5-1/yolo_outdoor_dataset/data.yaml'
-DEFAULT_OUTPUT = REPOSITORY_ROOT / 'captures/M5-1/yolo_training'
+DEFAULT_DATA = REPOSITORY_ROOT / 'captures/M5-3/yolo_outdoor_dataset/data.yaml'
+DEFAULT_OUTPUT = REPOSITORY_ROOT / 'captures/M5-3/yolo_training'
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp'}
 
 
@@ -130,7 +130,7 @@ def prepare(args):
     if model.suffix.lower() != '.pt' or not model.is_file() or not model.stat().st_size:
         raise ValueError(f'기존 학습된 PV 모델 .pt가 필요합니다: {model}')
     if not data.is_file():
-        raise ValueError(f'data.yaml이 없습니다: {data}\n학습용 ZIP을 captures/M5-1/ 아래에 풀었는지 확인하세요.')
+        raise ValueError(f'data.yaml이 없습니다: {data}\n학습용 ZIP을 captures/M5-3/ 아래에 풀었는지 확인하세요.')
     if (args.epochs < 1 or args.patience < 0 or args.imgsz < 32 or args.imgsz % 32
             or args.batch < 1 or args.workers < 0 or args.seed < 0
             or not math.isfinite(args.lr0) or not 0 < args.lr0 < 1):

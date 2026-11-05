@@ -10,7 +10,7 @@ import shutil
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SOURCE = REPOSITORY_ROOT / 'captures'
-DEFAULT_OUTPUT = DEFAULT_SOURCE / 'M5-1' / 'yolo_missing'
+DEFAULT_OUTPUT = DEFAULT_SOURCE / 'M5-3' / 'yolo_missing'
 
 
 def missing_images(source, output):
@@ -87,7 +87,7 @@ def main():
     parser.add_argument('--source', type=Path, default=DEFAULT_SOURCE,
                         help='Search folder (default: repository captures/)')
     parser.add_argument('--output', type=Path, default=DEFAULT_OUTPUT,
-                        help='Flat export folder (default: captures/M5-1/yolo_missing/)')
+                        help='Flat export folder (default: captures/M5-3/yolo_missing/)')
     args = parser.parse_args()
     try:
         collect(args.source, args.output)

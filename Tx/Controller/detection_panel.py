@@ -90,7 +90,7 @@ class DetectionPanel(ttk.Frame):
 
     def load(self):
         if getattr(getattr(self.app,'sweep',None),'busy',False):
-            raise ValueError('M5-1 준비·편도·저장을 먼저 종료하세요.')
+            raise ValueError('M5-3 준비·편도·저장을 먼저 종료하세요.')
         if getattr(getattr(self.app,'stationary',None),'busy',False):
             raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         if self.future is not None: raise ValueError('진행 중인 작업이 끝난 뒤 다시 시도하세요.')
@@ -106,7 +106,7 @@ class DetectionPanel(ttk.Frame):
 
     def start(self):
         if getattr(getattr(self.app,'sweep',None),'busy',False):
-            raise ValueError('M5-1 준비·편도·저장을 먼저 종료하세요.')
+            raise ValueError('M5-3 준비·편도·저장을 먼저 종료하세요.')
         if getattr(getattr(self.app,'stationary',None),'busy',False):
             raise ValueError('M3-2 실행·저장을 먼저 종료하세요.')
         timing=getattr(self.app,"timing",None)
