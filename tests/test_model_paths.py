@@ -12,10 +12,12 @@ class ModelPathTests(unittest.TestCase):
                 os.chdir(directory)
                 for value in (None, '', '  '):
                     self.assertEqual(resolve_yolo_path(value), str(DEFAULT_YOLO_PATH))
-                self.assertEqual(resolve_yolo_path('captures/M1-3/pv_detection/runs/y26n_v1/weights/best.pt'),str(DEFAULT_YOLO_PATH))
+                self.assertEqual(resolve_yolo_path('captures/M5-3/yolo_training/20261104_004046_031946/train/weights/best.pt'),str(DEFAULT_YOLO_PATH))
         finally:
             os.chdir(previous)
 
     def test_explicit_model_selection(self):
         self.assertEqual(resolve_yolo_path('other/model.pt'),str(REPOSITORY_ROOT/'other/model.pt'))
         self.assertEqual(resolve_yolo_path(DEFAULT_YOLO_PATH),str(DEFAULT_YOLO_PATH))
+        legacy = 'captures/M1-3/pv_detection/runs/y26n_v1/weights/best.pt'
+        self.assertEqual(resolve_yolo_path(legacy), str(REPOSITORY_ROOT/legacy))

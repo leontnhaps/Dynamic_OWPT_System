@@ -2,7 +2,8 @@
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_YOLO_PATH = REPOSITORY_ROOT / 'captures' / 'M1-3' / 'pv_detection' / 'runs' / 'y26n_v1' / 'weights' / 'best.pt'
+DEFAULT_YOLO_PATH = (REPOSITORY_ROOT / 'captures' / 'M5-3' / 'yolo_training'
+                     / '20261104_004046_031946' / 'train' / 'weights' / 'best.pt')
 
 
 def resolve_yolo_path(path=None):
