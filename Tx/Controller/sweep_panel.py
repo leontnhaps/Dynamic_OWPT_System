@@ -184,6 +184,9 @@ class SweepPanel(ttk.Frame):
 
     def stop_other_panels(self):
         a = self.app
+        ook = getattr(a, 'ook', None)
+        if ook is not None and ook.busy:
+            raise ValueError('M4-4 레이저 OFF / 시험 중지 후 응답을 확인하세요.')
         if a.stationary.busy or (a.stationary.run is not None and a.stationary.run.pending):
             raise ValueError('M3-2 실행·저장·명령 응답을 먼저 종료하세요.')
         if a.timing.active or a.timing.preparing or a.timing.profile.running:
