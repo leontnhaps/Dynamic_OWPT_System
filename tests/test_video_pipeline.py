@@ -21,7 +21,9 @@ class VideoPipelineTests(unittest.TestCase):
         a.root=Mock();a.tabs=Mock();a.preview=Mock();a.preview_frame=None
         a.closing=False;a.current=None;a.status=Mock();a.status_mark=0
         a.record=Mock();a.mark=10;a.previous=0;a.fps=30
-        a.servo=Mock()
+        a.servo=Mock();a.ook=Mock()
+        a.tabs.cget.return_value=300
+        a.tabs.nametowidget.return_value.winfo_reqheight.return_value=300
         a.detection=Mock(name='detection');a.timing=Mock(name='timing')
         a.stationary=Mock(name='stationary')
         for p in (a.detection,a.timing,a.stationary):p.guard=lambda fn:fn()
@@ -166,3 +168,4 @@ class VideoPipelineTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+

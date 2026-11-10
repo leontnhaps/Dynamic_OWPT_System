@@ -16,6 +16,7 @@ from Tx.Controller.servo_panel import ServoPanel
 from Tx.Controller.detection_panel import DetectionPanel
 from Tx.Controller.timing_panel import TimingPanel
 from Tx.Controller.stationary_panel import StationaryPanel
+from Tx.Controller.ook_panel import OokPanel
 
 class App:
     def __init__(self,root,args):
@@ -33,6 +34,7 @@ class App:
         self.detection=DetectionPanel(tabs,self);tabs.add(self.detection,text='M1-3 (PV 검출)')
         self.timing=TimingPanel(tabs,self);tabs.add(self.timing,text='M1-5 (응답 · 제어 시간)')
         self.stationary=StationaryPanel(tabs,self);tabs.add(self.stationary,text='M3-2 (정지 PV · SAC)')
+        self.ook=OokPanel(tabs,self);tabs.add(self.ook,text='M4-4 (Laser · OOK 시험)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -50,15 +52,34 @@ class App:
         logs.pack(side='bottom',fill='x',padx=6,pady=6)
         self.event_log=self.make_log(logs,'명령 · 응답 · 연결 · 오류')
         self.stats_log=self.make_log(logs,'실시간 수신 통계 (receive_stats)')
-        self.preview=ttk.Label(root,anchor='center');self.preview.pack(expand=True,fill='both')
+        # Let the layout allocate the viewport; the image must not request
+        # its own fixed height and get clipped between the tabs and logs.
+        self.preview_area=ttk.Frame(root,height=1)
+        self.preview_area.pack(expand=True,fill='both')
+        self.preview_area.pack_propagate(False)
+        self.preview=ttk.Label(self.preview_area,anchor='center')
+        self.preview.pack(expand=True,fill='both')
         def show_preview(event=None):
+            if tabs.select()!=str(self.ook): self.ook.leave()
             if self.timing.profile.running and tabs.select()!=str(self.timing):
                 self.timing.profile.finish('탭 변경으로 처리 시간 측정 중단')
-            if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary)):self.preview.pack_forget()
-            else:self.preview.pack(expand=True,fill='both')
+            if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary)):self.preview_area.pack_forget()
+            else:self.preview_area.pack(expand=True,fill='both')
+            self.preview_frame=None
+            root.after_idle(self.fit_selected_tab)
         tabs.bind('<<NotebookTabChanged>>',show_preview)
         root.after(5,self.poll)
         root.after(33,self.render)
+    def fit_selected_tab(self):
+        # Notebook normally requests the maximum height of ALL its pages.
+        # Short camera/OOK pages should not inherit the tall SAC page height.
+        selected=self.tabs.select()
+        if selected:
+            panel=self.tabs.nametowidget(selected)
+            height=panel.winfo_reqheight()
+            if int(self.tabs.cget('height'))!=height:
+                self.tabs.configure(height=height)
+
     def make_log(self,parent,title):
         panel=ttk.LabelFrame(parent,text=title,padding=4)
         parent.add(panel,weight=1)
@@ -84,6 +105,15 @@ class App:
         widget.configure(state='disabled')
     def send(self,cmd,tracking=False):
         stationary=getattr(self,'stationary',None)
+        ook=getattr(self,'ook',None)
+        action=cmd.get('cmd')
+        if action in ('laser_pattern','laser') and not (action=='laser' and cmd.get('value')==0):
+            if (stationary is not None and (stationary.active or getattr(stationary,'preparing',None))) or (hasattr(self,'timing') and (self.timing.active or self.timing.profile.running)):
+                self.record(dict(event='command_blocked',reason='진행 중인 추적/측정 종료 후 레이저 시험',command=cmd))
+                return False
+        if ook is not None and ook.busy and action in ('move','servo_config','preview','snap','ir_cut'):
+            self.record(dict(event='command_blocked',reason='레이저 OFF / 시험 중지 후 실행',command=cmd))
+            return False
         if stationary is not None and (stationary.active or getattr(stationary,'preparing',None)) and cmd.get('cmd') in ('move','servo_config','preview','snap','outputs_off'):
             if not str(cmd.get('request_id','')).startswith('m3-2-'):
                 if stationary.active:stationary.run.abort('external_command',cmd.get('cmd'))
@@ -139,6 +169,7 @@ class App:
                 self.servo.event(event)
                 self.timing.event(event)
                 self.stationary.event(event)
+                self.ook.event(event)
                 if kind=='network':self.links[str(event['port'])]=event['state']
                 if kind in ('hello','agent'):self.links['Pi']=event.get('agent_state',event.get('state'))
                 if kind=='pong':
@@ -148,6 +179,7 @@ class App:
                 self.record(event)
         except queue.Empty:pass
         self.servo.tick()
+        self.ook.tick()
         frame,count=self.net.pop();now=time.monotonic()
         self.received_count=count
         if frame:
@@ -174,17 +206,23 @@ class App:
         if self.closing:return
         started=time.monotonic()
         try:
+            self.fit_selected_tab()
             selected=self.tabs.select()
             if selected==str(self.timing) and self.timing.profile.running:
                 self.timing.profile.render()
             elif selected in (str(self.detection),str(self.timing),str(self.stationary)):
                 panel=next(p for p in (self.detection,self.timing,self.stationary) if str(p)==selected)
                 panel.render()
-            elif self.current and self.current[2]!=self.preview_frame:
-                image=Image.open(io.BytesIO(self.current[0]))
-                image.thumbnail((1000,480),Image.Resampling.LANCZOS)
-                photo=ImageTk.PhotoImage(image);self.preview.configure(image=photo);self.preview.image=photo
-                self.preview_frame=self.current[2]
+            elif self.current and self.preview_area.winfo_ismapped():
+                bounds=(max(1,self.preview_area.winfo_width()-4),
+                        max(1,self.preview_area.winfo_height()-4))
+                preview_key=(self.current[2],bounds)
+                if preview_key!=self.preview_frame:
+                    with Image.open(io.BytesIO(self.current[0])) as source:
+                        image=source.copy()
+                    image.thumbnail(bounds,Image.Resampling.LANCZOS)
+                    photo=ImageTk.PhotoImage(image);self.preview.configure(image=photo);self.preview.image=photo
+                    self.preview_frame=preview_key
         except (ValueError,OSError,tk.TclError) as exc:
             self.record(dict(event='render_error',message=str(exc)))
             if self.timing.profile.running:self.timing.profile.finish('화면 갱신 오류: '+str(exc))
@@ -193,6 +231,7 @@ class App:
 
     def close(self):
         self.closing=True
+        self.ook.close()
         self.stationary.close()
         self.timing.close()
         self.detection.close()
@@ -204,3 +243,4 @@ def main():
     parser=argparse.ArgumentParser();parser.add_argument('--server',default='127.0.0.1');parser.add_argument('--output',default='captures',help='Root directory for milestone folders, including M3-2')
     args=parser.parse_args();root=tk.Tk();App(root,args);root.mainloop()
 if __name__=='__main__':main()
+
