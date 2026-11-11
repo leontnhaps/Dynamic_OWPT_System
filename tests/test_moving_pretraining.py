@@ -364,5 +364,130 @@ class MovingLearningTests(unittest.TestCase):
             self.assertFalse(p.busy); self.assertTrue(p.hardware_ready)
 
 
+class PretrainingPanelTests(unittest.TestCase):
+    def panel(self, previous_run=False, start=True):
+        panel = sweep_fixtures.PanelTests().panel()
+        panel.source_folders = ['source-session']
+        panel.kalman_path = sweep_fixtures.variable('fixed-kalman.json')
+        panel.vars['dt'] = sweep_fixtures.variable('.720')
+        panel.training_cancel = threading.Event()
+        panel.training_status = Mock()
+        panel.training_progress = Mock()
+        panel.app.stage_dir = Mock(return_value=Path('captures/M5-3'))
+        if previous_run:
+            panel.run = SimpleNamespace(active=False, pending=None, phase='aborted', reason='user_stop',
+                test=3, pose=(0, 0), saved=4, detected=3, valid=3, tick=Mock(), finalize=Mock(), abort=Mock())
+            panel.log = SimpleNamespace(folder=Path('captures/M5-3/previous-collection'))
+        if start:
+            with patch('Tx.Controller.sweep_panel.load_kalman_config', return_value=(kalman_config(), {})):
+                panel.pretrain()
+        return panel
+
+    def result(self, completed=3, planned=3):
+        return dict(total_transitions=3, completed_updates=completed, planned_updates=planned,
+                    update_s=2.515, checkpoint='captures/M5-3/pretraining-test/checkpoints/episode_000001')
+
+    def message(self, variable):
+        return variable.set.call_args.args[0]
+
+    def test_running_training_is_visible_and_does_not_send_hardware_commands(self):
+        panel = self.panel(previous_run=True)
+        self.assertTrue(panel.busy)
+        self.assertIn('초기 학습 실행 중', self.message(panel.training_status))
+        panel.training_progress.start.assert_called_once_with()
+        panel.training_progress.stop.assert_not_called()
+        panel.app.send.assert_not_called()
+        panel.poll()
+        self.assertEqual(self.message(panel.status), self.message(panel.training_status))
+        self.assertEqual(panel.pool.submit.call_args.args[5], 'cpu')
+
+    def test_submit_failure_is_visible_without_leaving_panel_busy(self):
+        panel = self.panel(previous_run=True, start=False)
+        panel.pool.submit.side_effect = RuntimeError('worker 시작 실패')
+        with patch('Tx.Controller.sweep_panel.load_kalman_config', return_value=(kalman_config(), {})), \
+                patch('Tx.Controller.sweep_panel.messagebox.showerror') as failed, \
+                patch('Tx.Controller.sweep_panel.messagebox.showinfo') as info:
+            panel.action(panel.pretrain); panel.poll()
+        self.assertFalse(panel.busy)
+        self.assertIsNone(panel.future)
+        panel.training_progress.start.assert_not_called()
+        panel.training_progress.stop.assert_called_once_with()
+        failed.assert_called_once(); info.assert_not_called()
+        self.assertIn('초기 학습 실패: worker 시작 실패', self.message(panel.training_status))
+        self.assertEqual(self.message(panel.status), self.message(panel.training_status))
+
+    def test_success_popup_once_and_status_survives_previous_aborted_leg(self):
+        panel = self.panel(previous_run=True)
+        panel.future.set_result(self.result())
+        with patch('Tx.Controller.sweep_panel.messagebox.showinfo') as info:
+            panel.poll(); panel.poll()
+        self.assertFalse(panel.busy)
+        panel.training_progress.stop.assert_called_once_with()
+        info.assert_called_once()
+        message = info.call_args.args[1]
+        for expected in ('유효 3개', '업데이트 3/3회', '2.52초', str(panel.pretraining_folder), '체크포인트:'):
+            self.assertIn(expected, message)
+        self.assertIn('초기 학습 완료', self.message(panel.training_status))
+        self.assertEqual(self.message(panel.status), self.message(panel.training_status))
+        self.assertNotIn('user_stop', self.message(panel.status))
+
+    def test_worker_error_stops_indicator_and_preserves_failure_after_aborted_leg(self):
+        for error in (RuntimeError('학습 오류'), ValueError('잘못된 학습 입력')):
+            with self.subTest(error=error):
+                panel = self.panel(previous_run=True)
+                # The learner also sets this flag on errors; it alone does not mean user cancellation.
+                panel.training_cancel.set()
+                panel.future.set_exception(error)
+                with patch('Tx.Controller.sweep_panel.messagebox.showinfo') as info, \
+                        patch('Tx.Controller.sweep_panel.messagebox.showerror') as failed:
+                    panel.guard(panel.poll); panel.guard(panel.poll)
+                panel.training_progress.stop.assert_called_once_with()
+                info.assert_not_called(); failed.assert_called_once()
+                self.assertIn('초기 학습 실패', self.message(panel.training_status))
+                self.assertIn(str(error), self.message(panel.training_status))
+                self.assertEqual(self.message(panel.status), self.message(panel.training_status))
+                panel.app.record.assert_called_once()
+
+    def test_cancel_during_import_is_not_reported_as_success(self):
+        panel = self.panel(previous_run=True)
+        panel.stop()
+        self.assertTrue(panel.training_cancel.is_set())
+        self.assertIn('취소 요청', self.message(panel.training_status))
+        panel.training_progress.stop.assert_not_called()
+        panel.future.set_exception(ValueError('초기 데이터 재처리가 취소되었습니다.'))
+        with patch('Tx.Controller.sweep_panel.messagebox.showinfo') as info, \
+                patch('Tx.Controller.sweep_panel.messagebox.showerror') as failed:
+            panel.poll(); panel.poll()
+        info.assert_not_called(); failed.assert_not_called()
+        panel.training_progress.stop.assert_called_once_with()
+        self.assertIn('취소했습니다', self.message(panel.training_status))
+        self.assertEqual(self.message(panel.status), self.message(panel.training_status))
+
+    def test_cancelled_partial_checkpoint_is_not_reported_as_complete(self):
+        panel = self.panel(previous_run=True)
+        panel.stop()
+        panel.future.set_result(self.result(completed=1))
+        with patch('Tx.Controller.sweep_panel.messagebox.showinfo') as info:
+            panel.poll(); panel.poll()
+        info.assert_not_called()
+        panel.training_progress.stop.assert_called_once_with()
+        message = self.message(panel.training_status)
+        self.assertIn('초기 학습 취소', message)
+        self.assertIn('업데이트 1/3회', message)
+        self.assertIn('부분 저장', message)
+        self.assertEqual(self.message(panel.status), message)
+
+    def test_unexplained_partial_result_is_a_failure(self):
+        panel = self.panel()
+        panel.future.set_result(self.result(completed=1))
+        with patch('Tx.Controller.sweep_panel.messagebox.showinfo') as info, \
+                patch('Tx.Controller.sweep_panel.messagebox.showerror') as failed:
+            panel.poll()
+        info.assert_not_called(); failed.assert_called_once()
+        self.assertIn('초기 학습 실패', self.message(panel.training_status))
+        self.assertEqual(self.message(panel.status), self.message(panel.training_status))
+        panel.training_progress.stop.assert_called_once_with()
+
+
 if __name__ == '__main__':
     unittest.main()

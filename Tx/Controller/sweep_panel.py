@@ -110,6 +110,11 @@ class SweepPanel(ttk.Frame):
                                ('수집 데이터로 초기 모델 학습', lambda: self.action(self.pretrain))]:
             button = ttk.Button(row, text=label, command=command)
             button.pack(side='left', padx=3); self.widgets.append(button)
+        row = ttk.Frame(self); row.pack(fill='x', pady=3)
+        self.training_progress = ttk.Progressbar(row, mode='indeterminate', length=150)
+        self.training_progress.pack(side='left', padx=3)
+        self.training_status = tk.StringVar(value='초기 학습 대기 · 데이터 폴더와 고정 KF 설정을 선택하세요.')
+        ttk.Label(row, textvariable=self.training_status, wraplength=950).pack(side='left', fill='x', expand=True)
         self.status = tk.StringVar(value='자동 준비 → QGC 비행 준비 → 편도 수집. 초기 모델 학습은 아래 버튼, 실시간 SAC 제어 연결은 후속 단계입니다.')
         self.progress = tk.StringVar(value='목표각은 명령값입니다. 실제 각도/도달/드론 위치는 측정하지 않습니다.')
         for var in (self.status, self.progress):
@@ -158,6 +163,11 @@ class SweepPanel(ttk.Frame):
         var = self.__dict__.get('kalman_path')
         return var.get().strip() if var is not None else ''
 
+    def training_message(self, message):
+        self.pretraining_status = message
+        self.training_status.set(message)
+        self.status.set(message)
+
     def pretrain(self):
         if self.busy:
             raise ValueError('편도 수집·저장·준비가 끝난 뒤 초기 모델을 학습하세요.')
@@ -174,9 +184,17 @@ class SweepPanel(ttk.Frame):
         self.pretraining_folder = output
         self.pretraining_status = None
         self.job_kind = 'pretrain'
-        self.future = self.pool.submit(pretrain, list(self.source_folders), kalman, cfg, output,
-                                       'cpu', self.training_cancel)
-        self.status.set('원자료를 고정 KF로 시간순 재처리 → 유효 데이터 취합 → 이동 SAC 초기 학습 중 · 이동 명령 없음')
+        try:
+            self.future = self.pool.submit(pretrain, list(self.source_folders), kalman, cfg, output,
+                                           'cpu', self.training_cancel)
+        except Exception as exc:
+            self.training_progress.stop()
+            self.training_message('초기 학습 실패: '+str(exc))
+            self.fail(exc)
+            self.status.set(self.pretraining_status)
+            return
+        self.training_message('초기 학습 실행 중 · 고정 KF 재처리 → 유효 데이터 취합 → SAC 학습 및 저장 · 이동 명령 없음')
+        self.training_progress.start()
         self.lock()
 
     def settings(self):
@@ -329,6 +347,8 @@ class SweepPanel(ttk.Frame):
             cancel.set()
         self.invalidate('user_stop')
         self.status.set('추가 명령 중지 · 진행 중 저장/응답은 마무리합니다. 이미 전달된 서보 이동을 즉시 정지시키지는 않습니다.')
+        if self.future is not None and self.job_kind == 'pretrain':
+            self.training_message('초기 학습 취소 요청 · 진행 중 작업과 저장을 마무리하는 중입니다.')
         self.lock()
 
     def event(self, event):
@@ -374,16 +394,32 @@ class SweepPanel(ttk.Frame):
                     self.prepare_hardware()
                 # Cancelled loads are deliberately discarded without any command.
             elif self.job_kind == 'pretrain':
+                self.training_progress.stop()
                 try:
                     result = future.result()
-                except ValueError:
-                    if not self.training_cancel.is_set():
-                        raise
-                    self.pretraining_status = '초기 데이터 학습을 취소했습니다. 원본 수집 자료는 유지됩니다.'
+                    completed, planned = result['completed_updates'], result['planned_updates']
+                    if completed < planned and not self.training_cancel.is_set():
+                        raise ValueError(f'초기 학습 업데이트 미완료: {completed}/{planned}회')
+                    summary = (f"유효 {result['total_transitions']}개 · 업데이트 {completed}/{planned}회 · "
+                               f"학습 {result['update_s']:.2f}초")
+                except Exception as exc:
+                    cancelled = (isinstance(exc, ValueError) and self.training_cancel.is_set()
+                                 and str(exc) in ('초기 데이터 재처리가 취소되었습니다.', '초기 데이터 학습이 취소되었습니다.'))
+                    if cancelled:
+                        self.training_message('초기 데이터 학습을 취소했습니다. 원본 수집 자료는 유지됩니다.')
+                    else:
+                        self.training_message('초기 학습 실패: '+str(exc))
+                        self.fail(exc)
+                        self.status.set(self.pretraining_status)
                 else:
-                    self.pretraining_status = (f"초기 모델 저장 · 유효 {result['total_transitions']}개 / "
-                                               f"업데이트 {result['completed_updates']}/{result['planned_updates']}회 · {result['checkpoint']}")
-                self.status.set(self.pretraining_status)
+                    if completed < planned:
+                        self.training_message(f'초기 학습 취소 · {summary} · 부분 저장: {result["checkpoint"]}')
+                    else:
+                        self.training_message(f'초기 학습 완료 · {summary} · 저장: {self.pretraining_folder}')
+                        self.lock()
+                        messagebox.showinfo('M5-3 초기 학습 완료',
+                            f'초기 모델을 저장했습니다.\n{summary}\n\n저장 폴더: {self.pretraining_folder}\n'
+                            f'체크포인트: {result["checkpoint"]}')
             else:
                 row, image = future.result()
                 self.display = (image, row)
@@ -415,11 +451,13 @@ class SweepPanel(ttk.Frame):
             if not self.run.active and self.future is None:
                 if not self.logging_failed:
                     self.run.finalize()
-                if self.run.phase == 'complete' and self.hardware_ready:
-                    self.status.set(self.__dict__.get('pretraining_status') or
-                                    f'T{self.run.test:03d} 완료 · 다음 버튼은 반대 방향 · {self.log.folder}')
-                elif self.run.phase == 'aborted':
+                if self.run.phase == 'aborted':
                     self.hardware_ready = False
+                if self.__dict__.get('pretraining_status'):
+                    self.status.set(self.pretraining_status)
+                elif self.run.phase == 'complete' and self.hardware_ready:
+                    self.status.set(f'T{self.run.test:03d} 완료 · 다음 버튼은 반대 방향 · {self.log.folder}')
+                elif self.run.phase == 'aborted':
                     self.status.set(f'T{self.run.test:03d} 중단: {self.run.reason} · 저장 후 자동 준비 필요')
             self.progress.set(f'T{self.run.test:03d} · {self.run.phase} · 명령 Pan/Tilt {self.run.pose}° · '
                               f'저장 {self.run.saved} / 검출 {self.run.detected} / KF 관측 {self.run.valid}')
