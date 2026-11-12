@@ -13,6 +13,7 @@ from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 import io
 from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path, REPOSITORY_ROOT
+from common.moving_paths import DEFAULT_KALMAN_PATH, resolve_kalman_path
 from common.control_timing import CONTROL_PERIODS_S
 from common.tx_setup import TX_CAMERA_SETTINGS
 from common.tx_bearing import BEARING_MODEL
@@ -39,7 +40,7 @@ class SweepPanel(ttk.Frame):
         self.device = tk.StringVar(value='cuda')
         self.mode = tk.StringVar(value=KF_MODE)
         self.note = tk.StringVar()
-        self.kalman_path = tk.StringVar()
+        self.kalman_path = tk.StringVar(value=str(DEFAULT_KALMAN_PATH))
         self.source_folders = []
         self.training_cancel = threading.Event()
         self.vars = {}
@@ -113,7 +114,7 @@ class SweepPanel(ttk.Frame):
         row = ttk.Frame(self); row.pack(fill='x', pady=3)
         self.training_progress = ttk.Progressbar(row, mode='indeterminate', length=150)
         self.training_progress.pack(side='left', padx=3)
-        self.training_status = tk.StringVar(value='초기 학습 대기 · 데이터 폴더와 고정 KF 설정을 선택하세요.')
+        self.training_status = tk.StringVar(value='초기 학습 대기 · 확정 KF 기본값을 확인하고 데이터 폴더를 선택하세요.')
         ttk.Label(row, textvariable=self.training_status, wraplength=950).pack(side='left', fill='x', expand=True)
         self.status = tk.StringVar(value='자동 준비 → QGC 비행 준비 → 편도 수집. 초기 모델 학습은 아래 버튼, 실시간 추적은 이동 SAC 학습 탭에서 실행합니다.')
         self.progress = tk.StringVar(value='목표각은 명령값입니다. 실제 각도/도달/드론 위치는 측정하지 않습니다.')
@@ -161,7 +162,10 @@ class SweepPanel(ttk.Frame):
 
     def kalman_text(self):
         var = self.__dict__.get('kalman_path')
-        return var.get().strip() if var is not None else ''
+        value = var.get().strip() if var is not None else ''
+        # Clearing the collection field still explicitly requests raw-data-only
+        # capture. Non-empty selections use the same repo anchoring as live SAC.
+        return str(resolve_kalman_path(value)) if value else ''
 
     def training_message(self, message):
         self.pretraining_status = message

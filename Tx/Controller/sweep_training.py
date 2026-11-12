@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
 from common.tx_bearing import BEARING_MODEL
+from common.moving_paths import DEFAULT_KALMAN_PATH, resolve_kalman_path
 from common.tx_moving import MovingConfig, BearingKalman, PredictionInputError, load_kalman_config, moving_observation
 from common.tx_tracking import BeamMap, observation
 from Tx.Controller.stationary_learning import SACLearner, RunLog, digest, dump
@@ -233,13 +234,14 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='편도 수집 결과를 고정 KF로 재처리하여 이동 SAC 초기 모델 학습')
     parser.add_argument('--source', type=Path, action='append', required=True, help='수집 세션 폴더; 여러 번 지정 가능')
-    parser.add_argument('--kalman', type=Path, required=True, help='사전 실험에서 확정한 KF 설정 JSON')
+    parser.add_argument('--kalman', type=Path, default=DEFAULT_KALMAN_PATH,
+                        help='고정 KF 설정 JSON (생략: 현재 확정 KF)')
     parser.add_argument('--period', type=float, default=.720)
     parser.add_argument('--device', choices=('cpu', 'cuda'), default='cpu')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     cfg = MovingConfig(dt=args.period); cfg.validate()
-    kalman, _ = load_kalman_config(args.kalman)
+    kalman, _ = load_kalman_config(resolve_kalman_path(args.kalman))
     output = args.output or Path('captures/M5-3')/('pretraining_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
     result = pretrain(args.source, kalman, cfg, output, args.device)
     print(json.dumps(result, ensure_ascii=False, indent=2))

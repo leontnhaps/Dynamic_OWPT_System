@@ -1,0 +1,132 @@
+{
+  "schema": "tx-bearing-kalman-v1",
+  "state_order": [
+    "alpha",
+    "beta",
+    "alpha_dot",
+    "beta_dot"
+  ],
+  "angle_unit": "rad",
+  "process_noise_model": "continuous_white_acceleration",
+  "Q": [
+    [
+      0.001862899468930407,
+      0.0
+    ],
+    [
+      0.0,
+      4.5991024034043175e-05
+    ]
+  ],
+  "R": [
+    [
+      0.00029602186477887567,
+      0.0
+    ],
+    [
+      0.0,
+      5.835153911661534e-05
+    ]
+  ],
+  "P0": [
+    [
+      0.00029602186477887567,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      5.835153911661534e-05,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0021298865832429796,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      8.16708047354466e-05
+    ]
+  ],
+  "time_source": "receive_s",
+  "forecast_horizon_s": 0.72,
+  "selection_status": "user_selected_final_baseline_for_current_M5-3_experiments",
+  "selected_on": "2026-11-13",
+  "selected_timezone": "Asia/Seoul",
+  "selection_basis": "User selected the receive-time Tuned CV result from kf_reanalysis_20261112. Parameters are unchanged from that fit.",
+  "analysis_status": "offline_observed_bearing_validated; fixed_0.72s_and_closed_loop_hardware_performance_not_validated",
+  "parameters_selected_using": [
+    "20261111_113819_771838",
+    "20261111_114158_774256",
+    "20261111_114324_360716",
+    "20261112_155638_399997",
+    "20261112_161235_500104"
+  ],
+  "held_out_sessions": [
+    "20261111_114431_834051",
+    "20261111_114524_874520",
+    "20261111_114729_875606",
+    "20261112_160526_389374",
+    "20261112_161449_572790"
+  ],
+  "parameter_meaning": {
+    "Q": "continuous white angular-acceleration spectral density rad^2/s^3, integrated over actual dt",
+    "R": "effective observation residual variance rad^2; includes model, commanded-pose and timing mismatch, not isolated detector noise",
+    "P0": "angle variance constrained to R; angular-rate variance fitted; initial angular rates zero"
+  },
+  "initialization": {
+    "state": "first valid measured alpha and beta; zero alpha_dot and beta_dot",
+    "offline_reset": "each one-way leg",
+    "live_reset": "each user-started episode, not automatically at a direction reversal"
+  },
+  "fit_provenance": {
+    "analysis": "captures/M5-3/kf_reanalysis_20261112",
+    "source_file": "results/fitted_parameters.json",
+    "source_sha256": "0242a3df0580b0c21fd2d07b2e0155e3060679d848ff80decc805e2480e82d05",
+    "model": "Tuned CV",
+    "clock": "receive_s",
+    "objective": "pooled tuning innovation Gaussian NLL in degrees",
+    "parameters_refitted_for_export": false,
+    "degrees_squared_to_radians_squared_factor": 0.00030461741978670857,
+    "fitting_exclusion_rule": "detected, eligible, finite in-bounds box and bearing; exclude box within 1 pixel of image border"
+  },
+  "validation_scope": "one dataset, two days, only five held-out recording sessions; model comparison is validation, not an independent final deployment test",
+  "validation_result": {
+    "target": "next observed YOLO/commanded-pose bearing; not independent true target position",
+    "common_predictions": 330,
+    "sessions": 5,
+    "vector_mse_deg2": 9.6389941426235,
+    "vector_rmse_deg": 3.104672952602818,
+    "horizon_s": {
+      "min": 0.7960000000020955,
+      "max": 2.5,
+      "mean": 1.0151060606061726
+    },
+    "comparison_rmse_deg": {
+      "Frozen CV": 3.3813640787041983,
+      "Persistence": 4.377721014849602,
+      "Tuned CA": 3.6146800499458007,
+      "Tuned CV": 3.104672952602818,
+      "Two-point CV": 3.2603750905311304
+    },
+    "limitations": [
+      "Exact 0.72-second forecast is not directly validated.",
+      "One session supplies 243/330 validation predictions; session-equal averaging favors two-point CV slightly.",
+      "Recorded servo poses are commanded values, not measured actuator feedback.",
+      "User selection does not imply demonstrated closed-loop tracking performance."
+    ]
+  },
+  "implementation_equivalence": {
+    "executed": true,
+    "comparisons": 883,
+    "max_abs_state_difference_deg": 1.7763568394002505e-13,
+    "max_abs_covariance_difference_deg2": 9.094947017729282e-13,
+    "scope": "numerical equivalence of production rad-state implementation and offline degree-state implementation; no hardware test"
+  }
+}

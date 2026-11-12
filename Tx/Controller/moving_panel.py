@@ -91,7 +91,7 @@ class MovingPanel(ttk.Frame):
         ttk.Button(row, text='결과 폴더 확인', command=self.show_folder).pack(side='left', padx=3)
         ttk.Label(self, text='사용자 종료 또는 연속 미검출 3초 → 학습·저장 → 시작점 복귀 → 다음 시작 대기').pack(anchor='w')
         ttk.Label(self, text='UAV는 QGC에서 직접 조종합니다. 다음 에피소드는 시작 버튼을 눌러야 실행됩니다.').pack(anchor='w')
-        self.status = tk.StringVar(value='기존 YOLO · KF · 초기 모델 경로를 확인하고 자동 준비를 누르세요.')
+        self.status = tk.StringVar(value='확정 KF와 같은 설정으로 학습한 checkpoint를 선택하고 자동 준비를 누르세요.')
         self.progress = tk.StringVar(value='captures/M5-3/moving_<날짜_시각>/ · 원본 영상 · 에피소드 기록 · 학습 그래프')
         self.result_text = tk.StringVar()
         for var in (self.status, self.progress, self.result_text):

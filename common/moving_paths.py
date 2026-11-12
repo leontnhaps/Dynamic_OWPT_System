@@ -1,4 +1,4 @@
-"""Approved moving experiment inputs and their paired-checkpoint contract."""
+"""Selected moving experiment defaults and their paired-checkpoint contract."""
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,8 +8,8 @@ from common.tx_moving import MovingConfig, load_kalman_config
 from Tx.Controller.stationary_learning import checkpoint_info
 
 
-DEFAULT_KALMAN_PATH = (REPOSITORY_ROOT / 'captures' / 'M5-3' / 'kf_tuning_20261111'
-                       / 'kf_candidate_receive_time.json')
+DEFAULT_KALMAN_PATH = (REPOSITORY_ROOT / 'captures' / 'M5-3' / 'kf_final_20261113'
+                       / 'kf_receive_time.json')
 DEFAULT_MOVING_CHECKPOINT_PATH = (REPOSITORY_ROOT / 'captures' / 'M5-3'
                                   / 'pretraining_20261112_011543_363660' / 'checkpoints'
                                   / 'episode_000013_318791cd')

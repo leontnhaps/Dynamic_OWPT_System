@@ -229,3 +229,12 @@ __marimo__/
 
 # Local acquisition data (Pi backups and controller samples)
 captures/
+
+# Ship only the selected M5-3 KF configuration; keep acquisition data ignored.
+!captures/
+captures/*
+!captures/M5-3/
+captures/M5-3/*
+!captures/M5-3/kf_final_20261113/
+captures/M5-3/kf_final_20261113/*
+!captures/M5-3/kf_final_20261113/kf_receive_time.json
