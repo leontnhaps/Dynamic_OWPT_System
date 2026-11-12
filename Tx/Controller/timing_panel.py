@@ -112,6 +112,8 @@ class TimingPanel(DetectionPanel):
         self.prepare(False)
 
     def prepare(self, auto_measure):
+        if getattr(getattr(self.app,'moving',None),'busy',False):
+            raise ValueError('M5-3 이동 학습·저장·복귀를 먼저 종료하세요.')
         if getattr(getattr(self.app,'sweep',None),'busy',False):
             raise ValueError('M5-3 준비·편도·저장을 먼저 종료하세요.')
         if getattr(getattr(self.app,'stationary',None),'busy',False):

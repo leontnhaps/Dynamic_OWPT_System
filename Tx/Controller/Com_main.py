@@ -18,6 +18,7 @@ from Tx.Controller.timing_panel import TimingPanel
 from Tx.Controller.stationary_panel import StationaryPanel
 from Tx.Controller.ook_panel import OokPanel
 from Tx.Controller.sweep_panel import SweepPanel
+from Tx.Controller.moving_panel import MovingPanel
 
 class App:
     def __init__(self,root,args):
@@ -37,6 +38,7 @@ class App:
         self.stationary=StationaryPanel(tabs,self);tabs.add(self.stationary,text='M3-2 (정지 PV · SAC)')
         self.ook=OokPanel(tabs,self);tabs.add(self.ook,text='M4-4 (Laser · OOK 시험)')
         self.sweep=SweepPanel(tabs,self);tabs.add(self.sweep,text='M5-3 (이동 실험 · 수집)')
+        self.moving=MovingPanel(tabs,self);tabs.add(self.moving,text='M5-3 (이동 SAC 학습)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -63,9 +65,10 @@ class App:
         self.preview.pack(expand=True,fill='both')
         def show_preview(event=None):
             if tabs.select()!=str(self.ook): self.ook.leave()
+            if tabs.select()!=str(self.moving): self.moving.on_tab_left()
             if self.timing.profile.running and tabs.select()!=str(self.timing):
                 self.timing.profile.finish('탭 변경으로 처리 시간 측정 중단')
-            if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary),str(self.sweep)):self.preview_area.pack_forget()
+            if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary),str(self.sweep),str(self.moving)):self.preview_area.pack_forget()
             else:self.preview_area.pack(expand=True,fill='both')
             self.preview_frame=None
             root.after_idle(self.fit_selected_tab)
@@ -107,9 +110,13 @@ class App:
         widget.configure(state='disabled')
     def send(self,cmd,tracking=False):
         sweep=getattr(self,'sweep',None)
+        moving=getattr(self,'moving',None)
         stationary=getattr(self,'stationary',None)
         ook=getattr(self,'ook',None)
         action=cmd.get('cmd')
+        request_id=str(cmd.get('request_id',''))
+        moving_command=request_id.startswith('m5-1-moving-')
+        sweep_command=request_id.startswith('m5-1-') and not moving_command
         # Reject before invalidating another tab's prepared state. OFF remains
         # available while either experiment owns the shared Tx hardware.
         if ook is not None and ook.busy and action in ('move','servo_config','preview','snap','ir_cut'):
@@ -117,17 +124,26 @@ class App:
             return False
         if action in ('laser_pattern','laser') and not (action=='laser' and cmd.get('value')==0):
             if ((sweep is not None and sweep.busy)
+                    or (moving is not None and moving.busy)
                     or (stationary is not None and (stationary.active or getattr(stationary,'preparing',None)))
                     or (hasattr(self,'timing') and (self.timing.active or self.timing.profile.running))):
                 self.record(dict(event='command_blocked',reason='진행 중인 추적/측정/수집 종료 후 레이저 시험',command=cmd))
                 return False
+        if (moving is not None and moving.busy and not moving_command
+                and action in ('move','servo_config','preview','snap','ir_cut')):
+            self.record(dict(event='command_blocked',reason='M5-3 이동 학습·저장·복귀·응답 완료 후 실행',command=cmd))
+            return False
         if (sweep is not None and cmd.get('cmd') in ('move','servo_config','preview','snap','outputs_off','ir_cut')
-                and not str(cmd.get('request_id','')).startswith('m5-1-')):
+                and not sweep_command):
             if sweep.busy and cmd.get('cmd')!='outputs_off':
                 self.record(dict(event='command_blocked',reason='M5-3 편도·준비·저장·응답 완료 후 실행',command=cmd))
                 return False
             if sweep.busy or sweep.hardware_ready:
                 sweep.invalidate('external_command: '+cmd.get('cmd'))
+        if (moving is not None and not moving_command
+                and action in ('move','servo_config','preview','snap','outputs_off','ir_cut')
+                and (moving.busy or moving.hardware_ready)):
+            moving.invalidate('external_command: '+action)
         if stationary is not None and (stationary.active or getattr(stationary,'preparing',None)) and cmd.get('cmd') in ('move','servo_config','preview','snap','outputs_off'):
             if not str(cmd.get('request_id','')).startswith('m3-2-'):
                 if stationary.active:stationary.run.abort('external_command',cmd.get('cmd'))
@@ -185,6 +201,8 @@ class App:
                 self.stationary.event(event)
                 self.ook.event(event)
                 self.sweep.guard(lambda: self.sweep.event(event))
+                moving=getattr(self,'moving',None)
+                if moving is not None:moving.guard(lambda: moving.handle_event(event))
                 if kind=='network':self.links[str(event['port'])]=event['state']
                 if kind in ('hello','agent'):self.links['Pi']=event.get('agent_state',event.get('state'))
                 if kind=='pong':
@@ -209,6 +227,8 @@ class App:
         self.timing.guard(self.timing.poll)
         self.stationary.guard(self.stationary.poll)
         self.sweep.guard(self.sweep.poll)
+        moving=getattr(self,'moving',None)
+        if moving is not None:moving.guard(moving.poll)
         if now-self.mark>=1:
             self.fps=(count-self.previous)/(now-self.mark);self.previous=count;self.mark=now
             self.record(dict(event='receive_stats',fps=self.fps,total=count))
@@ -224,10 +244,13 @@ class App:
         try:
             self.fit_selected_tab()
             selected=self.tabs.select()
+            panels=(self.detection,self.timing,self.stationary,self.sweep)
+            moving=getattr(self,'moving',None)
+            if moving is not None:panels=(*panels,moving)
             if selected==str(self.timing) and self.timing.profile.running:
                 self.timing.profile.render()
-            elif selected in (str(self.detection),str(self.timing),str(self.stationary),str(self.sweep)):
-                panel=next(p for p in (self.detection,self.timing,self.stationary,self.sweep) if str(p)==selected)
+            elif selected in tuple(str(p) for p in panels):
+                panel=next(p for p in panels if str(p)==selected)
                 panel.render()
             elif self.current and self.preview_area.winfo_ismapped():
                 bounds=(max(1,self.preview_area.winfo_width()-4),
@@ -249,6 +272,8 @@ class App:
         self.closing=True
         # Request laser OFF before waiting for M5 inference/saving/training.
         self.ook.close()
+        moving=getattr(self,'moving',None)
+        if moving is not None:moving.close()
         self.sweep.close()
         self.stationary.close()
         self.timing.close()

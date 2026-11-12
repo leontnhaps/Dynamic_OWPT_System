@@ -237,6 +237,8 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         return None
 
     def check_ready(self, for_experiment=False):
+        if getattr(getattr(self.app,'moving',None),'busy',False):
+            raise ValueError('M5-3 이동 학습·저장·복귀가 끝난 뒤 레이저 시험을 시작하세요.')
         sweep = getattr(self.app, 'sweep', None)
         if sweep is not None and sweep.busy:
             raise ValueError('M5-3 준비·편도·저장·학습이 끝난 뒤 레이저 시험을 시작하세요.')
@@ -255,6 +257,8 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         self.request(dict(cmd='hardware_status'))
 
     def prepare(self):
+        if getattr(getattr(self.app,'moving',None),'busy',False):
+            raise ValueError('M5-3 이동 학습·저장·복귀를 먼저 종료하세요.')
         if self.busy or self.pending:
             raise ValueError('진행 중인 명령을 중지하거나 응답을 기다리세요.')
         if self.app.send(dict(cmd='preview', enable=True, **TX_CAMERA_SETTINGS)):
@@ -267,6 +271,8 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
             self.state.set('레이저 ON 응답 대기')
 
     def ir(self, level):
+        if getattr(getattr(self.app,'moving',None),'busy',False):
+            raise ValueError('M5-3 이동 학습·저장·복귀가 끝난 뒤 IR을 변경하세요.')
         if self.busy or self.pending:
             raise ValueError('레이저 OFF 및 응답 확인 후 IR을 변경하세요.')
         self.request(dict(cmd='ir_cut', level=level))

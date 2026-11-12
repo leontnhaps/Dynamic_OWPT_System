@@ -1,0 +1,85 @@
+{
+  "schema": "tx-bearing-kalman-v1",
+  "state_order": [
+    "alpha",
+    "beta",
+    "alpha_dot",
+    "beta_dot"
+  ],
+  "angle_unit": "rad",
+  "process_noise_model": "continuous_white_acceleration",
+  "Q": [
+    [
+      1.716538402021257e-05,
+      0.0
+    ],
+    [
+      0.0,
+      7.870520717617781e-05
+    ]
+  ],
+  "R": [
+    [
+      0.00015118169269305302,
+      0.0
+    ],
+    [
+      0.0,
+      1.0917028024507323e-05
+    ]
+  ],
+  "P0": [
+    [
+      0.00015118169269305302,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0917028024507323e-05,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.006673114991543738,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0004687394488426667
+    ]
+  ],
+  "analysis_status": "provisional_offline_candidate_not_hardware_validated",
+  "time_source": "receive_s",
+  "forecast_horizon_s": 0.72,
+  "parameters_selected_using": [
+    "20261111_113819_771838",
+    "20261111_114158_774256",
+    "20261111_114324_360716"
+  ],
+  "held_out_sessions": [
+    "20261111_114431_834051",
+    "20261111_114524_874520",
+    "20261111_114729_875606"
+  ],
+  "parameter_meaning": {
+    "Q": "angular acceleration spectral density rad^2/s^3, integrated over actual dt",
+    "R": "effective observation residual variance rad^2; includes model and timing mismatch, not isolated detector noise",
+    "P0": "position variance constrained to R; velocity variance fitted; initial velocity zero"
+  },
+  "validation_scope": "next-observation variable-horizon error against YOLO/commanded-pose bearing, not true target angle; fixed 0.72s forecast is not directly validated",
+  "validation_result": {
+    "common_predictions": 51,
+    "angular_vector_rmse_deg": {
+      "Persistence": 4.333201726102225,
+      "Two-point CV": 2.6306936508506316,
+      "KF": 3.1263135608255297
+    },
+    "decision": "retain as provisional candidate; not selected for deployment; two-point CV has lower held-out RMSE"
+  }
+}

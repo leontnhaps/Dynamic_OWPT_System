@@ -149,6 +149,8 @@ class StationaryPanel(ttk.Frame):
         self.timing_note.set(note)
 
     def check_manual_available(self):
+        if getattr(getattr(self.app,'moving',None),'busy',False):
+            raise ValueError('M5-3 이동 학습·저장·복귀를 먼저 종료하세요.')
         if getattr(getattr(self.app,'sweep',None),'busy',False):
             raise ValueError('M5-3 준비·편도·저장을 먼저 종료하세요.')
         if self.busy:
@@ -232,6 +234,8 @@ class StationaryPanel(ttk.Frame):
         if path: self.checkpoint.set(path)
 
     def stop_other_panels(self):
+        if getattr(getattr(self.app,'moving',None),'busy',False):
+            raise ValueError('M5-3 이동 학습·저장·복귀를 먼저 종료하세요.')
         if getattr(getattr(self.app,'sweep',None),'busy',False):
             raise ValueError('M5-3 준비·편도·저장을 먼저 종료하세요.')
         if self.app.timing.active or self.app.timing.preparing or self.app.timing.profile.running:

@@ -89,6 +89,8 @@ class DetectionPanel(ttk.Frame):
         for widget in self.widgets: widget.configure(state='disabled' if locked else 'normal')
 
     def load(self):
+        if getattr(getattr(self.app,'moving',None),'busy',False):
+            raise ValueError('M5-3 이동 학습·저장·복귀를 먼저 종료하세요.')
         if getattr(getattr(self.app,'sweep',None),'busy',False):
             raise ValueError('M5-3 준비·편도·저장을 먼저 종료하세요.')
         if getattr(getattr(self.app,'stationary',None),'busy',False):
@@ -105,6 +107,8 @@ class DetectionPanel(ttk.Frame):
         self.status.set('YOLO 모델 불러오는 중…')
 
     def start(self):
+        if getattr(getattr(self.app,'moving',None),'busy',False):
+            raise ValueError('M5-3 이동 학습·저장·복귀를 먼저 종료하세요.')
         if getattr(getattr(self.app,'sweep',None),'busy',False):
             raise ValueError('M5-3 준비·편도·저장을 먼저 종료하세요.')
         if getattr(getattr(self.app,'stationary',None),'busy',False):

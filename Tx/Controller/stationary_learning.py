@@ -227,7 +227,7 @@ class SACLearner:
         cfg = getattr(self, 'cfg', TrackingConfig())
         reasons = ('step_limit', 'target_lost', 'initial_target_lost')
         if cfg.observation_size == 10:
-            reasons += ('range_complete', 'manual_leg_end', 'initial_dataset')
+            reasons += ('range_complete', 'manual_leg_end', 'manual_episode_end', 'initial_dataset')
         allowed = summary['reason'] in reasons
         planned = (math.floor(summary['new_transitions']*ratio)
                    if self.mode != 'evaluate' and allowed and self.total_transitions >= cfg.learning_starts else 0)

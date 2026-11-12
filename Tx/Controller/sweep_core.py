@@ -10,7 +10,7 @@ from common.tx_tracking import TrackingConfig
 SCHEMA = 'm5-1-sweep-v3'
 KF_MODE = '칼만필터 최적화용 수집 + YOLO 야외 Test'
 YOLO_MODE = 'YOLO 야외 Test (이미지 수집)'
-LEARNING_MODE = '이동환경 SAC 제어 (연결 예정)'
+LEARNING_MODE = '이동 SAC 학습 탭에서 실행'
 
 
 @dataclass(frozen=True)

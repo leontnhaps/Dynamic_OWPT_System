@@ -304,6 +304,20 @@ class MovingLearningTests(unittest.TestCase):
             report = learner.finish_episode(dict(episode=1, reason='range_complete', new_transitions=count), Mock(), 1)
             self.assertEqual(report['completed_updates'], count)
 
+    def test_manual_episode_end_updates_moving_only_and_emergency_does_not(self):
+        from common.tx_tracking import TrackingConfig
+        for cfg, reason, expected in [(MovingConfig(), 'manual_episode_end', 3),
+                                      (MovingConfig(), 'user_stop', 0),
+                                      (MovingConfig(), 'command_error', 0),
+                                      (TrackingConfig(), 'manual_episode_end', 0)]:
+            with self.subTest(schema=cfg.schema, reason=reason):
+                learner = self.learner(1003)
+                learner.cfg = cfg
+                report = learner.finish_episode(dict(episode=14, reason=reason,
+                    new_transitions=3), Mock(), 1)
+                self.assertEqual(report['completed_updates'], expected)
+                learner.save_checkpoint.assert_called_once()
+
     def test_initial_pretraining_imports_all_data_and_saves_provenance(self):
         with TemporaryDirectory() as temp:
             a, output = Path(temp)/'source', Path(temp)/'output'

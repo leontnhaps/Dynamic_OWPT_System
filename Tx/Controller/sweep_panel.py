@@ -115,7 +115,7 @@ class SweepPanel(ttk.Frame):
         self.training_progress.pack(side='left', padx=3)
         self.training_status = tk.StringVar(value='초기 학습 대기 · 데이터 폴더와 고정 KF 설정을 선택하세요.')
         ttk.Label(row, textvariable=self.training_status, wraplength=950).pack(side='left', fill='x', expand=True)
-        self.status = tk.StringVar(value='자동 준비 → QGC 비행 준비 → 편도 수집. 초기 모델 학습은 아래 버튼, 실시간 SAC 제어 연결은 후속 단계입니다.')
+        self.status = tk.StringVar(value='자동 준비 → QGC 비행 준비 → 편도 수집. 초기 모델 학습은 아래 버튼, 실시간 추적은 이동 SAC 학습 탭에서 실행합니다.')
         self.progress = tk.StringVar(value='목표각은 명령값입니다. 실제 각도/도달/드론 위치는 측정하지 않습니다.')
         for var in (self.status, self.progress):
             ttk.Label(self, textvariable=var, wraplength=1120).pack(anchor='w')
@@ -202,6 +202,8 @@ class SweepPanel(ttk.Frame):
 
     def stop_other_panels(self):
         a = self.app
+        if getattr(getattr(a,'moving',None),'busy',False):
+            raise ValueError('M5-3 이동 학습·저장·복귀를 먼저 종료하세요.')
         ook = getattr(a, 'ook', None)
         if ook is not None and ook.busy:
             raise ValueError('M4-4 레이저 OFF / 시험 중지 후 응답을 확인하세요.')
@@ -219,7 +221,7 @@ class SweepPanel(ttk.Frame):
         if self.busy:
             raise ValueError('현재 작업·저장·응답이 끝난 뒤 다시 준비하세요.')
         if self.mode.get() == LEARNING_MODE:
-            raise ValueError('실시간 SAC 제어는 후속 연결 단계입니다. 현재는 수집 모드와 아래 초기 모델 학습 버튼을 사용하세요.')
+            raise ValueError('실시간 추적은 M5-3 (이동 SAC 학습) 탭에서 checkpoint와 KF를 지정하고 자동 준비하세요.')
         cfg = self.settings()
         kalman_path = self.kalman_text()
         fixed_kalman, kalman_identity = load_kalman_config(kalman_path) if kalman_path else (None, None)
