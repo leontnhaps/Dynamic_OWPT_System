@@ -45,6 +45,7 @@ class MovingPanel(ttk.Frame):
         self.kalman_path = tk.StringVar(value=str(DEFAULT_KALMAN_PATH))
         self.checkpoint = tk.StringVar(value=str(DEFAULT_MOVING_CHECKPOINT_PATH))
         self.model_preset = tk.StringVar(value=next(iter(MOVING_CHECKPOINT_PRESETS)))
+        self.show_paths = tk.BooleanVar(value=False)
         self.reward_text = tk.StringVar(value='보상 설정은 선택한 모델을 자동 준비한 뒤 표시합니다.')
         self.mode = tk.StringVar(value='이어서 학습')
         self.device = tk.StringVar(value='cuda')
@@ -55,17 +56,20 @@ class MovingPanel(ttk.Frame):
         self.start_note = tk.StringVar(value='시작점: Pan 0°, Tilt 0° · 변경 후 적용을 누르세요.')
         self.note = tk.StringVar()
         row = ttk.Frame(self); row.pack(fill='x', pady=2)
-        ttk.Label(row, text='저장한 시작 모델', width=22).pack(side='left')
+        self.model_row = row
+        ttk.Label(row, text='학습 시작 모델', width=22).pack(side='left')
         combo = ttk.Combobox(row, textvariable=self.model_preset,
                              values=tuple(MOVING_CHECKPOINT_PRESETS), state='readonly', width=25)
         combo.pack(side='left', padx=4)
-        button = ttk.Button(row, text='모델 경로 적용', command=lambda: self.guard(self.apply_model_preset))
-        button.pack(side='left')
-        self.widgets.extend([combo, button])
+        combo.bind('<<ComboboxSelected>>', lambda _event: self.guard(self.apply_model_preset))
+        self.widgets.append(combo)
+        ttk.Checkbutton(row, text='파일 경로 확인 / 다른 파일 선택', variable=self.show_paths,
+                        command=self.toggle_path_details).pack(side='left', padx=8)
+        self.path_details = ttk.Frame(self)
         for label, var, choose in [('YOLO 모델', self.path, self.browse_yolo),
                                   ('고정 KF JSON', self.kalman_path, self.browse_kalman),
                                   ('SAC checkpoint 폴더', self.checkpoint, self.browse_checkpoint)]:
-            row = ttk.Frame(self); row.pack(fill='x', pady=2)
+            row = ttk.Frame(self.path_details); row.pack(fill='x', pady=2)
             ttk.Label(row, text=label, width=22).pack(side='left')
             entry = ttk.Entry(row, textvariable=var, width=75)
             entry.pack(side='left', fill='x', expand=True)
@@ -102,7 +106,7 @@ class MovingPanel(ttk.Frame):
         ttk.Label(self, text='사용자 종료 또는 연속 미검출 3초 → 학습·저장 → 시작점 복귀 → 다음 시작 대기').pack(anchor='w')
         ttk.Label(self, text='UAV는 QGC에서 직접 조종합니다. 다음 에피소드는 시작 버튼을 눌러야 실행됩니다.').pack(anchor='w')
         ttk.Label(self, textvariable=self.reward_text, wraplength=1120).pack(anchor='w')
-        self.status = tk.StringVar(value='확정 KF와 같은 설정으로 학습한 checkpoint를 선택하고 자동 준비를 누르세요.')
+        self.status = tk.StringVar(value='학습 시작 모델을 선택하고 자동 준비를 누르세요. YOLO·확정 KF는 기본값을 사용합니다.')
         self.progress = tk.StringVar(value='captures/M5-3/moving_<날짜_시각>/ · 원본 영상 · 에피소드 기록 · 학습 그래프')
         self.result_text = tk.StringVar()
         for var in (self.status, self.progress, self.result_text):
@@ -171,6 +175,12 @@ class MovingPanel(ttk.Frame):
         path = filedialog.askdirectory(title='manifest.json이 있는 이동 모델 episode 폴더 선택')
         if path: self.checkpoint.set(path)
 
+    def toggle_path_details(self):
+        if self.show_paths.get():
+            self.path_details.pack(fill='x', after=self.model_row)
+        else:
+            self.path_details.pack_forget()
+
     def apply_model_preset(self):
         if (self.active or self.work is not None or self.preparing is not None or self._start_requested
                 or self.run is not None and self.run.pending is not None):
@@ -183,8 +193,8 @@ class MovingPanel(ttk.Frame):
         self.checkpoint.set(str(MOVING_CHECKPOINT_PRESETS[selected]))
         self.kalman_path.set(str(DEFAULT_KALMAN_PATH))
         self.hardware_ready = self.previewing = False
-        self.reward_text.set('모델 경로 변경됨 · 자동 준비 후 저장된 보상 설정을 확인하세요.')
-        self.status.set(f'{selected} 경로 적용 · 자동 준비를 다시 누르세요. 파일이 없으면 모델 묶음을 먼저 풀어 주세요.')
+        self.reward_text.set('시작 모델 변경됨 · 자동 준비 후 저장된 보상 설정을 확인하세요.')
+        self.status.set(f'{selected} 선택됨 · 자동 준비를 누르세요. 모델 묶음은 프로젝트 폴더에 한 번 압축 해제해야 합니다.')
         self.lock()
 
     def start_values(self):
@@ -517,7 +527,7 @@ class MovingPanel(ttk.Frame):
                 if plots.get('errors'):
                     self.result_text.set(self.result_text.get()+' · 그래프 일부 실패 (원본 로그 유지)')
                 if report.get('checkpoint'):
-                    self.result_text.set(self.result_text.get()+' · 다음 재개 모델 경로 갱신됨')
+                    self.result_text.set(self.result_text.get()+' · 다음 에피소드는 방금 저장한 모델 사용')
                 self.run.saved()
                 if self.run.stop_requested or self.run.phase == 'error':
                     self.hardware_ready = self.previewing = False
