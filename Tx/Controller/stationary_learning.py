@@ -149,10 +149,10 @@ def checkpoint_info(path):
     if path.is_file():
         path = path.parent
     manifest = json.loads((path/'manifest.json').read_text(encoding='utf-8'))
-    from common.tx_moving import MOVING_SCHEMA, MovingConfig
+    from common.tx_moving import MOVING_SCHEMA, MOVING_TERMINAL_SCHEMA, MovingConfig
     if manifest.get('schema') == 'tx-moving-v1':
         raise ValueError('이전 tanh 정규화 이동 모델입니다. 원본 수집 데이터를 재처리하여 초기 모델을 다시 학습하세요.')
-    if manifest.get('schema') not in (SCHEMA, MOVING_SCHEMA):
+    if manifest.get('schema') not in (SCHEMA, MOVING_SCHEMA, MOVING_TERMINAL_SCHEMA):
         raise ValueError('지원되는 정지 8차원 / 이동 10차원 checkpoint가 아닙니다.')
     required = {'model.zip', 'replay.npz', 'state.json', 'rng.npz'}
     if set(manifest.get('files', {})) != required:
@@ -161,14 +161,63 @@ def checkpoint_info(path):
         if digest(path/name) != expected:
             raise ValueError('Checkpoint 무결성 불일치: '+name)
     state = json.loads((path/'state.json').read_text(encoding='utf-8'))
-    config_class = MovingConfig if manifest['schema'] == MOVING_SCHEMA else TrackingConfig
+    config_class = MovingConfig if manifest['schema'] in (MOVING_SCHEMA, MOVING_TERMINAL_SCHEMA) else TrackingConfig
     cfg = config_class(**state['tracking'])
     cfg.validate()
+    # Older v2 fixtures omitted the redundant state schema. An explicit
+    # disagreement is never accepted; the terminal-capable contract requires it.
+    if (state.get('schema', manifest['schema']) != manifest['schema']
+            or cfg.schema != manifest['schema']
+            or (manifest['schema'] == MOVING_TERMINAL_SCHEMA and 'schema' not in state)):
+        raise ValueError('Checkpoint schema와 보상·종료 계약이 일치하지 않습니다.')
     if state['checkpoint_id'] != manifest['checkpoint_id'] or state['sac'] != sac_settings(cfg):
         raise ValueError('모델·버퍼·설정 checkpoint 식별 불일치')
     if cfg.observation_size == 10 and state.get('normalization') != cfg.normalization:
         raise ValueError('이동 모델의 입력 정규화 정의가 일치하지 않습니다.')
+    if manifest['schema'] == MOVING_TERMINAL_SCHEMA:
+        for key in ('total_transitions', 'updates', 'executed_actions', 'episodes'):
+            if type(state.get(key)) is not int or state[key] < 0:
+                raise ValueError('Checkpoint 누적 카운터가 올바르지 않습니다: '+key)
+        with np.load(path/'replay.npz', allow_pickle=False) as data:
+            validate_replay(data, cfg, state['total_transitions'], SAC_SETTINGS['buffer_size'])
     return path, state, cfg
+
+
+def validate_replay(data, cfg, total_transitions, capacity):
+    """Check stored SB3 ring-buffer semantics before mutating a live learner."""
+    fields = ('observations', 'next_observations', 'actions', 'rewards', 'dones', 'timeouts')
+    if not set(fields+('capacity', 'total_transitions', 'pos', 'full')).issubset(data.files):
+        raise ValueError('Replay 구성 파일에 필요한 배열·메타데이터가 없습니다.')
+
+    def integer(name):
+        value = data[name]
+        if value.shape != () or value.dtype.kind not in 'iu' or int(value) < 0:
+            raise ValueError('Replay 정수 메타데이터 불일치: '+name)
+        return int(value)
+
+    if integer('capacity') != capacity or integer('total_transitions') != total_transitions:
+        raise ValueError('Replay 용량 또는 누적 transition 불일치')
+    full = data['full']
+    if full.shape != () or full.dtype.kind not in 'biu' or int(full) not in (0, 1):
+        raise ValueError('Replay full 플래그가 올바르지 않습니다.')
+    if integer('pos') != total_transitions % capacity or bool(full) != (total_transitions >= capacity):
+        raise ValueError('Replay 위치 불일치')
+    n = min(total_transitions, capacity)
+    shapes = dict(observations=(n, 1, cfg.observation_size),
+                  next_observations=(n, 1, cfg.observation_size), actions=(n, 1, 2),
+                  rewards=(n, 1), dones=(n, 1), timeouts=(n, 1))
+    for key, shape in shapes.items():
+        values = data[key]
+        if values.shape != shape or values.dtype.kind not in 'fbiu' or not np.isfinite(values).all():
+            raise ValueError('Replay 데이터 불일치: '+key)
+    if np.any(np.abs(data['actions']) > 1.+1e-6):
+        raise ValueError('Replay 정규화 action이 [-1,1] 범위를 벗어났습니다.')
+    dones, timeouts = data['dones'], data['timeouts']
+    if not np.isin(dones, (0, 1)).all() or not np.isin(timeouts, (0, 1)).all() or np.any(timeouts > dones):
+        raise ValueError('Replay 종료·timeout 플래그가 올바르지 않습니다.')
+    if np.any((dones == 1) & (timeouts == 0)) and getattr(cfg, 'loss_mode', 'exclude') != 'confirmed_missing_terminal':
+        raise ValueError('이전 보상 계약에는 실제 terminal transition을 넣을 수 없습니다.')
+    return n
 
 
 class SACLearner:
@@ -210,13 +259,22 @@ class SACLearner:
             return self.rng.uniform(-1, 1, 2).astype(np.float32)
         return self.policy.predict(obs, deterministic=self.mode == 'evaluate')[0]
 
-    def add(self, obs, action, reward, next_obs, truncated):
+    def add(self, obs, action, reward, next_obs, truncated, *, terminated=False):
         if self.mode == 'evaluate':
             return False
-        self.policy.replay_buffer.add(np.array(obs, dtype=np.float32)[None],
-                                     np.array(next_obs, dtype=np.float32)[None],
-                                     np.array(action, dtype=np.float32)[None],
-                                     np.array([reward]), np.array([truncated]),
+        if not isinstance(truncated, (bool, np.bool_)) or not isinstance(terminated, (bool, np.bool_)):
+            raise ValueError('Transition 종료 플래그는 bool이어야 합니다.')
+        if terminated and truncated:
+            raise ValueError('Transition은 terminal과 timeout을 동시에 가질 수 없습니다.')
+        if terminated and getattr(self.cfg, 'loss_mode', 'exclude') != 'confirmed_missing_terminal':
+            raise ValueError('확정 유실 보상 계약에서만 terminal transition을 저장할 수 있습니다.')
+        obs, next_obs, action = (np.asarray(value, dtype=np.float32) for value in (obs, next_obs, action))
+        if (obs.shape != (self.cfg.observation_size,) or next_obs.shape != obs.shape or action.shape != (2,)
+                or not all(np.isfinite(value).all() for value in (obs, next_obs, action))
+                or not math.isfinite(reward) or np.any(np.abs(action) > 1.+1e-6)):
+            raise ValueError('Transition의 관측·action·보상 값이 올바르지 않습니다.')
+        self.policy.replay_buffer.add(obs[None], next_obs[None], action[None],
+                                     np.array([reward]), np.array([terminated or truncated]),
                                      [{'TimeLimit.truncated': bool(truncated)}])
         self.total_transitions += 1
         self.policy.num_timesteps = self.total_transitions
@@ -305,16 +363,9 @@ class SACLearner:
     def restore_replay(self, path):
         buffer = self.policy.replay_buffer
         with np.load(path, allow_pickle=False) as data:
-            if int(data['capacity']) != buffer.buffer_size or int(data['total_transitions']) != self.total_transitions:
-                raise ValueError('Replay 용량 또는 누적 transition 불일치')
-            n = min(self.total_transitions, buffer.buffer_size)
-            expected_pos = self.total_transitions % buffer.buffer_size
-            if int(data['pos']) != expected_pos or bool(data['full']) != (self.total_transitions >= buffer.buffer_size):
-                raise ValueError('Replay 위치 불일치')
+            n = validate_replay(data, getattr(self, 'cfg', TrackingConfig()), self.total_transitions, buffer.buffer_size)
             for key in ('observations', 'next_observations', 'actions', 'rewards', 'dones', 'timeouts'):
                 target = getattr(buffer, key)
-                if data[key].shape != target[:n].shape or not np.isfinite(data[key]).all():
-                    raise ValueError('Replay 데이터 불일치: '+key)
                 target[:n] = data[key]
             buffer.pos, buffer.full = int(data['pos']), bool(data['full'])
 

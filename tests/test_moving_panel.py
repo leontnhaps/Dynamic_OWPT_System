@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from common.tx_moving import MovingConfig
 from common.tx_tracking import Sample
 from common.tx_setup import TX_CAMERA_SETTINGS
+from common.moving_paths import MOVING_CHECKPOINT_PRESETS, DEFAULT_KALMAN_PATH
 from Tx.Controller.moving_panel import MovingPanel
 from Tx.Controller.moving_core import MovingRunSettings
 
@@ -33,6 +34,8 @@ class MovingPanelTests(unittest.TestCase):
         p.path = Variable('captures/M5-3/yolo.pt')
         p.kalman_path = Variable('captures/M5-3/kf.json')
         p.checkpoint = Variable('captures/M5-3/checkpoint')
+        p.model_preset = Variable(next(iter(MOVING_CHECKPOINT_PRESETS)))
+        p.reward_text = Variable()
         p.mode = Variable('이어서 학습'); p.device = Variable('cpu'); p.sac_device = Variable('cpu')
         p.start_pan = Variable('0'); p.start_tilt = Variable('0'); p.start_note = Variable(); p.note = Variable()
         p.status = Variable(); p.progress = Variable(); p.result_text = Variable(); p.period_text = Variable()
@@ -58,6 +61,24 @@ class MovingPanelTests(unittest.TestCase):
             stop_requested=False, settings=MovingRunSettings(), **kwargs)
         r.command.tolist.return_value = [0,0]
         return r
+
+    def test_explicit_preset_selects_paired_model_and_requires_preparation(self):
+        for label, checkpoint in MOVING_CHECKPOINT_PRESETS.items():
+            with self.subTest(model=label):
+                p = self.panel(); p.hardware_ready = p.previewing = True
+                p.model_preset.set(label); p.apply_model_preset()
+                self.assertEqual(p.checkpoint.get(), str(checkpoint))
+                self.assertEqual(p.kalman_path.get(), str(DEFAULT_KALMAN_PATH))
+                self.assertFalse(p.hardware_ready); self.assertFalse(p.previewing)
+                with self.assertRaisesRegex(ValueError, '자동 준비'): p.check_prepared()
+                p.app.send.assert_not_called()
+
+    def test_model_preset_cannot_replace_an_active_episode(self):
+        p = self.panel(); p.run = self.fake_run()
+        old = p.checkpoint.get()
+        with self.assertRaisesRegex(ValueError, '먼저 종료'): p.apply_model_preset()
+        self.assertEqual(p.checkpoint.get(), old)
+        p.run.abort.assert_not_called(); p.app.send.assert_not_called()
 
     def test_startpoint_change_during_tracking_is_applied_without_sending_move(self):
         p = self.panel(); p.run = self.fake_run()

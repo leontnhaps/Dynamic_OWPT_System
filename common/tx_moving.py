@@ -3,7 +3,7 @@
 Calibration is supplied by an experiment, never inferred from these defaults.
 Angles inside the filter are radians in the fixed Tx frame, not servo feedback.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 import hashlib
 import json
 import math
@@ -12,6 +12,7 @@ import numpy as np
 from common.tx_tracking import TrackingConfig, observation
 
 MOVING_SCHEMA = 'tx-moving-v2'
+MOVING_TERMINAL_SCHEMA = 'tx-moving-v3'
 KALMAN_SCHEMA = 'tx-bearing-kalman-v1'
 
 
@@ -44,6 +45,10 @@ class MovingConfig(TrackingConfig):
     pan_max: int = 90
     pan_delta_deg: float = 90.
     tilt_delta_deg: float = 5.
+    visible_bonus: float = 0.
+    loss_mode: str = 'exclude'
+    loss_pan_weight: float = 10.
+    loss_base: float = 0.
 
     @property
     def action_scale(self):
@@ -60,7 +65,7 @@ class MovingConfig(TrackingConfig):
 
     @property
     def schema(self):
-        return MOVING_SCHEMA
+        return MOVING_TERMINAL_SCHEMA if self.loss_mode == 'confirmed_missing_terminal' else MOVING_SCHEMA
 
     @property
     def learning_starts(self):
@@ -80,13 +85,36 @@ class MovingConfig(TrackingConfig):
                            'predicted_delta_alpha_deg', 'predicted_delta_beta_deg'])
 
     def validate(self, *, evaluation=False):
-        super().validate(evaluation=evaluation)
+        # TrackingConfig checks every dataclass value for finite numbers; the
+        # moving loss policy is a string, so validate its numeric base separately.
+        TrackingConfig(**{field.name: getattr(self, field.name) for field in fields(TrackingConfig)}).validate(
+            evaluation=evaluation)
         if not -90 <= self.pan_min < self.pan_max <= 90:
             raise ValueError('이동 학습의 Pan 운용 범위는 -90~90° 안이어야 합니다.')
         if not -15 <= self.tilt_min < self.tilt_max <= 40:
             raise ValueError('이동 학습의 Tilt 운용 범위는 -15~40° 안이어야 합니다.')
         if (self.pan_delta_deg, self.tilt_delta_deg) != (90, 5):
             raise ValueError('이동 SAC의 요청 이동량은 Pan ±90° / Tilt ±5°입니다.')
+        if self.loss_mode not in ('exclude', 'confirmed_missing_terminal'):
+            raise ValueError('지원하지 않는 이동 표적 유실 보상 모드입니다.')
+        for name in ('visible_bonus', 'loss_pan_weight', 'loss_base'):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError(f'{name}: 유한한 0 이상의 보상 계수가 필요합니다.')
+
+
+def moving_visible_reward(error_px, intensity_mean, cfg):
+    """Keep the calibrated tracking terms and add the saved detection bonus."""
+    if not math.isfinite(error_px) or error_px < 0 or not math.isfinite(intensity_mean):
+        raise ValueError('검출 보상에 유한한 오차와 세기 값이 필요합니다.')
+    return -cfg.error_weight*error_px/cfg.reward_distance+cfg.aim_weight*intensity_mean+cfg.visible_bonus
+
+
+def moving_loss_reward(requested_pan_deg, cfg):
+    """Penalize the requested relative Pan motion only on confirmed target loss."""
+    if not math.isfinite(requested_pan_deg) or abs(requested_pan_deg) > cfg.pan_delta_deg+1e-6:
+        raise ValueError('유실 보상의 Pan 요청 이동량이 유효 범위를 벗어났습니다.')
+    return -cfg.loss_base-cfg.loss_pan_weight*abs(requested_pan_deg)/90.
 
 
 def moving_observation(sample, command, previous_delta, previous_error,

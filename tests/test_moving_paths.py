@@ -9,7 +9,7 @@ import unittest
 
 from common.model_paths import REPOSITORY_ROOT
 from common.moving_paths import (DEFAULT_KALMAN_PATH, DEFAULT_MOVING_CHECKPOINT_PATH,
-                                 load_moving_inputs, resolve_kalman_path,
+                                 MOVING_CHECKPOINT_PRESETS, load_moving_inputs, resolve_kalman_path,
                                  resolve_moving_checkpoint_path)
 from common.tx_bearing import BEARING_MODEL
 from common.tx_moving import MovingConfig
@@ -58,6 +58,9 @@ class MovingPathsTests(unittest.TestCase):
                          REPOSITORY_ROOT / 'captures/M5-3/episode')
         self.assertEqual(resolve_kalman_path(self.kalman_path), self.kalman_path)
         self.assertEqual(resolve_moving_checkpoint_path(self.folder), self.folder)
+        self.assertEqual(len(MOVING_CHECKPOINT_PRESETS), 3)
+        self.assertEqual(DEFAULT_MOVING_CHECKPOINT_PATH,
+                         REPOSITORY_ROOT / 'captures/M5-3/resume_models_20261116/01_real308/checkpoint')
 
     def test_complete_checkpoint_retains_saved_config_and_kf(self):
         result = self.load()

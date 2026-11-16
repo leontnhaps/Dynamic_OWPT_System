@@ -10,7 +10,7 @@ from tkinter import ttk, filedialog, messagebox
 
 from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 from common.moving_paths import (DEFAULT_KALMAN_PATH, DEFAULT_MOVING_CHECKPOINT_PATH,
-    resolve_kalman_path, resolve_moving_checkpoint_path, load_moving_inputs)
+    MOVING_CHECKPOINT_PRESETS, resolve_kalman_path, resolve_moving_checkpoint_path, load_moving_inputs)
 from common.tx_tracking import Sample, invalid_reason
 from common.tx_bearing import BEARING_MODEL
 from common.tx_setup import TX_CAMERA_SETTINGS
@@ -44,6 +44,8 @@ class MovingPanel(ttk.Frame):
         self.path = tk.StringVar(value=str(DEFAULT_YOLO_PATH))
         self.kalman_path = tk.StringVar(value=str(DEFAULT_KALMAN_PATH))
         self.checkpoint = tk.StringVar(value=str(DEFAULT_MOVING_CHECKPOINT_PATH))
+        self.model_preset = tk.StringVar(value=next(iter(MOVING_CHECKPOINT_PRESETS)))
+        self.reward_text = tk.StringVar(value='보상 설정은 선택한 모델을 자동 준비한 뒤 표시합니다.')
         self.mode = tk.StringVar(value='이어서 학습')
         self.device = tk.StringVar(value='cuda')
         self.sac_device = tk.StringVar(value='cpu')
@@ -52,6 +54,14 @@ class MovingPanel(ttk.Frame):
         self.start_tilt = tk.StringVar(value='0')
         self.start_note = tk.StringVar(value='시작점: Pan 0°, Tilt 0° · 변경 후 적용을 누르세요.')
         self.note = tk.StringVar()
+        row = ttk.Frame(self); row.pack(fill='x', pady=2)
+        ttk.Label(row, text='저장한 시작 모델', width=22).pack(side='left')
+        combo = ttk.Combobox(row, textvariable=self.model_preset,
+                             values=tuple(MOVING_CHECKPOINT_PRESETS), state='readonly', width=25)
+        combo.pack(side='left', padx=4)
+        button = ttk.Button(row, text='모델 경로 적용', command=lambda: self.guard(self.apply_model_preset))
+        button.pack(side='left')
+        self.widgets.extend([combo, button])
         for label, var, choose in [('YOLO 모델', self.path, self.browse_yolo),
                                   ('고정 KF JSON', self.kalman_path, self.browse_kalman),
                                   ('SAC checkpoint 폴더', self.checkpoint, self.browse_checkpoint)]:
@@ -91,6 +101,7 @@ class MovingPanel(ttk.Frame):
         ttk.Button(row, text='결과 폴더 확인', command=self.show_folder).pack(side='left', padx=3)
         ttk.Label(self, text='사용자 종료 또는 연속 미검출 3초 → 학습·저장 → 시작점 복귀 → 다음 시작 대기').pack(anchor='w')
         ttk.Label(self, text='UAV는 QGC에서 직접 조종합니다. 다음 에피소드는 시작 버튼을 눌러야 실행됩니다.').pack(anchor='w')
+        ttk.Label(self, textvariable=self.reward_text, wraplength=1120).pack(anchor='w')
         self.status = tk.StringVar(value='확정 KF와 같은 설정으로 학습한 checkpoint를 선택하고 자동 준비를 누르세요.')
         self.progress = tk.StringVar(value='captures/M5-3/moving_<날짜_시각>/ · 원본 영상 · 에피소드 기록 · 학습 그래프')
         self.result_text = tk.StringVar()
@@ -159,6 +170,22 @@ class MovingPanel(ttk.Frame):
     def browse_checkpoint(self):
         path = filedialog.askdirectory(title='manifest.json이 있는 이동 모델 episode 폴더 선택')
         if path: self.checkpoint.set(path)
+
+    def apply_model_preset(self):
+        if (self.active or self.work is not None or self.preparing is not None or self._start_requested
+                or self.run is not None and self.run.pending is not None):
+            raise ValueError('현재 에피소드·저장·준비 작업을 먼저 종료하세요.')
+        selected = self.model_preset.get()
+        if selected not in MOVING_CHECKPOINT_PRESETS:
+            raise ValueError('저장한 시작 모델 3개 중 하나를 선택하세요.')
+        # Only explicit application returns to a selected starting model. Normal
+        # episode saves continue from the newly trained checkpoint instead.
+        self.checkpoint.set(str(MOVING_CHECKPOINT_PRESETS[selected]))
+        self.kalman_path.set(str(DEFAULT_KALMAN_PATH))
+        self.hardware_ready = self.previewing = False
+        self.reward_text.set('모델 경로 변경됨 · 자동 준비 후 저장된 보상 설정을 확인하세요.')
+        self.status.set(f'{selected} 경로 적용 · 자동 준비를 다시 누르세요. 파일이 없으면 모델 묶음을 먼저 풀어 주세요.')
+        self.lock()
 
     def start_values(self):
         try:
@@ -336,13 +363,15 @@ class MovingPanel(ttk.Frame):
         settings = self.settings(); settings.validate(self.cfg)
         if self.run is None:
             folder = self.app.stage_dir('M5-3')/('moving_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
-            config = dict(schema='tx-moving-run-v1', checkpoint_schema=self.cfg.schema,
+            config = dict(schema='tx-moving-run-v2', checkpoint_schema=self.cfg.schema,
                 tracking=asdict(self.cfg), run=asdict(settings), sac=sac_settings(self.cfg),
                 model=self.identity, kalman=self.kalman, normalization=self.cfg.normalization,
                 bearing_model=BEARING_MODEL, target_selection=TARGET_SELECTION,
                 camera=TX_CAMERA_SETTINGS, initial_camera_metadata=frame[1],
                 episode_policy='manual start; manual end or continuous missing; update and return; no auto restart',
-                metrics='post-action valid observations; missing data are not zero reward',
+                metrics='visible observations for pointing metrics; stored transitions for reward and updates',
+                loss_policy=dict(mode=self.cfg.loss_mode, pan_weight=self.cfg.loss_pan_weight,
+                                 base=self.cfg.loss_base, confirmation_s=settings.missing_s),
                 hardware_validated=False, actual_angle_feedback=False)
             self.log = MovingRunLog(folder, config)
             self.run = MovingRun(self.cfg, settings, self.learner, self.log, self.send, time.monotonic, self.kalman)
@@ -468,6 +497,9 @@ class MovingPanel(ttk.Frame):
                     self.detector, self.learner, inputs, self.identity = loaded
                     self.cfg, self.kalman = inputs.cfg, inputs.kalman
                     self.period_text.set(f'저장 모델 주기 {self.cfg.dt:.3f} s')
+                    loss = ('유실 확정 시 Pan 요청 크기에 비례한 벌점'
+                            if self.cfg.loss_mode == 'confirmed_missing_terminal' else '미검출 경험 제외')
+                    self.reward_text.set(f'검출 추가 보상 {self.cfg.visible_bonus:+g} · {loss}')
                     self.prepare_hardware()
             else:
                 try:

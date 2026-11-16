@@ -13,7 +13,7 @@ import numpy as np
 from Tx.Controller.stationary_learning import RunLog, json_value
 
 
-LOG_SCHEMA = 'm5-3-moving-live-v1'
+LOG_SCHEMA = 'm5-3-moving-live-v2'
 
 
 def _finite_json(value, invalid, path='$'):
@@ -49,6 +49,8 @@ class MovingRunLog(RunLog):
     # Copy each list: M3's schema and API must not change.
     fields = {name: list(fields) for name, fields in RunLog.fields.items()}
     fields['episodes'] += ['reward_sum', 'reward_mean', 'reward_count']
+    fields['steps'] += ['reward_visible_bonus', 'reward_loss', 'next_observation_kind',
+                        'loss_first_frame_id', 'loss_confirmed_frame_id', 'loss_wait_s']
 
     def __init__(self, folder, config):
         super().__init__(folder, dict(config, moving_log_schema=LOG_SCHEMA))

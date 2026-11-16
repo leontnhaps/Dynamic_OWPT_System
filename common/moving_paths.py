@@ -10,9 +10,13 @@ from Tx.Controller.stationary_learning import checkpoint_info
 
 DEFAULT_KALMAN_PATH = (REPOSITORY_ROOT / 'captures' / 'M5-3' / 'kf_final_20261113'
                        / 'kf_receive_time.json')
-DEFAULT_MOVING_CHECKPOINT_PATH = (REPOSITORY_ROOT / 'captures' / 'M5-3'
-                                  / 'pretraining_20261112_011543_363660' / 'checkpoints'
-                                  / 'episode_000013_318791cd')
+MOVING_MODEL_ROOT = REPOSITORY_ROOT / 'captures' / 'M5-3' / 'resume_models_20261116'
+MOVING_CHECKPOINT_PRESETS = {
+    '① 실제 경험 308개': MOVING_MODEL_ROOT / '01_real308' / 'checkpoint',
+    '② 시뮬레이션 10k': MOVING_MODEL_ROOT / '02_sim10k' / 'checkpoint',
+    '③ 시뮬레이션 20k': MOVING_MODEL_ROOT / '03_sim20k' / 'checkpoint',
+}
+DEFAULT_MOVING_CHECKPOINT_PATH = next(iter(MOVING_CHECKPOINT_PRESETS.values()))
 
 
 def _resolve(value, default):

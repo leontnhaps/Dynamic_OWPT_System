@@ -36,12 +36,14 @@ class Learner:
         self.episodes, self.updates, self.executed_actions = 13, 120, 120
         self.cancel = threading.Event()
         self.transitions = []
+        self.terminal_flags = []
         self.action = Mock(return_value=np.zeros(2))
 
-    def add(self, obs, action, reward, next_obs, truncated):
+    def add(self, obs, action, reward, next_obs, truncated, *, terminated=False):
         if self.mode == 'evaluate':
             return False
         self.transitions.append((obs.copy(), list(action), reward, next_obs.copy(), truncated))
+        self.terminal_flags.append(terminated)
         return True
 
 
@@ -377,6 +379,187 @@ class MovingRunTests(unittest.TestCase):
                         dict(start_tilt=float('nan')), dict(missing_s=4), dict(updates_per_transition=-1)):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 replace(self.settings, **changes).validate(self.cfg)
+
+
+class MovingLossRewardTests(unittest.TestCase):
+    ack = MovingRunTests.ack
+    supply = MovingRunTests.supply
+    begin = MovingRunTests.begin
+    action = MovingRunTests.action
+    result = MovingRunTests.result
+    returned = MovingRunTests.returned
+
+    def setUp(self):
+        MovingRunTests.setUp(self)
+        self.cfg = replace(self.cfg, visible_bonus=1., loss_mode='confirmed_missing_terminal')
+        self.run = MovingRun(self.cfg, self.settings, self.learner, self.log,
+            lambda command:self.commands.append(command) or True, self.clock, kalman_config())
+        self.learner.action.return_value = np.array([.304, 0.])
+
+    def confirm_loss(self):
+        # Fresh eligible evidence throughout the unchanged three-second window.
+        for i in range(6):
+            self.clock.advance(.501 if i == 5 else .5)
+            self.supply(None)
+            self.run.tick()
+
+    def step_rows(self):
+        return [call.args[1] for call in self.log.row.call_args_list if call.args[0] == 'steps']
+
+    def test_visible_bonus_uses_original_pointing_reward_and_timeout_boundary(self):
+        self.begin(); self.action(); self.result(); self.run.manual_end()
+        row = self.step_rows()[-1]
+        self.assertAlmostEqual(row['reward'], row['reward_error']+row['reward_aim']+1.)
+        self.assertEqual(row['reward_visible_bonus'], 1.)
+        self.assertEqual(row['reward_loss'], 0.)
+        self.assertEqual(row['next_observation_kind'], 'measured')
+        self.assertEqual(self.learner.terminal_flags, [False])
+        self.assertTrue(self.learner.transitions[0][-1])
+
+    def test_confirmed_loss_stores_original_action_once_without_fake_measurements(self):
+        self.begin(); before = self.run.obs.copy(); self.action(); self.result(None)
+        self.assertEqual(self.learner.transitions, [])
+        self.assertEqual(self.run.excluded, 0)
+        count = len(self.commands)
+        self.confirm_loss()
+        self.assertEqual(self.run.phase, 'saving')
+        self.assertEqual(len(self.commands), count)
+        self.assertEqual(len(self.learner.transitions), 1)
+        transition = self.learner.transitions[0]
+        np.testing.assert_array_equal(transition[0], before)
+        np.testing.assert_array_equal(transition[1], [.304, 0.])
+        self.assertAlmostEqual(transition[2], -3.04)  # 27.36 requested, 27 applied.
+        np.testing.assert_array_equal(transition[3], np.zeros(10))
+        self.assertFalse(transition[-1]); self.assertEqual(self.learner.terminal_flags, [True])
+        row = self.step_rows()[-1]
+        self.assertFalse(row['valid']); self.assertTrue(row['stored'])
+        self.assertIsNone(row['next_observation'])
+        self.assertEqual(row['next_observation_kind'], 'terminal_placeholder')
+        self.assertEqual(row['exclusion_reason'], 'confirmed_target_lost')
+        for field in ('error_px', 'intensity_mean', 'pixel_count', 'u', 'v'):
+            self.assertNotIn(field, row)
+        self.assertIsNone(row['reward_error']); self.assertIsNone(row['reward_aim'])
+        summary = self.run.save_request
+        self.assertEqual(summary['new_transitions'], 1)
+        self.assertEqual(summary['valid_results'], 0)
+        self.assertEqual(summary['executed_actions'], 1)
+        self.assertEqual(summary['excluded_transitions'], 0)
+        self.assertEqual(summary['reward_count'], 1)
+        self.assertAlmostEqual(summary['reward_sum'], -3.04)
+        self.assertTrue(summary['terminated']); self.assertFalse(summary['truncated'])
+        self.run.tick(); self.run.finish('target_lost')
+        self.assertEqual(len(self.learner.transitions), 1)
+        self.returned()
+        self.clock.advance(20); self.run.tick()
+        self.assertEqual(len(self.commands), count+1)
+
+    def test_recovery_discards_failed_action_and_does_not_bridge_gap(self):
+        self.begin(); self.action(); self.result(None)
+        self.clock.advance(.2); self.supply((706, 384)); self.run.tick()
+        self.assertEqual(self.run.phase, 'ready')
+        self.assertIsNone(self.run.pending_loss)
+        self.assertEqual(self.run.excluded, 1)
+        self.assertEqual(self.learner.transitions, [])
+        np.testing.assert_array_equal(self.run.raw[2:4], [0., 0.])
+        self.action(); self.result(); self.run.manual_end()
+        self.assertEqual(len(self.learner.transitions), 1)
+        self.assertEqual(self.learner.terminal_flags, [False])
+
+    def test_missing_evidence_gap_cannot_be_repaired_by_late_missing_frame(self):
+        self.begin(); self.action(); self.result(None)
+        self.clock.advance(3.01); self.supply(None); self.run.tick()
+        self.assertEqual(self.run.save_request['reason'], 'target_lost')
+        self.assertEqual(self.learner.transitions, [])
+        self.assertFalse(self.run.save_request['terminated'])
+        self.assertEqual(self.step_rows()[-1]['exclusion_reason'], 'missing_evidence_gap')
+
+    def test_stale_or_invalid_missing_evidence_never_becomes_terminal(self):
+        cases = [('stale', {}, {}, self.cfg.dt+.01),
+                 ('camera_configuration', {'width': 0}, {}, .1),
+                 ('frame_command_mismatch', {}, {'commanded': {}}, .1)]
+        for expected, changes, metadata, delay in cases:
+            with self.subTest(expected=expected):
+                self.setUp(); self.begin(); self.action(); self.result(None)
+                self.clock.advance(delay)
+                if expected != 'stale':
+                    self.supply(None, metadata_changes=metadata, **changes)
+                self.run.tick()
+                self.assertIsNone(self.run.pending_loss)
+                self.assertEqual(self.step_rows()[-1]['exclusion_reason'], expected)
+                self.confirm_loss()
+                self.assertEqual(self.learner.transitions, [])
+
+    def test_transport_error_and_manual_end_discard_pending_failure(self):
+        for end in ('manual', 'connection_lost', 'user_stop'):
+            with self.subTest(end=end):
+                self.setUp(); self.begin(); self.action(); self.result(None)
+                if end == 'manual':
+                    self.run.manual_end()
+                else:
+                    self.run.abort(end)
+                self.assertEqual(self.run.phase, 'saving')
+                self.assertEqual(self.learner.transitions, [])
+                self.assertIsNone(self.run.pending_loss)
+                self.assertFalse(self.run.save_request['terminated'])
+
+    def test_manual_end_during_action_never_creates_loss_candidate(self):
+        self.begin(); self.action(); self.run.manual_end(); self.result(None)
+        self.assertIsNone(self.run.pending_loss)
+        self.assertEqual(self.learner.transitions, [])
+        self.assertEqual(self.run.save_request['reason'], 'manual_episode_end')
+
+    def test_initial_missing_and_ready_phase_missing_have_no_causal_action(self):
+        self.run.start(); self.ack()
+        self.clock.advance(2.01); self.supply(None); self.run.tick()
+        self.confirm_loss()
+        self.assertEqual(self.run.save_request['reason'], 'initial_target_lost')
+        self.assertEqual(self.learner.transitions, [])
+        self.setUp(); self.begin()
+        self.clock.advance(.1); self.supply(None); self.run.tick(); self.confirm_loss()
+        self.assertEqual(self.run.save_request['reason'], 'target_lost')
+        self.assertEqual(self.learner.transitions, [])
+        self.assertEqual(self.run.save_request['executed_actions'], 0)
+
+    def test_late_first_missing_result_is_excluded_not_attributed_to_action(self):
+        self.begin(); self.action()
+        self.clock.now = self.run.result_deadline+.01
+        self.supply(None); self.run.tick(); self.confirm_loss()
+        self.assertEqual(self.learner.transitions, [])
+        self.assertFalse(self.run.save_request['terminated'])
+
+    def test_invalid_kalman_result_never_creates_terminal_loss(self):
+        self.begin(); self.action()
+        with patch('Tx.Controller.moving_core.moving_observation', side_effect=PredictionInputError('invalid')):
+            self.result()
+        self.confirm_loss()
+        self.assertEqual(self.learner.transitions, [])
+        self.assertEqual(self.step_rows()[-1]['exclusion_reason'], 'invalid_kalman_prediction')
+
+    def test_evaluation_logs_terminal_reward_without_storing_replay(self):
+        self.learner.mode = 'evaluate'
+        self.begin(); self.action(); self.result(None); self.confirm_loss()
+        self.assertEqual(self.learner.transitions, [])
+        self.assertEqual(self.run.save_request['new_transitions'], 0)
+        self.assertEqual(self.run.save_request['reward_count'], 1)
+        self.assertTrue(self.step_rows()[-1]['terminated'])
+        self.assertFalse(self.step_rows()[-1]['stored'])
+
+    def test_terminal_log_failure_cannot_duplicate_replay_when_aborted(self):
+        self.begin(); self.action(); self.result(None)
+        self.log.row.side_effect = OSError('disk full')
+        with self.assertRaises(OSError):
+            self.confirm_loss()
+        self.assertEqual(len(self.learner.transitions), 1)
+        self.assertIsNone(self.run.pending_loss)
+        self.run.abort('logging_failed')
+        self.assertEqual(len(self.learner.transitions), 1)
+        self.assertEqual(self.run.save_request['new_transitions'], 1)
+
+    def test_zero_pan_request_loss_is_zero_without_changing_terminal_semantics(self):
+        self.learner.action.return_value = np.array([0., 1.])
+        self.begin(); self.action(); self.result(None); self.confirm_loss()
+        self.assertEqual(self.learner.transitions[0][2], 0.)
+        self.assertEqual(self.learner.terminal_flags, [True])
 
 
 if __name__ == '__main__':

@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import numpy as np
 from common.tx_bearing import BEARING_MODEL
 from common.moving_paths import DEFAULT_KALMAN_PATH, resolve_kalman_path
-from common.tx_moving import MovingConfig, BearingKalman, PredictionInputError, load_kalman_config, moving_observation
+from common.tx_moving import (MovingConfig, BearingKalman, PredictionInputError,
+                              load_kalman_config, moving_observation, moving_visible_reward)
 from common.tx_tracking import BeamMap, observation
 from Tx.Controller.stationary_learning import SACLearner, RunLog, digest, dump
 
@@ -58,7 +59,7 @@ one frozen KF configuration. No future-frame smoothing is used as input.
         error = float(np.linalg.norm(raw[:2]))
         record.update(raw8=raw.tolist(), normalized8=normalized.tolist(), error_px=error,
                       intensity_mean=intensity, hit_23px=error <= self.cfg.hit_px,
-                      reward=-self.cfg.error_weight*error/self.cfg.reward_distance+self.cfg.aim_weight*intensity)
+                      reward=moving_visible_reward(error, intensity, self.cfg))
         state_valid = (np.isfinite(raw).all() and np.all(command >= self.cfg.low)
                        and np.all(command <= self.cfg.high) and np.all(np.abs(delta) <= self.cfg.action_scale)
                        and row.get('width') == self.cfg.width and row.get('height') == self.cfg.height

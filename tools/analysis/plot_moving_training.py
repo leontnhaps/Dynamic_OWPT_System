@@ -109,8 +109,8 @@ def generate_plots(folder):
 
         plots = {
             'episode_rewards.png': [
-                episode_panel([('reward_sum', 'Valid reward sum')], 'Reward sum', 'Episode valid reward sum'),
-                episode_panel([('reward_mean', 'Valid reward mean')], 'Reward mean', 'Episode valid reward mean')],
+                episode_panel([('reward_sum', 'Recorded reward sum')], 'Reward sum', 'Episode recorded reward sum'),
+                episode_panel([('reward_mean', 'Recorded reward mean')], 'Reward mean', 'Episode recorded reward mean')],
             'episode_error.png': [episode_panel([('rms_px', 'RMS'), ('p95_px', '95th percentile')],
                                                 'Pixel error (px)', 'Episode measured tracking error')],
             'episode_ratios.png': [episode_panel([('hit_ratio', 'Hit ratio'), ('valid_ratio', 'Valid result ratio')],
@@ -126,7 +126,7 @@ def generate_plots(folder):
                 report['files'].append(str(graphs/name))
             except Exception as exc:
                 report['errors'].append(f'{name}: {type(exc).__name__}: {exc}')
-        manifest = dict(schema='m5-3-moving-graphs-v1', generated_utc=datetime.now(timezone.utc).isoformat(),
+        manifest = dict(schema='m5-3-moving-graphs-v2', generated_utc=datetime.now(timezone.utc).isoformat(),
                         sources={'episodes.csv': len(episodes), 'updates.csv': len(updates)},
                         measured_counts={key: sum(math.isfinite(x) and math.isfinite(y)
                             for x, y in zip(*_series(rows, x_key, key)))
@@ -134,8 +134,10 @@ def generate_plots(folder):
                                 ('reward_sum', 'reward_mean', 'rms_px', 'p95_px', 'hit_ratio', 'valid_ratio')),
                                 (updates, 'update', ('actor_loss', 'critic_loss', 'alpha', 'alpha_loss'))]
                             for key in keys},
-                        note='Missing/nonfinite metrics remain gaps, not zero. Rewards summarize valid results only; '
-                             'loss changes alone do not establish policy convergence or hardware tracking performance.',
+                        note='Missing/nonfinite metrics remain gaps, not zero. Recorded rewards include valid visible '
+                             'results and any confirmed terminal target losses, including evaluation rewards without '
+                             'replay storage. Tracking error and valid-result ratios use measured detections only. '
+                             'Loss changes alone do not establish policy convergence or hardware tracking performance.',
                         files=[Path(name).name for name in report['files']], errors=list(report['errors']))
         temp = graphs/f'.manifest.{uuid.uuid4().hex}.tmp'
         try:

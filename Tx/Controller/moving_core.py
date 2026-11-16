@@ -5,7 +5,8 @@ import uuid
 import numpy as np
 
 from common.tx_bearing import commanded_bearing
-from common.tx_moving import BearingKalman, PredictionInputError, moving_observation
+from common.tx_moving import (BearingKalman, PredictionInputError, moving_observation,
+                              moving_visible_reward, moving_loss_reward)
 from common.tx_tracking import BeamMap, EpisodeMetrics, action_command, invalid_reason
 
 
@@ -54,6 +55,8 @@ class MovingRun:
         self.stop_requested = False
         self.end_requested = None
         self.inflight = self.buffered = None
+        self.pending_loss = None
+        self.loss_terminated = False
         self.steps = self.new_transitions = self.excluded = 0
         self.metrics = self.initial = None
         self.rewards = []
@@ -83,6 +86,8 @@ class MovingRun:
         self.episode = max(self.episode, int(getattr(self.learner, 'episodes', 0)))+1
         self.steps = self.new_transitions = self.excluded = 0
         self.metrics = self.initial = self.inflight = self.buffered = None
+        self.pending_loss = None
+        self.loss_terminated = False
         self.previous_error = None
         self.previous_delta = np.zeros(2)
         self.previous_frame = self.last_kf_frame = -1
@@ -328,7 +333,20 @@ class MovingRun:
                 reason = self.observe()
             if reason:
                 self.flush_transition(truncated=True)
-                self.discard(reason, now)
+                # Only a timely, fresh post-command detection result can be
+                # attributed to this action. Communication/observation failures
+                # and delayed unknown outcomes never become target-loss data.
+                if (reason == 'missing' and self.cfg.loss_mode == 'confirmed_missing_terminal'
+                        and not self.end_requested and not self.stop_requested
+                        and self.latest.received <= self.result_deadline):
+                    self.pending_loss = dict(action=self.inflight,
+                        first_frame_id=self.latest.frame_id,
+                        last_frame_id=self.latest.frame_id, last_receive_s=self.latest.received)
+                    self.inflight = None
+                    self.event('target_loss_pending', step=self.pending_loss['action']['step'],
+                               frame_id=self.latest.frame_id)
+                else:
+                    self.discard(reason, now)
                 if self.end_requested:
                     self._finish_now(self.end_requested)
                 else:
@@ -337,12 +355,14 @@ class MovingRun:
             intensity, pixels = self.beam.mean(self.latest.target['box'])
             error = float(np.linalg.norm(self.raw[:2]))
             r_error, r_aim = -error/self.cfg.reward_distance, intensity
-            reward = self.cfg.error_weight*r_error+self.cfg.aim_weight*r_aim
+            reward = moving_visible_reward(error, intensity, self.cfg)
             self.flush_transition(truncated=False)
             row = dict(self.inflight, **self.row_sample(self.latest), result_s=now,
                 result_age_s=now-self.latest.received, next_observation=self.raw.tolist(), next_normalized=self.obs.tolist(),
                 error_px=error, intensity_mean=intensity, pixel_count=pixels, reward_error=r_error,
-                reward_aim=r_aim, reward=reward, valid=True, exclusion_reason=None, terminated=False)
+                reward_aim=r_aim, reward_visible_bonus=self.cfg.visible_bonus, reward_loss=0.,
+                reward=reward, valid=True, exclusion_reason=None, terminated=False,
+                next_observation_kind='measured')
             self.buffered = (before, self.inflight['action'], reward, self.obs.copy(), row)
             self.metrics.result(error, intensity, now)
             self.rewards.append(reward)
@@ -353,6 +373,7 @@ class MovingRun:
             return
         if self.phase == 'missing':
             reason = self.sample_reason(now)
+            self.check_pending_loss(reason, now)
             deadline = self.missing_since+self.settings.missing_s
             if now >= deadline and (reason or self.latest.received >= deadline):
                 if reason in (None, 'missing', 'invalid_box', 'empty_pixel_region', 'invalid_kalman_prediction'):
@@ -396,10 +417,65 @@ class MovingRun:
         self.buffered = None
         self.log.row('steps', dict(row, stored=stored, truncated=truncated))
 
+    def check_pending_loss(self, reason, now):
+        """Require a continuing stream of eligible missing frames, not a timeout.
+
+        The same frame can remain current for at most the existing freshness
+        interval. A missing-frame gap greater than that interval breaks the
+        causal evidence; later reacquisition is never paired with this action.
+        """
+        pending = self.pending_loss
+        if pending is None:
+            return
+        if reason != 'missing':
+            self.discard_pending_loss(reason or 'reacquired_after_missing', now)
+            return
+        sample = self.latest
+        if sample.frame_id != pending['last_frame_id']:
+            interval = sample.received-pending['last_receive_s']
+            if not 0 < interval <= self.cfg.dt:
+                self.discard_pending_loss('missing_evidence_gap', now)
+                return
+            pending.update(last_frame_id=sample.frame_id, last_receive_s=sample.received)
+
+    def confirm_pending_loss(self, now):
+        """Store one true terminal with a masked, explicitly unmeasured state."""
+        pending = self.pending_loss
+        if pending is None:
+            return
+        row = pending['action']
+        reward = moving_loss_reward(row['action_degrees'][0], self.cfg)
+        after = np.zeros(self.cfg.observation_size, dtype=np.float32)
+        stored = self.learner.add(np.asarray(row['normalized'], dtype=np.float32),
+            row['action'], reward, after, False, terminated=True)
+        self.new_transitions += int(stored)
+        self.rewards.append(reward)
+        # Clear before logging so an abort caused by a failed disk write cannot
+        # insert the same terminal transition twice.
+        self.pending_loss = None
+        self.loss_terminated = True
+        self.log.row('steps', dict(row, **self.row_sample(self.latest), result_s=now,
+            result_age_s=now-self.latest.received, valid=False, stored=stored,
+            exclusion_reason='confirmed_target_lost', terminated=True, truncated=False,
+            next_observation=None, next_normalized=after.tolist(),
+            next_observation_kind='terminal_placeholder', reward_error=None, reward_aim=None,
+            reward_visible_bonus=0., reward_loss=reward, reward=reward,
+            loss_first_frame_id=pending['first_frame_id'], loss_confirmed_frame_id=self.latest.frame_id,
+            loss_wait_s=now-self.missing_since))
+
+    def discard_pending_loss(self, reason, now):
+        if self.pending_loss is None:
+            return
+        pending, self.pending_loss = self.pending_loss, None
+        self.discard_action(pending['action'], reason, now)
+
     def discard(self, reason, now):
         if self.inflight is None:
             return
         inflight, self.inflight = self.inflight, None
+        self.discard_action(inflight, reason, now)
+
+    def discard_action(self, inflight, reason, now):
         if 'step' in inflight:
             self.excluded += 1
             marks = {} if self.latest is None else {key:value for key,value in self.row_sample(self.latest).items()
@@ -430,8 +506,16 @@ class MovingRun:
         now = self.clock()
         self.flush_transition(truncated=True)
         self.discard(reason, now)
+        if (reason == 'target_lost' and not self.stop_requested and not self.end_requested
+                and self.missing_since is not None
+                and now >= self.missing_since+self.settings.missing_s):
+            self.check_pending_loss(self.sample_reason(now), now)
+            self.confirm_pending_loss(now)
+        else:
+            self.discard_pending_loss(reason, now)
         summary = self.metrics.summary(now) if self.metrics else dict(executed_actions=0, valid_results=0)
-        summary.update(episode=self.episode, reason=reason, terminated=False, truncated=True,
+        summary.update(episode=self.episode, reason=reason, terminated=self.loss_terminated,
+            truncated=not self.loss_terminated,
             new_transitions=self.new_transitions, excluded_transitions=self.excluded,
             initial_command=self.initial_command, initial_observation=self.initial,
             reset_elapsed_s=(self.metrics.started if self.metrics else now)-self.reset_started,

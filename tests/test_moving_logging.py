@@ -39,7 +39,8 @@ class MovingLogTests(unittest.TestCase):
     def test_episode_extension_preserves_stationary_fields_and_does_not_plot(self):
         self.assertNotIn('reward_sum', RunLog.fields['episodes'])
         self.assertEqual(MovingRunLog.fields['episodes'][:-3], RunLog.fields['episodes'])
-        self.assertEqual(MovingRunLog.fields['steps'], RunLog.fields['steps'])
+        self.assertEqual(MovingRunLog.fields['steps'][:-6], RunLog.fields['steps'])
+        self.assertNotIn('reward_loss', RunLog.fields['steps'])
         self.assertIsNot(MovingRunLog.fields['steps'], RunLog.fields['steps'])
         config = json.loads((self.folder/'config.json').read_text())
         self.assertEqual(config['schema'], 'test')
@@ -166,6 +167,9 @@ class MovingPlotTests(unittest.TestCase):
             self.assertEqual(len(report['errors']), 1)
             self.assertIn('disk full', report['errors'][0])
             manifest = json.loads((Path(name)/'graphs'/'manifest.json').read_text())
+            self.assertEqual(manifest['schema'], 'm5-3-moving-graphs-v2')
+            self.assertIn('confirmed terminal target losses', manifest['note'])
+            self.assertIn('evaluation rewards without replay storage', manifest['note'])
             self.assertEqual(manifest['measured_counts']['reward_sum'], 0)
             self.assertEqual(manifest['errors'], report['errors'])
 
@@ -185,6 +189,9 @@ class MovingPlotTests(unittest.TestCase):
                 # Blank performance measurements from no valid results stay blank.
                 log.episode(dict(episode=2, mode='resume', reason='initial_target_lost',
                                  reward_sum=None, reward_mean=None, reward_count=0))
+                log.episode(dict(episode=3, mode='resume', reason='target_lost',
+                                 reward_sum=-3.04, reward_mean=-3.04, reward_count=1,
+                                 terminated=True, truncated=False, valid_results=0, valid_ratio=0.))
                 log.row('updates', dict(episode=1, update=121, actor_loss=-1.2,
                                        critic_loss=.2, alpha=.9, alpha_loss=-.05))
                 before = {filename: (folder/filename).read_bytes() for filename in ('episodes.csv', 'updates.csv')}
@@ -199,8 +206,8 @@ class MovingPlotTests(unittest.TestCase):
                 for filename, data in before.items():
                     self.assertEqual((folder/filename).read_bytes(), data)
                 manifest = json.loads((folder/'graphs'/'manifest.json').read_text())
-                self.assertEqual(manifest['sources'], {'episodes.csv': 2, 'updates.csv': 1})
-                self.assertEqual(manifest['measured_counts']['reward_sum'], 1)
+                self.assertEqual(manifest['sources'], {'episodes.csv': 3, 'updates.csv': 1})
+                self.assertEqual(manifest['measured_counts']['reward_sum'], 2)
                 self.assertEqual(manifest['measured_counts']['rms_px'], 1)
                 self.assertEqual(manifest['measured_counts']['actor_loss'], 1)
                 self.assertFalse(list((folder/'graphs').glob('*.tmp')))
