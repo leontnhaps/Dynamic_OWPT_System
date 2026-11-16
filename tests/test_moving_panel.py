@@ -1,4 +1,5 @@
 from concurrent.futures import Future
+from dataclasses import replace
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -9,7 +10,7 @@ from common.tx_moving import MovingConfig
 from common.tx_tracking import Sample
 from common.tx_setup import TX_CAMERA_SETTINGS
 from common.moving_paths import MOVING_CHECKPOINT_PRESETS, DEFAULT_KALMAN_PATH
-from Tx.Controller.moving_panel import MovingPanel
+from Tx.Controller.moving_panel import MovingPanel, CONTROL_PERIOD_CHOICES
 from Tx.Controller.moving_core import MovingRunSettings
 
 
@@ -37,6 +38,7 @@ class MovingPanelTests(unittest.TestCase):
         p.model_preset = Variable(next(iter(MOVING_CHECKPOINT_PRESETS)))
         p.reward_text = Variable()
         p.transmission_fps = Variable('30')
+        p.control_period = Variable('저장값')
         p.camera_config = dict(TX_CAMERA_SETTINGS)
         p.processing_text = Variable()
         p.mode = Variable('이어서 학습'); p.device = Variable('cpu'); p.sac_device = Variable('cpu')
@@ -56,6 +58,7 @@ class MovingPanelTests(unittest.TestCase):
             detection=SimpleNamespace(future=None, stop=Mock()))
         p.reset_processing_stats()
         p.identity = p.selection()
+        p.identity['source_control_period_s'] = .72
         return p
 
     def fake_run(self, phase='ready', **kwargs):
@@ -118,11 +121,50 @@ class MovingPanelTests(unittest.TestCase):
                 self.assertEqual(TX_CAMERA_SETTINGS['fps'], 30)
                 self.assertEqual(p.cfg.dt, .72)
 
+    def test_control_period_selection_requires_preparation_and_is_independent_of_fps(self):
+        p = self.panel(); p.hardware_ready = True
+        self.assertIsNone(p.selection()['control_period_s'])
+        for label, period in CONTROL_PERIOD_CHOICES.items():
+            if period is None: continue
+            p.control_period.set(label)
+            self.assertEqual(p.selection()['control_period_s'], period)
+            self.assertEqual(p.selection()['camera_fps'], 30)
+            with self.assertRaisesRegex(ValueError, '자동 준비'): p.check_prepared()
+        p.control_period.set('nan')
+        with self.assertRaisesRegex(ValueError, '제어주기'): p.selection()
+        self.assertEqual(p.cfg.dt, .72)
+        p.app.send.assert_not_called()
+
+    def test_preparation_passes_selected_period_snapshot_in_both_modes(self):
+        for mode in ('이어서 학습', '고정 모델 평가'):
+            with self.subTest(mode=mode):
+                p = self.panel(); p.mode.set(mode); p.control_period.set('1.200 s')
+                learner = p.learner
+                p.prepare()
+                worker = p.learn_pool.submit.call_args.args[0]
+                p.control_period.set('2.000 s')
+                inputs = SimpleNamespace(cfg=replace(p.cfg, dt=1.2), checkpoint=Path('fixture'),
+                    state={'tracking': {'dt': .72}}, kalman={}, kalman_identity={'sha256': 'fixture'})
+                with patch('Tx.Controller.moving_panel.load_moving_inputs', return_value=inputs) as loader, \
+                        patch('Tx.Controller.moving_panel.PVDetector', return_value=SimpleNamespace(names={0:'PV'})), \
+                        patch('Tx.Controller.moving_panel.SACLearner', return_value=learner), \
+                        patch('Tx.Controller.moving_panel.digest', return_value='fixture'):
+                    loaded = worker()
+                self.assertEqual(loader.call_args.kwargs['period'], 1.2)
+                self.assertEqual(loader.call_args.args[2], 'resume' if mode == '이어서 학습' else 'evaluate')
+                self.assertEqual(loaded[3]['source_control_period_s'], .72)
+                p.work.set_result(loaded); p.prepare_hardware = Mock()
+                p._poll()
+                self.assertEqual(p.cfg.dt, 1.2)
+                self.assertIn('0.720 s → 이번 실행 1.200 s', p.period_text.get())
+                p.prepare_hardware.assert_called_once()
+
     def test_run_records_the_prepared_transmission_profile(self):
         for fps in (10, 5):
             with self.subTest(fps=fps):
                 p = self.panel(); p.hardware_ready = True; p.kalman = {'fixture': True}
                 p.transmission_fps.set(str(fps)); p.identity = p.selection()
+                p.identity['source_control_period_s'] = .72
                 p.camera_config = dict(TX_CAMERA_SETTINGS, fps=fps)
                 frame = (b'', {'simulated': False, 'requested': dict(p.camera_config)}, 10., 0)
                 p.check_prepared = Mock(); p.stop_other_panels = Mock(); p.check_camera = Mock(return_value=frame)
@@ -135,6 +177,30 @@ class MovingPanelTests(unittest.TestCase):
                 self.assertEqual(config['model']['camera_fps'], fps)
                 self.assertEqual(config['tracking']['dt'], .72)
                 run.return_value.start.assert_called_once()
+
+    def test_changed_period_run_records_source_and_execution_and_separate_path(self):
+        p = self.panel(); p.hardware_ready = True; p.kalman = {'fixture': True}
+        p.control_period.set('1.000 s'); p.cfg = replace(p.cfg, dt=1.)
+        p.identity.update(p.selection()); p.identity['source_control_period_s'] = .72
+        history = [{'source_period_s': .72, 'execution_period_s': 1., 'replay_retention': 'unchanged'}]
+        p.learner.experiment_context = {'control_timing_transfers': history}
+        frame = (b'', {'simulated': False, 'requested': dict(p.camera_config)}, 10., 0)
+        p.check_prepared = Mock(); p.stop_other_panels = Mock(); p.check_camera = Mock(return_value=frame)
+        p.app.stage_dir = Mock(return_value=Path('captures/M5-3'))
+        with patch('Tx.Controller.moving_panel.MovingRunLog') as log, \
+                patch('Tx.Controller.moving_panel.MovingRun'):
+            p._start_episode()
+        folder, config = log.call_args.args
+        self.assertEqual(folder.parent, Path('captures/M5-3'))
+        self.assertTrue(folder.name.startswith('moving_dt1000ms_'))
+        self.assertEqual(config['schema'], 'tx-moving-run-v3')
+        timing = config['control_timing']
+        self.assertEqual(timing['source_checkpoint_period_s'], .72)
+        self.assertEqual(timing['execution_period_s'], 1.)
+        self.assertTrue(timing['changed'])
+        self.assertEqual(timing['kf_prediction_horizon_s'], 1.)
+        self.assertEqual(timing['timing_transfer_history'], history)
+        self.assertEqual(config['camera']['fps'], 30)
 
     def test_processing_diagnostics_separate_received_and_completed_fps_and_throttle_display(self):
         p = self.panel()

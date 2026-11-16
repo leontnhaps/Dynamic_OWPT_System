@@ -3,7 +3,7 @@
 Calibration is supplied by an experiment, never inferred from these defaults.
 Angles inside the filter are radians in the fixed Tx frame, not servo feedback.
 """
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -13,6 +13,7 @@ from common.tx_tracking import TrackingConfig, observation
 
 MOVING_SCHEMA = 'tx-moving-v2'
 MOVING_TERMINAL_SCHEMA = 'tx-moving-v3'
+MOVING_CONTROL_PERIODS_S = (.720, .800, 1., 1.2, 1.5, 2.)
 KALMAN_SCHEMA = 'tx-bearing-kalman-v1'
 
 
@@ -85,10 +86,7 @@ class MovingConfig(TrackingConfig):
                            'predicted_delta_alpha_deg', 'predicted_delta_beta_deg'])
 
     def validate(self, *, evaluation=False):
-        # TrackingConfig checks every dataclass value for finite numbers; the
-        # moving loss policy is a string, so validate its numeric base separately.
-        TrackingConfig(**{field.name: getattr(self, field.name) for field in fields(TrackingConfig)}).validate(
-            evaluation=evaluation)
+        super().validate(evaluation=evaluation)
         if not -90 <= self.pan_min < self.pan_max <= 90:
             raise ValueError('이동 학습의 Pan 운용 범위는 -90~90° 안이어야 합니다.')
         if not -15 <= self.tilt_min < self.tilt_max <= 40:
@@ -101,6 +99,27 @@ class MovingConfig(TrackingConfig):
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
                 raise ValueError(f'{name}: 유한한 0 이상의 보상 계수가 필요합니다.')
+
+    def _validate_control_period(self, *, evaluation=False):
+        if (not isinstance(self.dt, (int, float)) or isinstance(self.dt, bool)
+                or not math.isfinite(self.dt) or self.dt not in MOVING_CONTROL_PERIODS_S):
+            raise ValueError('이동 SAC 제어주기는 0.720 / 0.800 / 1.000 / 1.200 / 1.500 / 2.000 s입니다.')
+
+
+def moving_run_config(saved_cfg, mode, period=None):
+    """Change only execution timing, retaining the saved moving model contract.
+
+    Historical replay remains at its original timing when learning continues;
+    a changed period is an explicit mixed-period dynamics experiment.
+    """
+    if not isinstance(saved_cfg, MovingConfig):
+        raise ValueError('이동 SAC에는 이동 checkpoint 설정이 필요합니다.')
+    saved_cfg.validate()
+    if mode not in ('resume', 'evaluate'):
+        raise ValueError('Checkpoint 실행 모드를 확인하세요.')
+    cfg = replace(saved_cfg, dt=period) if period is not None else saved_cfg
+    cfg.validate(evaluation=mode == 'evaluate')
+    return cfg
 
 
 def moving_visible_reward(error_px, intensity_mean, cfg):

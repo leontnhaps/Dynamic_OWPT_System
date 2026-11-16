@@ -4,7 +4,7 @@ from pathlib import Path
 
 from common.model_paths import REPOSITORY_ROOT
 from common.tx_bearing import BEARING_MODEL
-from common.tx_moving import MovingConfig, load_kalman_config
+from common.tx_moving import MovingConfig, load_kalman_config, moving_run_config
 from Tx.Controller.stationary_learning import checkpoint_info
 
 
@@ -44,11 +44,11 @@ class MovingInputs:
     kalman_identity: dict
 
 
-def load_moving_inputs(checkpoint=None, kalman_path=None, mode='resume'):
+def load_moving_inputs(checkpoint=None, kalman_path=None, mode='resume', period=None):
     """Validate saved 10D inputs before loading a model or issuing hardware I/O.
 
-Both resume and evaluation retain the checkpoint's period, geometry and
-normalization. A separately selected KF must match the one used to construct
+Both resume and evaluation retain saved geometry and normalization; period may
+override execution timing only. A selected KF must match the one used to construct
 the saved replay. A model.zip selection is accepted only with its complete
 paired checkpoint beside it, as enforced by checkpoint_info.
 """
@@ -82,5 +82,5 @@ paired checkpoint beside it, as enforced by checkpoint_info.
         raise ValueError('선택한 KF 설정이 checkpoint를 학습할 때 사용한 KF와 다릅니다. 같은 JSON을 선택하세요.')
     if kalman.get('time_source', 'receive_s') != 'receive_s':
         raise ValueError('이동 실시간 KF는 수신 시각 receive_s 기준의 설정이 필요합니다.')
-    cfg.validate(evaluation=mode == 'evaluate')
+    cfg = moving_run_config(cfg, mode, period)
     return MovingInputs(folder, state, cfg, kalman, identity)

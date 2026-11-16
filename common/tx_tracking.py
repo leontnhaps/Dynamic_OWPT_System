@@ -1,5 +1,5 @@
 """M2/M3 camera observations, commands and episode metrics (no hardware I/O)."""
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 import math
 import numpy as np
 from common.control_timing import PRIMARY_CONTROL_PERIOD_S, CONTROL_PERIODS_S, EVALUATION_CONTROL_PERIODS_S
@@ -66,15 +66,13 @@ class TrackingConfig:
         return [696, 588, 1296, 972, *self.action_scale.tolist()]
 
     def validate(self, *, evaluation=False):
-        if not all(math.isfinite(v) for v in asdict(self).values()):
+        self._validate_control_period(evaluation=evaluation)
+        # Subclasses validate their additional fields separately (some are text).
+        if not all(math.isfinite(getattr(self, field.name)) for field in fields(TrackingConfig)):
             raise ValueError('설정은 유한한 수치여야 합니다.')
         limits_from(self.limits)
         if not all(float(v).is_integer() for v in self.limits.values()):
             raise ValueError('운용 한계각은 1° 단위로 적용하세요.')
-        periods = EVALUATION_CONTROL_PERIODS_S if evaluation else CONTROL_PERIODS_S
-        if self.dt not in periods:
-            raise ValueError('평가 제어주기는 0.720 / 0.800 / 0.600 / 0.500 s입니다.' if evaluation
-                             else '학습 제어주기는 0.720 또는 0.800 s입니다.')
         fixed = TrackingConfig()
         # M3-1 geometry, action and detector settings are one persisted contract.
         for key in ('width', 'height', 'laser_u', 'laser_v', 'beam_wx', 'beam_wy',
@@ -83,6 +81,12 @@ class TrackingConfig:
                 raise ValueError(f'M3-1 고정 설정 불일치: {key}')
         if min(self.reward_distance, self.error_weight, self.aim_weight) <= 0:
             raise ValueError('보상 정규화와 계수는 양수여야 합니다.')
+
+    def _validate_control_period(self, *, evaluation=False):
+        periods = EVALUATION_CONTROL_PERIODS_S if evaluation else CONTROL_PERIODS_S
+        if self.dt not in periods:
+            raise ValueError('평가 제어주기는 0.720 / 0.800 / 0.600 / 0.500 s입니다.' if evaluation
+                             else '학습 제어주기는 0.720 또는 0.800 s입니다.')
 
 
 def checkpoint_run_config(saved_cfg, mode, period=None):

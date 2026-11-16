@@ -1,5 +1,6 @@
 """Clock/transport/policy simulations; no hardware or actual training."""
 from dataclasses import replace
+import json
 import threading
 from types import SimpleNamespace
 import unittest
@@ -349,6 +350,90 @@ class MovingRunTests(unittest.TestCase):
                 self.assertEqual(self.learner.transitions, [])
                 self.clock.advance(.05); self.supply(); self.run.tick()
                 self.assertEqual(self.run.phase, 'ready')
+
+    def test_frame_command_diagnostic_identifies_each_rejected_field(self):
+        cases = [('simulated', True), ('simulated', 0), ('available', False), ('available', 1),
+                 ('limits', {}), ('command_id', 'old-command'), ('pan', -9), ('tilt', 3),
+                 ('speed', 99), ('acc', 2)]
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                self.setUp(); self.begin()
+                self.clock.advance(.01); self.supply()
+                servo = self.run.latest_metadata['servo_at_capture_start']
+                (servo if field in ('simulated', 'available', 'limits') else servo['commanded'])[field] = value
+                self.assertEqual(self.run.sample_reason(self.clock()), 'frame_command_mismatch')
+                diagnostic = self.run.frame_command_diagnostic
+                self.assertEqual(diagnostic['mismatched_fields'], [field])
+                self.assertEqual(diagnostic['observed'][field], value)
+                self.assertIsNone(diagnostic['prior_sample_reason'])
+                self.assertEqual(self.learner.transitions, [])
+                self.learner.action.assert_not_called()
+
+    def test_initial_mismatch_records_stale_frame_at_stop_without_duplicate_poll_events(self):
+        self.run.start(); self.ack()
+        self.clock.advance(2.01)
+        self.supply(metadata_changes=dict(commanded=dict(command_id='previous-reset', pan=-10,
+                                                        tilt=2, speed=100, acc=1)))
+        self.run.tick()
+        self.clock.advance(.1); self.run.tick()
+        self.clock.advance(3.); self.run.tick()
+        mismatches = [call.kwargs for call in self.log.event.call_args_list
+                      if call.args[0] == 'frame_command_mismatch']
+        self.assertEqual(len(mismatches), 1)
+        self.assertIsNone(mismatches[0]['prior_sample_reason'])
+        stops = [call.kwargs for call in self.log.event.call_args_list if call.args[0] == 'run_stop']
+        diagnostic = stops[-1]['frame_command_diagnostic']
+        self.assertEqual(diagnostic['prior_sample_reason'], 'stale')
+        self.assertEqual(diagnostic['mismatched_fields'], ['command_id'])
+        self.assertEqual(diagnostic['expected']['command_id'], self.commands[0]['request_id'])
+        self.assertEqual(diagnostic['observed']['command_id'], 'previous-reset')
+        self.assertAlmostEqual(diagnostic['age_since_receive_s'], 3.1)
+        self.assertEqual(self.run.save_request['reason'], 'initialization_failed')
+        self.assertEqual(self.run.stop_detail, 'frame_command_mismatch')
+        self.assertEqual(self.run.steps, 0)
+        self.assertEqual(self.learner.transitions, [])
+        self.learner.action.assert_not_called()
+        self.run.saved(); self.run.tick()
+        self.assertEqual(self.run.phase, 'error')
+        self.assertEqual(len(self.commands), 1)
+
+    def test_mismatch_snapshot_is_detached_and_new_frames_are_logged(self):
+        self.begin()
+        self.clock.advance(.01)
+        limits = dict(self.cfg.limits, pan_min=0)
+        self.supply(metadata_changes=dict(limits=limits))
+        self.assertEqual(self.run.sample_reason(self.clock()), 'frame_command_mismatch')
+        first = self.run.frame_command_diagnostic
+        limits['pan_min'] = -1
+        self.assertEqual(first['observed']['limits']['pan_min'], 0)
+        self.clock.advance(.01); self.supply(metadata_changes=dict(limits=limits))
+        self.assertEqual(self.run.sample_reason(self.clock()), 'frame_command_mismatch')
+        events = [call.kwargs for call in self.log.event.call_args_list
+                  if call.args[0] == 'frame_command_mismatch']
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]['observed']['limits']['pan_min'], 0)
+        self.assertEqual(events[1]['observed']['limits']['pan_min'], -1)
+        self.clock.advance(.01); self.supply()
+        self.assertIsNone(self.run.sample_reason(self.clock()))
+        self.assertIsNone(self.run.frame_command_diagnostic)
+        self.run.abort('user_stop')
+        stop = [call.kwargs for call in self.log.event.call_args_list if call.args[0] == 'run_stop'][-1]
+        self.assertNotIn('frame_command_diagnostic', stop)
+
+    def test_missing_metadata_and_invalid_time_remain_diagnosable_in_strict_json(self):
+        self.begin()
+        self.clock.advance(.01)
+        self.supply(received=float('nan'), processed=float('nan'))
+        self.run.latest_metadata = {}
+        self.assertEqual(self.run.sample_reason(self.clock()), 'frame_command_mismatch')
+        diagnostic = self.run.frame_command_diagnostic
+        self.assertEqual(diagnostic['prior_sample_reason'], 'invalid_timestamp')
+        self.assertEqual(set(diagnostic['mismatched_fields']),
+                         {'simulated', 'available', 'limits', 'command_id', 'pan', 'tilt', 'speed', 'acc'})
+        self.assertTrue(all(value is None for value in diagnostic['observed'].values()))
+        self.assertIsNone(diagnostic['required_after_s'])
+        self.assertIsNone(diagnostic['age_since_receive_s'])
+        self.assertEqual(json.loads(json.dumps(diagnostic, allow_nan=False))['received_s'], 'nan')
 
     def test_irregular_observation_times_drive_kalman_without_command_catchup(self):
         self.begin(); self.action(); self.result(delay=1.1)

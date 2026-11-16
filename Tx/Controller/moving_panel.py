@@ -12,6 +12,7 @@ from common.model_paths import DEFAULT_YOLO_PATH, resolve_yolo_path
 from common.moving_paths import (DEFAULT_KALMAN_PATH, DEFAULT_MOVING_CHECKPOINT_PATH,
     MOVING_CHECKPOINT_PRESETS, resolve_kalman_path, resolve_moving_checkpoint_path, load_moving_inputs)
 from common.tx_tracking import Sample, invalid_reason
+from common.tx_moving import MOVING_CONTROL_PERIODS_S
 from common.tx_bearing import BEARING_MODEL
 from common.tx_setup import TX_CAMERA_SETTINGS
 from common.pv_detection import TARGET_SELECTION
@@ -24,6 +25,7 @@ from Tx.Controller.moving_logging import MovingRunLog
 
 MODES = {'이어서 학습': 'resume', '고정 모델 평가': 'evaluate'}
 TRANSMISSION_FPS = ('30', '10', '5')
+CONTROL_PERIOD_CHOICES = {'저장값': None, **{f'{period:.3f} s': period for period in MOVING_CONTROL_PERIODS_S}}
 
 
 class MovingPanel(ttk.Frame):
@@ -52,6 +54,7 @@ class MovingPanel(ttk.Frame):
         self.device = tk.StringVar(value='cuda')
         self.sac_device = tk.StringVar(value='cpu')
         self.transmission_fps = tk.StringVar(value='30')
+        self.control_period = tk.StringVar(value='저장값')
         self.camera_config = dict(TX_CAMERA_SETTINGS)
         self.period_text = tk.StringVar(value='모델에 저장된 주기 사용')
         self.start_pan = tk.StringVar(value='0')
@@ -90,8 +93,14 @@ class MovingPanel(ttk.Frame):
         combo = ttk.Combobox(row, textvariable=self.transmission_fps,
                              values=TRANSMISSION_FPS, state='readonly', width=8)
         combo.pack(side='left', padx=4); self.widgets.append(combo)
+        row = ttk.Frame(self); row.pack(fill='x', pady=3)
+        ttk.Label(row, text='모델 제어주기').pack(side='left')
+        combo = ttk.Combobox(row, textvariable=self.control_period,
+                             values=tuple(CONTROL_PERIOD_CHOICES), state='readonly', width=12)
+        combo.pack(side='left', padx=4); self.widgets.append(combo)
         ttk.Label(row, textvariable=self.period_text).pack(side='left', padx=10)
-        ttk.Label(self, text='전송 FPS 변경 후 자동 준비를 다시 누르세요. 해상도·JPEG 품질·모델 제어주기는 유지됩니다.').pack(anchor='w')
+        ttk.Label(self, text='전송 FPS / 제어주기 변경 후 자동 준비를 다시 누르세요. 이어서 학습·고정 평가 모두 적용됩니다.').pack(anchor='w')
+        ttk.Label(self, text='주기를 바꿔도 기존 모델·경험은 유지하며, 변경 주기의 결과는 새 실행 폴더에 저장합니다.').pack(anchor='w')
         box = ttk.LabelFrame(self, text='시작 / 복귀 지점 (°)', padding=5); box.pack(fill='x')
         for label, var in [('Pan', self.start_pan), ('Tilt', self.start_tilt)]:
             ttk.Label(box, text=label).pack(side='left')
@@ -116,7 +125,7 @@ class MovingPanel(ttk.Frame):
         ttk.Label(self, text='UAV는 QGC에서 직접 조종합니다. 다음 에피소드는 시작 버튼을 눌러야 실행됩니다.').pack(anchor='w')
         ttk.Label(self, textvariable=self.reward_text, wraplength=1120).pack(anchor='w')
         self.status = tk.StringVar(value='학습 시작 모델을 선택하고 자동 준비를 누르세요. YOLO·확정 KF는 기본값을 사용합니다.')
-        self.progress = tk.StringVar(value='captures/M5-3/moving_<날짜_시각>/ · 원본 영상 · 에피소드 기록 · 학습 그래프')
+        self.progress = tk.StringVar(value='captures/M5-3/moving_dt<주기ms>_<날짜_시각>/ · 원본 영상 · 에피소드 기록 · 학습 그래프')
         self.result_text = tk.StringVar()
         self.processing_text = tk.StringVar()
         self.reset_processing_stats()
@@ -277,7 +286,8 @@ class MovingPanel(ttk.Frame):
         self.status.set('기존 모델 · KF 확인 및 로딩 중 · 이동 명령 없음')
 
         def load():
-            inputs = load_moving_inputs(selection['checkpoint'], selection['kalman_path'], selection['mode'])
+            inputs = load_moving_inputs(selection['checkpoint'], selection['kalman_path'], selection['mode'],
+                                        period=selection['control_period_s'])
             settings.validate(inputs.cfg)
             detector = PVDetector(selection['yolo_path'], selection['yolo_device'])
             if inputs.cfg.class_id not in detector.names:
@@ -285,7 +295,8 @@ class MovingPanel(ttk.Frame):
             learner = SACLearner(inputs.cfg, selection['mode'], inputs.checkpoint, selection['sac_device'])
             identity = dict(selection, yolo_sha256=digest(selection['yolo_path']),
                             source_checkpoint=str(inputs.checkpoint), kalman_file=inputs.kalman_identity,
-                            source_episode_count=learner.episodes)
+                            source_episode_count=learner.episodes,
+                            source_control_period_s=inputs.state['tracking']['dt'])
             return detector, learner, inputs, identity
 
         try:
@@ -299,11 +310,14 @@ class MovingPanel(ttk.Frame):
         fps = self.transmission_fps.get()
         if fps not in TRANSMISSION_FPS:
             raise ValueError('영상 전송 목표 FPS는 30 / 10 / 5 중 선택하세요.')
+        period = self.control_period.get()
+        if period not in CONTROL_PERIOD_CHOICES:
+            raise ValueError('모델 제어주기는 저장값 또는 목록의 초 단위 값 중 선택하세요.')
         return dict(yolo_path=resolve_yolo_path(self.path.get()),
                     checkpoint=str(resolve_moving_checkpoint_path(self.checkpoint.get())),
                     kalman_path=str(resolve_kalman_path(self.kalman_path.get())),
                     mode=MODES.get(self.mode.get()), yolo_device=self.device.get(), sac_device=self.sac_device.get(),
-                    camera_fps=int(fps))
+                    camera_fps=int(fps), control_period_s=CONTROL_PERIOD_CHOICES[period])
 
     def cancel_preparation(self):
         self.preparing = self.setup_pending = None
@@ -358,7 +372,7 @@ class MovingPanel(ttk.Frame):
         if self.active or self.work is not None or self.preparing is not None:
             raise ValueError('현재 에피소드·저장·준비가 끝난 뒤 시작하세요.')
         if any(value != self.identity.get(key) for key, value in self.selection().items()):
-            raise ValueError('모델·KF·장치 설정이 바뀌었습니다. 자동 준비를 다시 실행하세요.')
+            raise ValueError('모델·KF·장치·전송 FPS·제어주기 설정이 바뀌었습니다. 자동 준비를 다시 실행하세요.')
         if self.run is not None and self.run.pending is not None:
             raise ValueError('전송된 명령의 응답을 기다리세요.')
         if self.run is not None and self.run.phase != 'idle':
@@ -392,10 +406,17 @@ class MovingPanel(ttk.Frame):
             raise ValueError('실제 Pi 연결과 저장 모델의 운용 범위를 확인하세요.')
         settings = self.settings(); settings.validate(self.cfg)
         if self.run is None:
-            folder = self.app.stage_dir('M5-3')/('moving_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
-            config = dict(schema='tx-moving-run-v2', checkpoint_schema=self.cfg.schema,
+            folder = self.app.stage_dir('M5-3')/(f'moving_dt{round(self.cfg.dt*1000)}ms_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f'))
+            source_period = self.identity['source_control_period_s']
+            config = dict(schema='tx-moving-run-v3', checkpoint_schema=self.cfg.schema,
                 tracking=asdict(self.cfg), run=asdict(settings), sac=sac_settings(self.cfg),
                 model=self.identity, kalman=self.kalman, normalization=self.cfg.normalization,
+                control_timing=dict(source_checkpoint_period_s=source_period, execution_period_s=self.cfg.dt,
+                    changed=source_period != self.cfg.dt, mode=self.identity['mode'],
+                    historical_replay='retained unchanged in resume; not used in evaluation',
+                    timing_transfer_history=getattr(self.learner, 'experiment_context', {}).get('control_timing_transfers', []),
+                    kf_prediction_horizon_s=self.cfg.dt,
+                    note='minimum command interval; actual intervals can be longer; old transitions are not retimed'),
                 bearing_model=BEARING_MODEL, target_selection=TARGET_SELECTION,
                 camera=dict(self.camera_config), initial_camera_metadata=frame[1],
                 episode_policy='manual start; manual end or continuous missing; update and return; no auto restart',
@@ -557,7 +578,8 @@ class MovingPanel(ttk.Frame):
                 if self.preparing == 'model':
                     self.detector, self.learner, inputs, self.identity = loaded
                     self.cfg, self.kalman = inputs.cfg, inputs.kalman
-                    self.period_text.set(f'저장 모델 주기 {self.cfg.dt:.3f} s')
+                    source_period = self.identity['source_control_period_s']
+                    self.period_text.set(f'불러온 모델 {source_period:.3f} s → 이번 실행 {self.cfg.dt:.3f} s')
                     loss = ('유실 확정 시 Pan 요청 크기에 비례한 벌점'
                             if self.cfg.loss_mode == 'confirmed_missing_terminal' else '미검출 경험 제외')
                     self.reward_text.set(f'검출 추가 보상 {self.cfg.visible_bonus:+g} · {loss}')

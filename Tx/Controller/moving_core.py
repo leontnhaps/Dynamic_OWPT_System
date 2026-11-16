@@ -10,6 +10,17 @@ from common.tx_moving import (BearingKalman, PredictionInputError, moving_observ
 from common.tx_tracking import BeamMap, EpisodeMetrics, action_command, invalid_reason
 
 
+def _diagnostic_snapshot(value):
+    """Detach JSON metadata and keep invalid numbers printable in strict logs."""
+    if isinstance(value, dict):
+        return {key: _diagnostic_snapshot(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_diagnostic_snapshot(item) for item in value]
+    if isinstance(value, (float, np.floating)) and not math.isfinite(value):
+        return str(value)
+    return value
+
+
 @dataclass(frozen=True)
 class MovingRunSettings:
     start_pan: float = 0.
@@ -54,6 +65,7 @@ class MovingRun:
         self.command_id = self.command_ack_s = self.last_command_time = None
         self.stop_requested = False
         self.stop_detail = ''
+        self.frame_command_diagnostic = self._logged_frame_command_mismatch = None
         self.end_requested = None
         self.inflight = self.buffered = None
         self.pending_loss = None
@@ -97,6 +109,7 @@ class MovingRun:
         self.rewards = []
         self.stop_requested = self.episode_saved = False
         self.stop_detail = ''
+        self.frame_command_diagnostic = self._logged_frame_command_mismatch = None
         self.end_requested = self.save_request = None
         self.learner.cancel.clear()
         self.kalman.reset()
@@ -191,12 +204,32 @@ class MovingRun:
         meta = self.latest_metadata or {}
         servo = meta.get('servo_at_capture_start') or {}
         command = servo.get('commanded') or {}
-        if (servo.get('simulated') is not False or servo.get('available') is not True
-                or servo.get('limits') != self.cfg.limits
-                or command.get('command_id') != self.command_id
-                or command.get('speed') != self.cfg.speed or command.get('acc') != self.cfg.acc
-                or any(command.get(axis) != self.command[i] for i, axis in enumerate(('pan', 'tilt')))):
+        expected = dict(simulated=False, available=True, limits=self.cfg.limits,
+                        command_id=self.command_id, pan=float(self.command[0]), tilt=float(self.command[1]),
+                        speed=self.cfg.speed, acc=self.cfg.acc)
+        observed = {key: (servo if key in ('simulated', 'available', 'limits') else command).get(key)
+                    for key in expected}
+        mismatched = [key for key, value in expected.items()
+                      if (observed[key] is not value if key in ('simulated', 'available')
+                          else observed[key] != value)]
+        if mismatched:
+            # Preserve the strict command check and its existing precedence.
+            # Old/missing metadata and an otherwise stale frame can coexist;
+            # recording both avoids misdiagnosing every mismatch as network lag.
+            age = now-sample.received
+            self.frame_command_diagnostic = _diagnostic_snapshot(dict(expected=expected, observed=observed,
+                mismatched_fields=mismatched, prior_sample_reason=reason,
+                frame_id=sample.frame_id, seq=sample.seq, pi_session=meta.get('session'),
+                received_s=sample.received, processed_s=sample.processed,
+                age_since_receive_s=age if math.isfinite(age) else None,
+                command_ack_s=self.command_ack_s,
+                required_after_s=after if math.isfinite(after) else None))
+            key = (self.command_id, sample.frame_id)
+            if key != self._logged_frame_command_mismatch:
+                self.event('frame_command_mismatch', **self.frame_command_diagnostic)
+                self._logged_frame_command_mismatch = key
             return 'frame_command_mismatch'
+        self.frame_command_diagnostic = None
         if sample.processed < sample.received or sample.processed > now:
             return 'invalid_timestamp'
         if self.command_ack_s is None or sample.received <= self.command_ack_s:
@@ -547,7 +580,9 @@ class MovingRun:
             self.stop_detail = detail
         self.stop_requested = True
         self.learner.cancel.set()
-        self.event('run_stop', reason=reason, detail=detail)
+        diagnostic = ({'frame_command_diagnostic': self.frame_command_diagnostic}
+                      if detail == 'frame_command_mismatch' else {})
+        self.event('run_stop', reason=reason, detail=detail, **diagnostic)
         if self.phase in ('return_reply', 'return_settle') or self.episode_saved:
             self.phase = 'error'
         elif self.phase not in ('idle', 'saving', 'error'):

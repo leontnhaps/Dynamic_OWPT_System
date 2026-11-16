@@ -75,6 +75,23 @@ class MovingPathsTests(unittest.TestCase):
     def test_evaluation_keeps_the_saved_period(self):
         self.assertEqual(self.load(mode='evaluate').cfg.dt, self.cfg.dt)
 
+    def test_selected_period_changes_only_execution_config_in_both_modes(self):
+        before = self.kalman_path.read_bytes()
+        for mode in ('resume', 'evaluate'):
+            result = self.load(mode=mode, period=1.5)
+            self.assertEqual(result.cfg.dt, 1.5)
+            self.assertEqual(result.state['tracking']['dt'], .72)
+            self.assertEqual(result.state, self.state)
+            self.assertEqual(result.kalman, self.kalman)
+            self.assertEqual(result.cfg.normalization, self.cfg.normalization)
+        self.assertEqual(self.kalman_path.read_bytes(), before)
+
+    def test_period_override_cannot_bypass_exact_kf_match(self):
+        self.kalman['Q'][0][0] *= 2
+        self.kalman_path.write_text(json.dumps(self.kalman), encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'KF와 다릅니다'):
+            self.load(period=2.)
+
     def test_model_file_selection_still_requires_the_paired_checkpoint(self):
         result = load_moving_inputs(self.folder / 'model.zip', self.kalman_path)
         self.assertEqual(result.checkpoint, self.folder)

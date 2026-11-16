@@ -1,5 +1,6 @@
 """SAC adapter and paired checkpoints for M3-2 real camera transitions."""
 import csv
+from copy import deepcopy
 from dataclasses import asdict
 import hashlib
 import importlib.metadata
@@ -237,9 +238,13 @@ class SACLearner:
             self.policy = make_policy(cfg, device, seed)
         else:
             source, state, saved_cfg = checkpoint_info(checkpoint)
-            self.experiment_context = state.get('experiment_context')
-            if cfg != checkpoint_run_config(saved_cfg, mode, cfg.dt):
-                raise ValueError('저장된 정규화·보상·각도 설정과 학습 재개의 제어주기를 유지해야 합니다.')
+            from common.tx_moving import MovingConfig, moving_run_config
+            moving = isinstance(saved_cfg, MovingConfig)
+            run_config = moving_run_config if moving else checkpoint_run_config
+            if cfg != run_config(saved_cfg, mode, cfg.dt):
+                raise ValueError('저장된 정규화·보상·각도 설정은 유지하고 이동 제어주기만 변경할 수 있습니다.' if moving
+                                 else '저장된 정규화·보상·각도 설정과 학습 재개의 제어주기를 유지해야 합니다.')
+            self.experiment_context = deepcopy(state.get('experiment_context'))
             from stable_baselines3 import SAC
             from stable_baselines3.common.logger import configure
             self.source = str(source.resolve())
@@ -265,6 +270,21 @@ class SACLearner:
             if mode == 'resume':
                 self.restore_replay(source/'replay.npz')
                 self.restore_rng(source, state)
+                if moving and cfg.dt != saved_cfg.dt:
+                    if self.experiment_context is None:
+                        self.experiment_context = {}
+                    if not isinstance(self.experiment_context, dict):
+                        raise ValueError('Checkpoint 학습 문맥이 올바르지 않습니다.')
+                    history = self.experiment_context.setdefault('control_timing_transfers', [])
+                    if not isinstance(history, list):
+                        raise ValueError('Checkpoint 제어주기 변경 이력이 올바르지 않습니다.')
+                    history.append(dict(
+                        source_checkpoint=self.source, source_checkpoint_id=state['checkpoint_id'],
+                        source_period_s=saved_cfg.dt,
+                        execution_period_s=cfg.dt, source_total_transitions=self.total_transitions,
+                        source_updates=self.updates, source_episodes=self.episodes,
+                        replay_retention='unchanged',
+                        assumption='historical replay retained unchanged; mixed-period dynamics experiment'))
         self.policy.policy.set_training_mode(False)
 
     def action(self, obs, warmup):
