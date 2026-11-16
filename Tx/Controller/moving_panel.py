@@ -23,6 +23,7 @@ from Tx.Controller.moving_logging import MovingRunLog
 
 
 MODES = {'이어서 학습': 'resume', '고정 모델 평가': 'evaluate'}
+TRANSMISSION_FPS = ('30', '10', '5')
 
 
 class MovingPanel(ttk.Frame):
@@ -50,6 +51,8 @@ class MovingPanel(ttk.Frame):
         self.mode = tk.StringVar(value='이어서 학습')
         self.device = tk.StringVar(value='cuda')
         self.sac_device = tk.StringVar(value='cpu')
+        self.transmission_fps = tk.StringVar(value='30')
+        self.camera_config = dict(TX_CAMERA_SETTINGS)
         self.period_text = tk.StringVar(value='모델에 저장된 주기 사용')
         self.start_pan = tk.StringVar(value='0')
         self.start_tilt = tk.StringVar(value='0')
@@ -82,7 +85,13 @@ class MovingPanel(ttk.Frame):
             ttk.Label(row, text=label).pack(side='left')
             combo = ttk.Combobox(row, textvariable=var, values=values, state='readonly', width=14)
             combo.pack(side='left', padx=4); self.widgets.append(combo)
+        row = ttk.Frame(self); row.pack(fill='x', pady=3)
+        ttk.Label(row, text='영상 전송 목표 FPS').pack(side='left')
+        combo = ttk.Combobox(row, textvariable=self.transmission_fps,
+                             values=TRANSMISSION_FPS, state='readonly', width=8)
+        combo.pack(side='left', padx=4); self.widgets.append(combo)
         ttk.Label(row, textvariable=self.period_text).pack(side='left', padx=10)
+        ttk.Label(self, text='전송 FPS 변경 후 자동 준비를 다시 누르세요. 해상도·JPEG 품질·모델 제어주기는 유지됩니다.').pack(anchor='w')
         box = ttk.LabelFrame(self, text='시작 / 복귀 지점 (°)', padding=5); box.pack(fill='x')
         for label, var in [('Pan', self.start_pan), ('Tilt', self.start_tilt)]:
             ttk.Label(box, text=label).pack(side='left')
@@ -109,7 +118,9 @@ class MovingPanel(ttk.Frame):
         self.status = tk.StringVar(value='학습 시작 모델을 선택하고 자동 준비를 누르세요. YOLO·확정 KF는 기본값을 사용합니다.')
         self.progress = tk.StringVar(value='captures/M5-3/moving_<날짜_시각>/ · 원본 영상 · 에피소드 기록 · 학습 그래프')
         self.result_text = tk.StringVar()
-        for var in (self.status, self.progress, self.result_text):
+        self.processing_text = tk.StringVar()
+        self.reset_processing_stats()
+        for var in (self.status, self.progress, self.result_text, self.processing_text):
             ttk.Label(self, textvariable=var, wraplength=1120).pack(anchor='w')
         self.canvas = ttk.Label(self, anchor='center'); self.canvas.pack(fill='both', expand=True)
         self.lock()
@@ -260,6 +271,7 @@ class MovingPanel(ttk.Frame):
         self.latest = self.display = self.rendered = None
         self.hardware_ready = self.previewing = False
         self.preparing = 'model'
+        self.reset_processing_stats()
         self.setup_deadline = time.monotonic()+120
         self.work_kind = 'prepare'
         self.status.set('기존 모델 · KF 확인 및 로딩 중 · 이동 명령 없음')
@@ -284,10 +296,14 @@ class MovingPanel(ttk.Frame):
         self.lock()
 
     def selection(self):
+        fps = self.transmission_fps.get()
+        if fps not in TRANSMISSION_FPS:
+            raise ValueError('영상 전송 목표 FPS는 30 / 10 / 5 중 선택하세요.')
         return dict(yolo_path=resolve_yolo_path(self.path.get()),
                     checkpoint=str(resolve_moving_checkpoint_path(self.checkpoint.get())),
                     kalman_path=str(resolve_kalman_path(self.kalman_path.get())),
-                    mode=MODES.get(self.mode.get()), yolo_device=self.device.get(), sac_device=self.sac_device.get())
+                    mode=MODES.get(self.mode.get()), yolo_device=self.device.get(), sac_device=self.sac_device.get(),
+                    camera_fps=int(fps))
 
     def cancel_preparation(self):
         self.preparing = self.setup_pending = None
@@ -296,19 +312,23 @@ class MovingPanel(ttk.Frame):
 
     def prepare_hardware(self):
         self.settings().validate(self.cfg)
+        self.camera_config = dict(TX_CAMERA_SETTINGS, fps=self.identity['camera_fps'])
         self.preparing = 'limits'
         self.setup_pending = 'm5-1-moving-setup-'+uuid.uuid4().hex
         self.setup_deadline = time.monotonic()+5
         self.camera_requested_at = time.monotonic()
-        for key, value in TX_CAMERA_SETTINGS.items():
+        for key, value in self.camera_config.items():
             self.app.values[key].set('' if value is None else str(value))
-        if not self.send(dict(cmd='preview', enable=True, request_id='m5-1-moving-camera-'+uuid.uuid4().hex, **TX_CAMERA_SETTINGS)):
+        if not self.send(dict(cmd='preview', enable=True, request_id='m5-1-moving-camera-'+uuid.uuid4().hex, **self.camera_config)):
             raise ValueError('카메라 자동 시작 실패')
         if not self.send(dict(cmd='servo_config', request_id=self.setup_pending, **self.cfg.limits)):
             raise ValueError('서보 운용 범위 자동 적용 실패')
         self.status.set('자동 준비: 카메라 · 실제 서보 연결 · 저장 모델의 운용 범위 확인 중')
 
-    camera_matches = staticmethod(StationaryPanel.camera_matches)
+    def camera_matches(self, frame):
+        requested = frame[1].get('requested', {})
+        return all(key in requested and requested[key] == value for key, value in self.camera_config.items())
+
     check_camera = StationaryPanel.check_camera
     render = StationaryPanel.render
 
@@ -377,7 +397,7 @@ class MovingPanel(ttk.Frame):
                 tracking=asdict(self.cfg), run=asdict(settings), sac=sac_settings(self.cfg),
                 model=self.identity, kalman=self.kalman, normalization=self.cfg.normalization,
                 bearing_model=BEARING_MODEL, target_selection=TARGET_SELECTION,
-                camera=TX_CAMERA_SETTINGS, initial_camera_metadata=frame[1],
+                camera=dict(self.camera_config), initial_camera_metadata=frame[1],
                 episode_policy='manual start; manual end or continuous missing; update and return; no auto restart',
                 metrics='visible observations for pointing metrics; stored transitions for reward and updates',
                 loss_policy=dict(mode=self.cfg.loss_mode, pan_weight=self.cfg.loss_pan_weight,
@@ -389,6 +409,7 @@ class MovingPanel(ttk.Frame):
             self.run.set_start(settings.start_pan, settings.start_tilt)
         self.learner.cancel.clear()
         self._generation += 1
+        self.reset_processing_stats()
         self.latest = None
         self.last_frame = None
         self._start_requested = False
@@ -488,6 +509,35 @@ class MovingPanel(ttk.Frame):
             self.checkpoint.set(selected)
             self.identity['checkpoint'] = selected
 
+    def reset_processing_stats(self):
+        self._processing_mark = time.monotonic()
+        self._processing_received = self.app.received_count
+        self._processing_completed = self._processing_previous = 0
+        self._processing_last = {}
+        self._processing_policy_ms = None
+        self.processing_text.set('수신 FPS / 처리 완료 FPS 측정 대기 · 최근 YOLO·저장·SAC 시간 표시')
+
+    def update_processing_stats(self):
+        now = time.monotonic()
+        elapsed = now-self._processing_mark
+        if elapsed < .5:
+            return
+        received = self.app.received_count
+        receive_fps = max(0, received-self._processing_received)/elapsed
+        completed_fps = (self._processing_completed-self._processing_previous)/elapsed
+        self._processing_received, self._processing_previous = received, self._processing_completed
+        self._processing_mark = now
+        phase = ('자동 준비' if self.preparing is not None else '학습·저장' if self.work is not None
+                 else '추적' if self.active else '미리보기' if self.previewing else '대기')
+        if self.active and self.work is None and not self.run.inference_allowed:
+            phase = '제어 대기 (추론 일시 정지)'
+        def ms(value):
+            return '—' if value is None else f'{value:.0f} ms'
+        last = self._processing_last
+        self.processing_text.set(f'{phase} · 수신 {receive_fps:.1f} FPS / 처리 완료 {completed_fps:.1f} FPS · '
+            f"최근 YOLO {ms(last.get('yolo_ms'))} · 수신→추론 완료 {ms(last.get('receive_to_processed_ms'))} · "
+            f"원본 저장 {ms(last.get('storage_ms'))} · SAC 행동 {ms(self._processing_policy_ms)}")
+
     def poll(self):
         if self.closed:
             return
@@ -496,6 +546,7 @@ class MovingPanel(ttk.Frame):
         except Exception as exc:
             self.fail(exc)
         finally:
+            self.update_processing_stats()
             self.lock()
 
     def _poll(self):
@@ -545,6 +596,8 @@ class MovingPanel(ttk.Frame):
             future, self.inference = self.inference, None
             result, sample, frame, generation = future.result()
             if generation == self._generation:
+                self._processing_completed += 1
+                self._processing_last = result.get('_moving_timing', {})
                 self.latest = sample
                 self.display = (result['image'], sample)
                 if self.run is not None and self.run.active and self.run.inference_allowed:
@@ -557,6 +610,9 @@ class MovingPanel(ttk.Frame):
         if self.active:
             old_phase = self.run.phase
             self.run.tick()
+            inflight = getattr(self.run, 'inflight', None)
+            if isinstance(inflight, dict) and 'policy_duration_s' in inflight:
+                self._processing_policy_ms = inflight['policy_duration_s']*1000
             self.progress.set(f'Episode {self.run.episode} · {self.run.phase} · step {self.run.steps} · '
                               f'저장 {self.run.new_transitions}개 · 명령각 {self.run.command.tolist()}°')
             if old_phase != 'idle' and self.run.phase == 'idle':
@@ -589,10 +645,15 @@ class MovingPanel(ttk.Frame):
                     sample = Sample(frame_id, frame[2], time.monotonic(), result['image'].width, result['image'].height,
                         result['target'], result['count'], frame[1].get('seq'), frame[3],
                         result['inference_ms'], frame[1].get('simulated', True))
+                    storage_ms = None
                     if context is not None:
+                        storage_started = time.monotonic()
                         log.record_frame(context[0], context[1], sample, frame[1], frame[0], step=context[2],
                                          detection={k:v for k,v in result.items() if k != 'image'},
                                          status=invalid_reason(sample, sample.processed, cfg) or 'detected')
+                        storage_ms = (time.monotonic()-storage_started)*1000
+                    result['_moving_timing'] = dict(yolo_ms=result['inference_ms'],
+                        receive_to_processed_ms=(sample.processed-sample.received)*1000, storage_ms=storage_ms)
                     return result, sample, frame, generation
 
                 self.inference = self.infer_pool.submit(infer)

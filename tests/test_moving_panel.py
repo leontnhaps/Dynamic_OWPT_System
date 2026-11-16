@@ -36,6 +36,9 @@ class MovingPanelTests(unittest.TestCase):
         p.checkpoint = Variable('captures/M5-3/checkpoint')
         p.model_preset = Variable(next(iter(MOVING_CHECKPOINT_PRESETS)))
         p.reward_text = Variable()
+        p.transmission_fps = Variable('30')
+        p.camera_config = dict(TX_CAMERA_SETTINGS)
+        p.processing_text = Variable()
         p.mode = Variable('이어서 학습'); p.device = Variable('cpu'); p.sac_device = Variable('cpu')
         p.start_pan = Variable('0'); p.start_tilt = Variable('0'); p.start_note = Variable(); p.note = Variable()
         p.status = Variable(); p.progress = Variable(); p.result_text = Variable(); p.period_text = Variable()
@@ -51,6 +54,7 @@ class MovingPanelTests(unittest.TestCase):
             timing=SimpleNamespace(active=False, preparing=False, profile=SimpleNamespace(running=False),
                                    future=None, stop=Mock()),
             detection=SimpleNamespace(future=None, stop=Mock()))
+        p.reset_processing_stats()
         p.identity = p.selection()
         return p
 
@@ -79,6 +83,96 @@ class MovingPanelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '먼저 종료'): p.apply_model_preset()
         self.assertEqual(p.checkpoint.get(), old)
         p.run.abort.assert_not_called(); p.app.send.assert_not_called()
+
+    def test_transmission_fps_selection_requires_new_preparation_without_changing_model(self):
+        p = self.panel(); p.hardware_ready = True
+        previous_cfg = p.cfg
+        for value in ('10', '5'):
+            p.transmission_fps.set(value)
+            self.assertEqual(p.selection()['camera_fps'], int(value))
+            with self.assertRaisesRegex(ValueError, '자동 준비'): p.check_prepared()
+        self.assertIs(p.cfg, previous_cfg)
+        self.assertEqual(p.cfg.dt, .72)
+        p.app.send.assert_not_called()
+        for value in ('0', '30.0', '60', ''):
+            p.transmission_fps.set(value)
+            with self.assertRaisesRegex(ValueError, '전송 목표 FPS'): p.selection()
+
+    def test_preparation_uses_selected_fps_snapshot_and_checks_matching_frames(self):
+        for fps in (10, 5):
+            with self.subTest(fps=fps):
+                p = self.panel(); p.transmission_fps.set(str(fps)); p.identity = p.selection()
+                # Loading uses its captured selection, never later widget values.
+                p.transmission_fps.set('30')
+                p.send = Mock(return_value=True)
+                p.prepare_hardware()
+                camera = p.send.call_args_list[0].args[0]
+                expected = dict(TX_CAMERA_SETTINGS, fps=fps)
+                for key, value in expected.items(): self.assertEqual(camera[key], value)
+                self.assertEqual(p.app.values['fps'].get(), str(fps))
+                frame = (b'jpeg', {'requested': expected}, 0., 0)
+                self.assertTrue(p.camera_matches(frame))
+                self.assertFalse(p.camera_matches((b'', {'requested': dict(TX_CAMERA_SETTINGS)}, 0., 0)))
+                wrong = dict(expected, quality=60)
+                self.assertFalse(p.camera_matches((b'', {'requested': wrong}, 0., 0)))
+                self.assertEqual(TX_CAMERA_SETTINGS['fps'], 30)
+                self.assertEqual(p.cfg.dt, .72)
+
+    def test_run_records_the_prepared_transmission_profile(self):
+        for fps in (10, 5):
+            with self.subTest(fps=fps):
+                p = self.panel(); p.hardware_ready = True; p.kalman = {'fixture': True}
+                p.transmission_fps.set(str(fps)); p.identity = p.selection()
+                p.camera_config = dict(TX_CAMERA_SETTINGS, fps=fps)
+                frame = (b'', {'simulated': False, 'requested': dict(p.camera_config)}, 10., 0)
+                p.check_prepared = Mock(); p.stop_other_panels = Mock(); p.check_camera = Mock(return_value=frame)
+                p.app.stage_dir = Mock(return_value=Path('captures/M5-3'))
+                with patch('Tx.Controller.moving_panel.MovingRunLog') as log, \
+                        patch('Tx.Controller.moving_panel.MovingRun') as run:
+                    p._start_episode()
+                config = log.call_args.args[1]
+                self.assertEqual(config['camera'], dict(TX_CAMERA_SETTINGS, fps=fps))
+                self.assertEqual(config['model']['camera_fps'], fps)
+                self.assertEqual(config['tracking']['dt'], .72)
+                run.return_value.start.assert_called_once()
+
+    def test_processing_diagnostics_separate_received_and_completed_fps_and_throttle_display(self):
+        p = self.panel()
+        with patch('Tx.Controller.moving_panel.time.monotonic', return_value=0.): p.reset_processing_stats()
+        p.app.received_count += 10
+        p._processing_completed = 2
+        p._processing_last = dict(yolo_ms=25., receive_to_processed_ms=60., storage_ms=110.)
+        p._processing_policy_ms = 5.
+        with patch('Tx.Controller.moving_panel.time.monotonic', return_value=1.): p.update_processing_stats()
+        text = p.processing_text.get()
+        for part in ('수신 10.0 FPS', '처리 완료 2.0 FPS', 'YOLO 25 ms', '추론 완료 60 ms', '원본 저장 110 ms', 'SAC 행동 5 ms'):
+            self.assertIn(part, text)
+        p.app.received_count += 3
+        with patch('Tx.Controller.moving_panel.time.monotonic', return_value=1.1): p.update_processing_stats()
+        self.assertEqual(p.processing_text.get(), text)
+        p.app.record.assert_not_called(); p.app.send.assert_not_called()
+        p.run = self.fake_run('action_reply')
+        with patch('Tx.Controller.moving_panel.time.monotonic', return_value=1.5): p.update_processing_stats()
+        self.assertIn('추론 일시 정지', p.processing_text.get())
+
+    def test_worker_keeps_raw_storage_before_return_and_reports_its_time(self):
+        p = self.panel(); p.previewing = True; p.log = Mock()
+        p.run = self.fake_run('result'); p.run.inference_allowed = True
+        p.detector = SimpleNamespace(infer=Mock(return_value=dict(
+            image=SimpleNamespace(width=1296, height=972), target=None, count=0, inference_ms=25.)))
+        p.app.current = (b'original-jpeg', {'simulated': False, 'seq': 7}, 10., 123)
+        with patch('Tx.Controller.moving_panel.time.monotonic', return_value=10.01): p._poll()
+        worker = p.infer_pool.submit.call_args.args[0]
+        with patch('Tx.Controller.moving_panel.time.monotonic', side_effect=[10.02, 10.03, 10.05]):
+            output = worker()
+        self.assertEqual(len(output), 4)
+        result, sample, frame, generation = output
+        self.assertEqual(frame, p.app.current); self.assertEqual(generation, p._generation)
+        self.assertEqual(p.log.record_frame.call_args.args[4], b'original-jpeg')
+        self.assertEqual(sample.processed, 10.02)
+        self.assertAlmostEqual(result['_moving_timing']['storage_ms'], 20.)
+        self.assertAlmostEqual(result['_moving_timing']['receive_to_processed_ms'], 20.)
+        self.assertEqual(result['_moving_timing']['yolo_ms'], 25.)
 
     def test_startpoint_change_during_tracking_is_applied_without_sending_move(self):
         p = self.panel(); p.run = self.fake_run()
