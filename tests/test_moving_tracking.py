@@ -260,10 +260,26 @@ class MovingRunTests(unittest.TestCase):
         self.run.start(); self.ack()
         self.clock.advance(5.1); self.run.tick()
         self.assertEqual(self.run.save_request['reason'], 'initialization_failed')
+        self.assertEqual(self.run.stop_detail, 'no_processed_frame')
         self.assertTrue(self.learner.cancel.is_set())
         self.run.saved(); self.run.tick()
         self.assertEqual(self.run.phase, 'error')
         self.assertEqual(len(self.commands), 1)
+
+    def test_observation_timeout_retains_original_detail_for_saved_result(self):
+        self.begin(); self.action(); self.result(None)
+        self.clock.advance(3.1)
+        self.supply(received=self.clock()-1.)
+        self.run.tick()
+        self.assertEqual(self.run.save_request['reason'], 'observation_timeout')
+        self.assertEqual(self.run.stop_detail, 'stale')
+        self.assertEqual(self.run.save_request['new_transitions'], 0)
+        self.assertEqual(self.learner.transitions, [])
+        self.run.abort('user_stop', 'later user click')
+        self.assertEqual(self.run.stop_detail, 'stale')
+        self.run.saved()
+        self.assertEqual(self.run.phase, 'error')
+        self.assertEqual(len(self.commands), 2)
 
     def test_manual_end_drains_pending_action_ack_and_post_action_frame(self):
         self.begin(); self.run.tick()

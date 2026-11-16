@@ -187,15 +187,19 @@ class MovingPanelTests(unittest.TestCase):
 
     def test_core_abort_save_disables_start_until_prepared_again(self):
         p=self.panel(); p.run=self.fake_run('saving'); p.run.stop_requested=True
+        p.run.stop_detail='frame_command_mismatch'
+        p.progress.set('Episode 14 · saving')
         p.hardware_ready=p.previewing=True
         p.log=SimpleNamespace(folder=Path('captures/M5-3/live'))
         p.work_kind='save'; p.work=Future()
-        p.work.set_result((dict(episode=14,reason='ack_timeout',completed_updates=0,planned_updates=0),
+        p.work.set_result((dict(episode=14,reason='observation_timeout',completed_updates=0,planned_updates=0),
                            {'files':[],'errors':[]}))
         p.run.saved.side_effect=lambda: (setattr(p.run,'phase','error'),setattr(p.run,'active',False))
         p._poll()
         self.assertFalse(p.hardware_ready); self.assertFalse(p.previewing)
         self.assertIn('자동 준비',p.status.get()); p.app.send.assert_not_called()
+        self.assertIn('observation_timeout (frame_command_mismatch)',p.result_text.get())
+        self.assertIn('중단 저장 완료',p.progress.get()); self.assertNotIn('saving',p.progress.get())
 
     def test_log_failure_still_disables_movement(self):
         p=self.panel(); p.run=self.fake_run(); p.run.abort.side_effect=OSError('disk full')

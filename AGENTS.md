@@ -83,6 +83,7 @@
 - 새 유효 transition 1,000개부터 episode 종료 후 신규 유효 transition 수에 비례하여 업데이트한다. 첫 업데이트 전에는 균일 무작위 행동을 사용한다. 무효 transition을 재검출로 뒤늦게 완성하거나 reward 0으로 채우지 않는다.
 - 고정 모델 평가는 결정적 action을 사용하며 replay·가중치·optimizer·alpha를 변경하지 않는다. 재개에는 모델·replay·optimizer·진행 수·난수 상태가 대응하는 완전한 checkpoint 폴더를 사용한다. 재개 시 저장된 주기·보상·정규화·운용 범위를 바꾸지 않는다.
 - 고정 모델 평가에서는 제어주기를 `저장값` 또는 0.720 / 0.800 / 0.600 / 0.500 s로 선택할 수 있다. 평가의 기본 선택은 `저장값`이다. 주기 외 보상·정규화·운용 범위는 checkpoint에서 유지하고 평가 주기로 checkpoint를 다시 저장하지 않는다. 0.600 / 0.500 s는 정착 전 명령 갱신이 가능한 비교 실험값이며 신규·이어서 학습에 허용하지 않는다. 실행 로그 v3의 `control_timing`에 원래 학습 주기와 실제 실행 주기 및 변경 여부를 기록한다.
+- SAC 재개 시 Python 버전에 종속된 직렬화 `lr_schedule`은 복원하지 않고, model.zip의 수치 학습률과 checkpoint의 확정 학습률이 같은지 확인한 뒤 현재 환경에서 다시 만든다. 새 checkpoint에서는 이 파생 함수를 제외하고 Python·cloudpickle 버전을 기록한다. 호환성 경고를 없앤다는 이유로 가중치·optimizer·alpha·replay·난수 상태를 초기화하거나 학습률을 바꾸지 않는다.
 - M3-2 결과는 `captures/M3-2/<실행별 폴더>/`에 저장한다. Checkpoint는 새 세대 폴더에 모델·버퍼·상태 및 SHA-256 manifest를 함께 완성한 뒤 공개하며 이전 세대는 보존한다.
 - `max_steps=100`, `episodes=10`은 GUI 시작값이며 학습 수렴 기준이 아니다. 실제 SAC 업데이트·장비 제어를 수행하지 않은 검증을 학습 성공으로 기록하지 않는다.
 
@@ -109,6 +110,7 @@
 - 이동 학습 화면은 세 시작 모델의 이름을 선택하면 해당 checkpoint와 확정 KF를 즉시 적용한다. 별도 경로 적용 버튼을 요구하지 않으며 YOLO·KF·checkpoint의 수동 경로 입력은 선택적인 상세 화면에 둔다. 자동 준비나 에피소드 시작 때 시작 모델을 다시 적용하여 직전 업데이트를 되돌리지 않는다. 다른 실행에서 저장한 checkpoint도 상세 화면에서 선택할 수 있게 유지한다.
 - `tx-moving-v3`는 기존 추적 두 항에 저장된 `visible_bonus`를 더하고, `confirmed_missing_terminal`에서는 신선한 명령 후 미검출이 기존 3초 한계까지 확인된 행동 한 개만 terminal 경험으로 저장한다. 현재 세 시작 모델은 `visible_bonus=1`, `loss_pan_weight=10`, `loss_base=0`이다. 유실 벌점은 양자화·clamp 전 Pan 상대 요청량의 절댓값/90에 비례하며 Tilt·운용 한계·정규화·네트워크·엔트로피 설정을 함께 바꾸지 않는다.
 - 통신 오류·오래된 영상·잘못된 관측·초기 검출 실패·수동 종료는 유실 벌점으로 만들지 않는다. 3초 이내 재검출되면 보류한 실패 행동을 제외하고 늦은 관측으로 transition을 완성하지 않는다. 확정 유실의 next observation은 terminal mask로 차단하는 영벡터이며 실제 위치·KF·intensity 측정값으로 로그에 채우지 않는다. `done=True, timeout=False`와 정상 시간 경계의 `done=True, timeout=True`를 저장·재개·학습에서 구분한다.
+- `observation_timeout` 종료의 세부 원인은 `run_stop.detail`에 보존하고 GUI에도 표시한다. 모델 로딩 경고와 영상·명령 일치/시각 검사의 종료를 혼동하지 않으며, 세부 로그 없이 카메라 설정이나 관측 유효시간을 바꾸지 않는다. 중단 저장이 끝나면 진행 표시는 `saving`에서 완료로 갱신한다.
 - 시뮬레이션 checkpoint 변환은 `tools/analysis/export_moving_live_checkpoint.py`에서 새 폴더로만 수행한다. 원본 model.zip, replay 배열·보상·종료 플래그, optimizer·alpha·학습 카운터와 정책/학습 난수 상태를 보존하며 추가 학습 없이 형식만 연결한다. 시뮬레이션의 즉시 유실 종료와 실전의 3초 확정 종료 차이, 원래 시뮬레이션 환경 RNG를 provenance에 남긴다. 변환·재개 검증에 사용한 합성 경험/업데이트는 선택 모델과 분리하고 실제 장비 검증으로 보고하지 않는다.
 - 실시간 결과는 `captures/M5-3/moving_<실행시각>/`에 원본 영상·검출·KF·step·episode·update·paired checkpoint를 함께 저장한다. episode 보상 합/평균은 확정 유실을 포함한 기록 보상 기준이며 조준 오차·intensity·적중은 유효 검출 기준이다. 기록 보상 0개는 결측으로 표시한다. 그래프 실패는 별도 이벤트와 화면에 안내하고 성공한 checkpoint 저장을 실패로 바꾸지 않는다. 오프라인 초기학습 손실과 실제 추적 episode 성능을 구분한다.
 

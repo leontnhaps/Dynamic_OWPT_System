@@ -7,11 +7,13 @@ import json
 import math
 import os
 from pathlib import Path
+import platform
 import random
 import statistics
 import threading
 import time
 import uuid
+import zipfile
 import numpy as np
 from common.tx_tracking import SCHEMA, TrackingConfig, checkpoint_run_config
 
@@ -241,7 +243,18 @@ class SACLearner:
             from stable_baselines3 import SAC
             from stable_baselines3.common.logger import configure
             self.source = str(source.resolve())
-            self.policy = SAC.load(source/'model.zip', device=device)
+            # SB3 pickles its derived constant-schedule closure. Python code
+            # objects cannot reliably be unpickled across Python versions.
+            # Verify the authoritative numeric rate before rebuilding only
+            # that derived object; preserve every trained tensor/optimizer.
+            learning_rate = state['sac']['learning_rate']
+            with zipfile.ZipFile(source/'model.zip') as archive:
+                model_data = json.loads(archive.read('data'))
+            saved_rate = model_data.get('learning_rate')
+            if type(saved_rate) not in (int, float) or saved_rate != learning_rate:
+                raise ValueError('모델의 고정 학습률이 checkpoint 설정과 일치하지 않습니다.')
+            self.policy = SAC.load(source/'model.zip', device=device,
+                                   custom_objects={'lr_schedule': lambda _remaining: learning_rate})
             if self.policy.observation_space.shape != (cfg.observation_size,) or self.policy.action_space.shape != (2,):
                 raise ValueError(f'{cfg.observation_size}차원 관측 / 2차원 action 모델 필요')
             self.policy.set_logger(configure(folder=None, format_strings=[]))
@@ -329,7 +342,8 @@ class SACLearner:
         name = f'episode_{self.episodes:06d}_{checkpoint_id[:8]}'
         temp = root/('.pending_'+checkpoint_id)
         temp.mkdir()
-        self.policy.save(temp/'model.zip')
+        # Recreated by SB3 from the saved numeric learning_rate on load.
+        self.policy.save(temp/'model.zip', exclude=['lr_schedule'])
         buffer = self.policy.replay_buffer
         n = buffer.size()
         fields = ('observations', 'next_observations', 'actions', 'rewards', 'dones', 'timeouts')
@@ -349,7 +363,9 @@ class SACLearner:
                      python_rng=random.getstate(), source=self.source,
                      experiment_context=getattr(self, 'experiment_context', None),
                      normalization=self.cfg.normalization, action_grid='round_half_away_from_zero',
-                     versions={p: importlib.metadata.version(p) for p in ('numpy', 'torch', 'gymnasium', 'stable-baselines3')})
+                     versions=dict({p: importlib.metadata.version(p)
+                                    for p in ('numpy', 'torch', 'gymnasium', 'stable-baselines3', 'cloudpickle')},
+                                   python=platform.python_version()))
         dump(temp/'state.json', state)
         files = {name: digest(temp/name) for name in ('model.zip', 'replay.npz', 'state.json', 'rng.npz')}
         dump(temp/'manifest.json', dict(schema=self.cfg.schema, checkpoint_id=checkpoint_id, files=files))

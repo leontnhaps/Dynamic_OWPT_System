@@ -53,6 +53,7 @@ class MovingRun:
         self.command = np.zeros(2)
         self.command_id = self.command_ack_s = self.last_command_time = None
         self.stop_requested = False
+        self.stop_detail = ''
         self.end_requested = None
         self.inflight = self.buffered = None
         self.pending_loss = None
@@ -95,6 +96,7 @@ class MovingRun:
         self.latest = self.latest_metadata = None
         self.rewards = []
         self.stop_requested = self.episode_saved = False
+        self.stop_detail = ''
         self.end_requested = self.save_request = None
         self.learner.cancel.clear()
         self.kalman.reset()
@@ -539,6 +541,10 @@ class MovingRun:
         self.saved(success)
 
     def abort(self, reason='user_stop', detail=''):
+        if not self.stop_requested:
+            # Keep the original stop cause for the UI after the asynchronous
+            # save. The same detail is already persisted in run_stop events.
+            self.stop_detail = detail
         self.stop_requested = True
         self.learner.cancel.set()
         self.event('run_stop', reason=reason, detail=detail)

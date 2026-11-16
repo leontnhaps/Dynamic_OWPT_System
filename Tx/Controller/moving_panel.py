@@ -522,7 +522,11 @@ class MovingPanel(ttk.Frame):
                     self.run.saved(False)
                     self.hardware_ready = self.previewing = False
                     raise
-                self.result_text.set(f"Episode {report['episode']} · {report['reason']} · 보상합 {report.get('reward_sum')} · "
+                reason_text = report['reason']
+                detail = getattr(self.run, 'stop_detail', '')
+                if detail:
+                    reason_text += f' ({detail})'
+                self.result_text.set(f"Episode {report['episode']} · {reason_text} · 보상합 {report.get('reward_sum')} · "
                     f"RMS {report.get('rms_px')} px · 업데이트 {report['completed_updates']}/{report['planned_updates']} · {self.log.folder}")
                 if plots.get('errors'):
                     self.result_text.set(self.result_text.get()+' · 그래프 일부 실패 (원본 로그 유지)')
@@ -531,6 +535,8 @@ class MovingPanel(ttk.Frame):
                 self.run.saved()
                 if self.run.stop_requested or self.run.phase == 'error':
                     self.hardware_ready = self.previewing = False
+                    self.progress.set(f'Episode {self.run.episode} · 중단 저장 완료 · step {self.run.steps} · '
+                                      f'저장 {self.run.new_transitions}개 · 명령각 {self.run.command.tolist()}°')
                     self.status.set('중단 결과 저장 완료 · 자동 복귀 없음 · 다시 실행하려면 자동 준비하세요.')
                 else:
                     self.status.set('저장 완료 · 시작점 복귀 중')
