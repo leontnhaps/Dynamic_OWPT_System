@@ -262,9 +262,10 @@ def analyze_experiment(root):
         raise ValueError('No saved trials in this experiment.')
     summary = aggregate(rows)
     name = 'analysis_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + uuid4().hex[:6]
-    with TemporaryDirectory(dir=root) as temporary:
-        out = Path(temporary) / name
-        out.mkdir()
+    # Stage next to the final directory; nesting the long analysis name inside a
+    # scratch directory can exceed Windows path limits on experiment worktrees.
+    with TemporaryDirectory(dir=root, prefix='.a-') as temporary:
+        out = Path(temporary)
         write_csv(out / 'trials.csv', rows)
         write_csv(out / 'bits.csv', bits)
         write_csv(out / 'summary.csv', summary)
