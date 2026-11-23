@@ -8,7 +8,8 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from common.laser_pattern import pattern_settings
-from common.arc_protocol import DEFAULT_BIT_MS, DEFAULT_PERIOD_S
+from common.arc_protocol import (ANGLE_TEST_BIT_MS, ANGLE_TEST_FRAMES, ANGLE_TEST_PERIOD_S,
+                                 DEFAULT_BIT_MS, DEFAULT_PERIOD_S)
 from common.tx_setup import TX_CAMERA_SETTINGS
 from Tx.Controller.arduino_capture import ArduinoSerial, RxCapture, parse_reading, serial_ports
 from Tx.Controller.pi_ook_rx import PI_RECEIVER, PiSshReceiver, PiCapture
@@ -95,6 +96,8 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
             ttk.Entry(arc_row, textvariable=variable, width=5).pack(side='left')
         ttk.Button(arc_row, text='반원 2번 · 광프레임 송신',
                    command=lambda: self.guard(self.start_arc)).pack(side='left', padx=6)
+        ttk.Button(arc_row, text='고정각 수신 · 12 ms × 30회',
+                   command=lambda: self.guard(self.start_angle_reception)).pack(side='left', padx=3)
         ttk.Label(self, text='1=ON, 0=OFF · Pi에서 송신 · 시험 종료 시 OFF · 자동 저장은 WAIT 대기 없음\n'
                   '속도 시험은 전압을 기록합니다. 반원 시험은 별도 실행한 Rx 프로그램에서 조건별 Pan 명령을 적용합니다.').pack(anchor='w')
 
@@ -377,7 +380,15 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
                              float(self.arc_bit_ms.get()), float(self.arc_period_s.get()), int(self.arc_steps.get()),
                              pair_id=self.arc_pair.get(), mode=self.arc_mode.get())
         self.arc.start()
-        self.saved_status.set(f'반원 Tx 기록: {log_path}')
+        self.saved_status.set(f'광프레임 Tx 기록: {log_path}')
+
+    def start_angle_reception(self):
+        self.check_ready()
+        self.arc_bit_ms.set(str(ANGLE_TEST_BIT_MS))
+        self.arc_period_s.set(str(ANGLE_TEST_PERIOD_S))
+        self.arc_steps.set(str(ANGLE_TEST_FRAMES))
+        self.arc_mode.set('A')
+        self.start_arc()
 
     def check_arc_finished(self):
         if self.arc is not None and self.arc.phase == 'done':
