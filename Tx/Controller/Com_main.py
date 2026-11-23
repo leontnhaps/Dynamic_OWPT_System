@@ -34,7 +34,7 @@ class App:
         self.detection=DetectionPanel(tabs,self);tabs.add(self.detection,text='M1-3 (PV 검출)')
         self.timing=TimingPanel(tabs,self);tabs.add(self.timing,text='M1-5 (응답 · 제어 시간)')
         self.stationary=StationaryPanel(tabs,self);tabs.add(self.stationary,text='M3-2 (정지 PV · SAC)')
-        self.ook=OokPanel(tabs,self);tabs.add(self.ook,text='M4-4 (Laser · OOK 시험)')
+        self.ook=OokPanel(tabs,self);tabs.add(self.ook,text='OOK 속도 (M4-4 · M6-4)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)

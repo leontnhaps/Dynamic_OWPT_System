@@ -6,10 +6,11 @@ import uuid
 import queue
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from common.laser_pattern import pattern_settings
 from common.tx_setup import TX_CAMERA_SETTINGS
 from Tx.Controller.arduino_capture import ArduinoSerial, RxCapture, parse_reading, serial_ports
+from Tx.Controller.pi_ook_rx import PI_RECEIVER, PiSshReceiver, PiCapture
 from Tx.Controller.ook_experiment_panel import OokExperimentMixin
 from common.ook_experiment import interval_value
 
@@ -57,15 +58,18 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         row = ttk.Frame(self); row.pack(fill='x', pady=3)
         self.rx_port = tk.StringVar()
         self.rx_save = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row, text='Arduino 수신 자동 저장', variable=self.rx_save).pack(side='left')
+        ttk.Checkbutton(row, text='Rx 수신 자동 저장', variable=self.rx_save).pack(side='left')
+        self.rx_ssh_target = tk.StringVar(value='gmlwns@192.168.219.45')
+        ttk.Entry(row, textvariable=self.rx_ssh_target, width=23).pack(side='left', padx=3)
+        ttk.Button(row, text='Pi SSH 연결', command=lambda: self.guard(self.connect_pi_rx)).pack(side='left')
         ttk.Label(row, text='COM 포트').pack(side='left', padx=3)
         self.port_box = ttk.Combobox(row, textvariable=self.rx_port, width=12)
         self.port_box.pack(side='left')
         for label, action in [('포트 새로고침', self.refresh_ports), ('Arduino 연결', self.connect_rx),
                               ('연결 해제', self.disconnect_rx)]:
             ttk.Button(row, text=label, command=lambda fn=action: self.guard(fn)).pack(side='left', padx=3)
-        self.rx_status = tk.StringVar(value='Arduino 미연결 · 250000 baud · IDE 시리얼 모니터를 닫고 연결하세요.')
-        self.saved_status = tk.StringVar(value='저장: captures/M4-4/<시험 폴더>/')
+        self.rx_status = tk.StringVar(value='Rx 미연결 · Pi + INA219는 Pi SSH 연결을 선택하세요.')
+        self.saved_status = tk.StringVar(value='Pi 수신 저장: captures/M6-4/ · Arduino 수신 저장: captures/M4-4/')
         ttk.Label(self, textvariable=self.rx_status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, textvariable=self.saved_status, wraplength=1100).pack(anchor='w')
         self.build_experiment_controls()
@@ -75,6 +79,14 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
     @property
     def busy(self):
         return self.experiment is not None or self.output_requested or self.run_id is not None or self.rx_phase is not None
+
+    @property
+    def using_pi_rx(self):
+        return getattr(self.arduino, 'source', None) == PI_RECEIVER
+
+    @property
+    def stage_name(self):
+        return 'M6-4' if self.using_pi_rx else 'M4-4'
 
     def guard(self, fn):
         try:
@@ -92,13 +104,25 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         if not self.rx_port.get() and len(ports) == 1:
             self.rx_port.set(ports[0])
 
-    def connect_rx(self):
+    def check_rx_change(self):
         if self.busy:
-            raise ValueError('시험 중지 후 Arduino 연결을 변경하세요.')
+            raise ValueError('시험 중지 후 Rx 연결을 변경하세요.')
         if self.arduino is not None:
             if self.arduino.worker.is_alive():
-                raise ValueError('기존 Arduino 연결을 해제하고 잠시 기다리세요.')
+                raise ValueError('기존 Rx 연결을 해제하고 잠시 기다리세요.')
             self.arduino = None
+
+    def connect_pi_rx(self):
+        self.check_rx_change()
+        target = self.rx_ssh_target.get().strip()
+        password = simpledialog.askstring('Rx SSH 연결', f'{target}\nSSH 비밀번호 (키 인증은 빈칸)', show='*', parent=self)
+        if password is None:
+            return
+        self.arduino = PiSshReceiver(target, password)
+        self.rx_status.set('Rx Pi SSH 연결 중…')
+
+    def connect_rx(self):
+        self.check_rx_change()
         port = self.rx_port.get().strip()
         if not port:
             raise ValueError('Arduino COM 포트를 선택하세요.')
@@ -106,21 +130,39 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         self.rx_status.set('Arduino 연결 중 · 보드 초기화 대기…')
 
     def disconnect_rx(self):
+        reason = 'rx_disconnected' if self.using_pi_rx else 'arduino_disconnected'
         if self.experiment and not self.capture:
-            self.cancel_experiment('arduino_disconnected')
+            self.cancel_experiment(reason)
         if self.capture:
-            self.abort_capture('arduino_disconnected')
+            self.abort_capture(reason)
         if self.arduino:
             self.arduino.close()
-        self.rx_status.set('Arduino 연결 해제')
+        self.rx_status.set('Rx 연결 해제')
 
     def finish_capture(self, reason):
+        if (self.using_pi_rx and self.capture and self.rx_phase != 'stopping_rx'
+                and reason in ('completed', 'tx_timing_overrun')):
+            if self.arduino.connected:
+                try:
+                    self.arduino.send('stop', self.trial_id)
+                    self.rx_phase = 'stopping_rx'
+                    self.rx_stop_reason = reason
+                    self.rx_deadline = time.monotonic() + 5
+                    return
+                except OSError:
+                    pass
+            reason = 'rx_stop_failed'
         capture, self.capture = self.capture, None
+        was_stopping = self.rx_phase == 'stopping_rx'
         self.rx_phase = self.rx_deadline = None
         self.rx_start_sent = False
-        if self.arduino and self.arduino.connected:
+        if self.arduino and self.arduino.connected and not was_stopping:
             try:
-                self.arduino.send('stop')
+                if self.using_pi_rx:
+                    if capture:
+                        self.arduino.send('stop', self.trial_id)
+                else:
+                    self.arduino.send('stop')
             except OSError:
                 pass
         if capture:
@@ -153,6 +195,9 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
 
     def poll_rx(self):
         if self.arduino is None:
+            return
+        if self.using_pi_rx:
+            self.poll_pi_rx()
             return
         for _ in range(200):
             try:
@@ -215,19 +260,64 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
             # Detector calibration and HIGH/LOW classification do not gate TX.
             if (self.rx_phase == 'recording_start' and reading['state'] != 'IDLE'
                     and reading['pv_V'] is not None and age < 1.0):
-                if not self.online or self.pending or not self.app.current or now - self.app.current[2] > 2:
-                    self.abort_capture('tx_not_ready')
-                    continue
-                delay = (self.capture.config.get('experiment') or {}).get('launch_delay_ms', 0)
-                if delay:
-                    self.rx_phase = 'launch_delay'
-                    self.rx_deadline = now + delay/1000
-                else:
-                    self.rx_phase = 'sending'
-                    self.rx_deadline = None
-                    self.transmit(self.trial_settings, self.trial_id)
+                self.first_rx_sample(now)
         if self.capture and not self.arduino.worker.is_alive():
             self.abort_capture('arduino_connection_lost')
+
+    def first_rx_sample(self, now):
+        if not self.online or self.pending or not self.app.current or now - self.app.current[2] > 2:
+            self.abort_capture('tx_not_ready')
+            return
+        delay = (self.capture.config.get('experiment') or {}).get('launch_delay_ms', 0)
+        if delay:
+            self.rx_phase = 'launch_delay'
+            self.rx_deadline = now + delay / 1000
+        else:
+            self.rx_phase = 'sending'
+            self.rx_deadline = None
+            self.transmit(self.trial_settings, self.trial_id)
+
+    def poll_pi_rx(self):
+        receiver = self.arduino
+        if receiver.terminal_error:
+            message = receiver.terminal_error
+            if self.capture:
+                self.abort_capture('rx_ssh_error')
+            elif self.experiment:
+                self.cancel_experiment('rx_ssh_error')
+            self.rx_status.set('Rx SSH 오류: ' + message)
+            return
+        latest = None
+        for _ in range(512):
+            try:
+                event = receiver.events.get_nowait()
+            except queue.Empty:
+                break
+            kind = event['kind']
+            if kind == 'ready':
+                self.rx_status.set(f'Rx Pi 연결됨: {receiver.port} · INA219 I²C 3 / 0x40')
+            if not self.capture or event.get('token') != self.trial_id:
+                continue
+            if kind != 'sample':
+                self.write_log(dict(event='pi_rx', **event))
+            if kind == 'started':
+                self.capture.confirm(event)
+            elif kind == 'sample':
+                self.capture.write_sample(event)
+                latest = event['bus_raw'] * .004
+                self.rx_last_seen = event['pc_receive_monotonic_ns'] / 1e9
+                now = time.monotonic()
+                if self.capture.clipped_rows:
+                    self.abort_capture('adc_clipped')
+                elif self.rx_phase == 'recording_start' and receiver.connected and now - self.rx_last_seen < 1:
+                    self.first_rx_sample(now)
+            elif kind == 'stopped':
+                if self.rx_phase == 'stopping_rx':
+                    self.finish_capture(self.rx_stop_reason)
+                else:
+                    self.abort_capture('rx_stopped_early')
+        if latest is not None and self.capture:
+            self.rx_status.set(f'Rx Pi · PV={latest:.3f} V · {self.capture.rows}행 · 누락 {self.capture.missing_records}')
 
     def request(self, cmd):
         token = 'm4-4-' + uuid.uuid4().hex
@@ -291,15 +381,16 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
     def begin_trial(self, settings, sample_ms, folder=None, experiment=None):
         save_rx = experiment is not None or self.rx_save.get()
         if save_rx and (self.arduino is None or not self.arduino.connected):
-            raise ValueError('Arduino를 연결하세요. 원시 송신만 하려면 수신 자동 저장을 해제하세요.')
+            raise ValueError('Rx Pi SSH 또는 Arduino를 연결하세요. 원시 송신만 하려면 수신 자동 저장을 해제하세요.')
         token = 'm4-4-' + uuid.uuid4().hex
-        folder = folder or self.app.stage_dir('M4-4') / (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + token[-6:])
+        folder = folder or self.app.stage_dir(self.stage_name) / (datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + token[-6:])
         folder.mkdir()
         self.logpath = folder / 'events.jsonl'
         self.trial_paths[token] = self.logpath
         self.write_log(dict(event='requested', request_id=token, settings=settings, hardware=self.hardware))
         if save_rx:
-            self.capture = RxCapture(folder, settings, self.arduino.port, token, sample_ms, experiment)
+            capture_type = PiCapture if self.using_pi_rx else RxCapture
+            self.capture = capture_type(folder, settings, self.arduino.port, token, sample_ms, experiment)
             self.saved_status.set(f'기록 중: {folder}')
             self.trial_settings, self.trial_id = settings, token
             self.tx_state = 'not_sent'
@@ -412,11 +503,11 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
                 try:
                     self.arduino.send(f'raw {self.capture.sample_ms}', self.trial_id)
                 except OSError:
-                    self.abort_capture('arduino_start_failed')
+                    self.abort_capture('rx_start_failed')
                     return
                 self.rx_phase = 'recording_start'
                 self.rx_deadline = time.monotonic() + 5
-                self.state.set('Arduino 첫 전압 기록 확인 후 바로 송신 · WAIT 대기 없음')
+                self.state.set('Rx 첫 전압 기록 확인 후 송신')
 
     def tick(self):
         try:
@@ -439,9 +530,11 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
                     self.transmit(self.trial_settings, self.trial_id)
             elif self.rx_phase == 'tail':
                 self.finish_capture('completed')
+            elif self.rx_phase == 'stopping_rx':
+                self.abort_capture('rx_stop_timeout')
             else:
                 self.abort_capture('rx_preparation_timeout')
-                self.rx_status.set('전압 기록 시작 실패 · 최신 Arduino 스케치 업로드와 250000 baud 연결 확인')
+                self.rx_status.set('전압 기록 시작 실패 · Rx 연결 및 샘플링 설정을 확인하세요.')
         if (self.capture and self.rx_phase in ('launch_delay', 'sending', 'tail') and
                 (self.rx_last_seen is None or now - self.rx_last_seen > 3)):
             self.abort_capture('rx_data_timeout')

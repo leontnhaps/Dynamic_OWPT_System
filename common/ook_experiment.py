@@ -1,6 +1,7 @@
 """Reproducible OOK test frames, deliberately separate from angle commands."""
 import math
 import random
+from typing import NamedTuple
 from common.laser_pattern import pattern_settings
 
 VERSION = 'ook-test-v2'
@@ -16,6 +17,23 @@ RULES = dict(LEGACY_RULES, version=VERSION,
              sync='header acquisition then median transition phase; payload excluded',
              edge_search_window_bits=0.55,
              clock='configured bit period; phase from header transition brackets only')
+
+class HistoricalCondition(NamedTuple):
+    blocks: int
+    bit_errors: int
+    correct_blocks: int
+
+
+# Archived Arduino values for the seven displayed periods (ms), M4-4 issue #39.
+# All payload bits in these conditions were decided.
+PRESENTATION_REFERENCE = {
+    100: HistoricalCondition(10, 0, 10), 50: HistoricalCondition(10, 0, 10),
+    30: HistoricalCondition(10, 0, 10), 20: HistoricalCondition(30, 0, 30),
+    15: HistoricalCondition(30, 0, 30), 14: HistoricalCondition(30, 1, 29),
+    12: HistoricalCondition(30, 19, 17),
+}
+PI_RECEIVER = 'pi_ina219_ssh'
+PI_DECODER = 'ook-header-ls-point-mean-1'
 
 
 def interval_value(value):
@@ -38,7 +56,11 @@ def number_list(text, integer=False):
 
 
 def make_plan(bit_times, sample_times, blocks, seed, pattern='random', mode='sweep', note=''):
-    if not 1 <= blocks <= 1000:
+    periods = [1000] if mode == 'step' else bit_times
+    counts = blocks if isinstance(blocks, dict) else dict.fromkeys(periods, blocks)
+    if set(counts) != set(periods):
+        raise ValueError('각 비트 시간에 대응하는 반복 횟수가 필요합니다.')
+    if not counts or any(type(count) is not int or not 1 <= count <= 1000 for count in counts.values()):
         raise ValueError('조건별 반복은 1~1000회입니다.')
     if pattern not in ('random', 'alternating', 'runs') or mode not in ('sweep', 'step'):
         raise ValueError('Unknown experiment mode/pattern')
@@ -46,11 +68,7 @@ def make_plan(bit_times, sample_times, blocks, seed, pattern='random', mode='swe
     trials = []
     for sample_ms in sample_times:
         interval_value(sample_ms)
-        if mode == 'step':
-            # Each independently recorded trial contains OFF / ON / OFF for 1s each.
-            conditions = [(1000, n) for n in range(blocks)]
-        else:
-            conditions = [(bit_ms, n) for bit_ms in bit_times for n in range(blocks)]
+        conditions = [(bit_ms, n) for bit_ms in periods for n in range(counts[bit_ms])]
         for bit_ms, n in conditions:
             payload = (''.join(str(rng.randrange(2)) for _ in range(PAYLOAD_BITS)) if pattern == 'random'
                        else ('10' * 16 if pattern == 'alternating' else '00001111' * 4))
@@ -66,3 +84,11 @@ def make_plan(bit_times, sample_times, blocks, seed, pattern='random', mode='swe
         raise ValueError('한 실험은 최대 10000회입니다. 조건을 나누어 실행하세요.')
     return dict(schema_version=1, rules=RULES, seed=seed, note=note, mode=mode, pattern=pattern,
                 timing_note='Random launch delay does not establish a known Tx/Rx phase.', trials=trials)
+
+
+def make_pi_comparison_plan(seed, note=''):
+    blocks = {period: old.blocks for period, old in PRESENTATION_REFERENCE.items()}
+    plan = make_plan(list(blocks), [5], blocks, seed, note=note)
+    plan.update(preset='m4-4-presentation-150', reference='M4-4 issue #39',
+                receiver=PI_RECEIVER, decoder_version=PI_DECODER)
+    return plan

@@ -5,9 +5,22 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog
-from common.ook_experiment import make_plan, number_list, RULES
+from common.ook_experiment import (PI_DECODER, PI_RECEIVER, make_pi_comparison_plan,
+                                   make_plan, number_list)
+
+
+def analyze_saved_experiment(folder):
+    manifest = json.loads((Path(folder) / 'experiment.json').read_text(encoding='utf-8'))
+    if manifest.get('receiver') == PI_RECEIVER:
+        from Tx.Controller.ook_pi_analysis import analyze_experiment
+    elif 'receiver' not in manifest:
+        from Tx.Controller.ook_analysis import analyze_experiment
+    else:
+        raise ValueError(f"지원하지 않는 Rx 기록 형식: {manifest['receiver']}")
+    return analyze_experiment(folder)
 
 
 class OokExperimentMixin:
@@ -44,6 +57,7 @@ class OokExperimentMixin:
                      state='readonly', width=16).pack(side='left')
         for text, callback in [('① 1초 ON/OFF 반복', lambda: self.start_experiment('step')),
                                ('② 속도 비교 시작', lambda: self.start_experiment('sweep')),
+                               ('Pi Rx · 기존 7속도 150회 + 그래프', lambda: self.start_experiment('presentation')),
                                ('결과 폴더 분석', self.choose_analysis)]:
             ttk.Button(row, text=text, command=lambda fn=callback:self.guard(fn)).pack(side='left', padx=3)
         row = ttk.Frame(box); row.pack(fill='x')
@@ -54,7 +68,9 @@ class OokExperimentMixin:
     def start_experiment(self, mode):
         self.check_ready()
         if self.arduino is None or not self.arduino.connected:
-            raise ValueError('Arduino 연결이 필요합니다.')
+            raise ValueError('선택한 Rx에 먼저 연결하세요.')
+        if mode == 'presentation' and not self.using_pi_rx:
+            raise ValueError('기존 7속도 비교는 Raspberry Pi Rx를 SSH로 연결한 뒤 시작하세요.')
         if self.hardware.get('simulated'):
             raise ValueError('실제 장비로 연결하세요. 시뮬레이션 결과는 광학 실험에 사용할 수 없습니다.')
         if 'laser_pattern' not in self.hardware.get('capabilities', []):
@@ -67,12 +83,17 @@ class OokExperimentMixin:
             import matplotlib
         except ImportError as exc:
             raise ValueError('requirements-m4-4.txt의 Python 패키지를 설치하세요.') from exc
-        plan = make_plan(number_list(self.sweep_bits.get()) if mode == 'sweep' else [],
-                         number_list(self.sweep_samples.get(), integer=True),
-                         int(self.sweep_count.get()), int(self.sweep_seed.get()),
-                         {'난수32bit':'random', '1010 반복':'alternating', '00001111 반복':'runs'}[self.sweep_pattern.get()],
-                         mode=mode, note=self.condition_note.get())
-        root = self.app.stage_dir('M4-4') / ('experiment_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'_'+uuid.uuid4().hex[:6])
+        if mode == 'presentation':
+            plan = make_pi_comparison_plan(int(self.sweep_seed.get()), self.condition_note.get())
+        else:
+            plan = make_plan(number_list(self.sweep_bits.get()) if mode == 'sweep' else [],
+                             number_list(self.sweep_samples.get(), integer=True),
+                             int(self.sweep_count.get()), int(self.sweep_seed.get()),
+                             {'난수32bit':'random', '1010 반복':'alternating', '00001111 반복':'runs'}[self.sweep_pattern.get()],
+                             mode=mode, note=self.condition_note.get())
+        if self.using_pi_rx:
+            plan.update(receiver=PI_RECEIVER, decoder_version=PI_DECODER)
+        root = self.app.stage_dir(self.stage_name) / ('experiment_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'_'+uuid.uuid4().hex[:6])
         root.mkdir()
         (root/'experiment.json').write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
         self.experiment, self.experiment_root, self.last_experiment = plan, root, root
@@ -126,7 +147,9 @@ class OokExperimentMixin:
         try:
             self.check_ready(for_experiment=True)
             spec = self.experiment['trials'][self.batch_index]
-            self.active_spec = dict(spec, rules_version=RULES['version'])
+            self.active_spec = dict(spec, rules_version=self.experiment['rules']['version'])
+            if 'decoder_version' in self.experiment:
+                self.active_spec['decoder_version'] = self.experiment['decoder_version']
             folder = self.experiment_root / f'trial_{self.batch_index+1:05d}'
             self.experiment_status.set(f'{self.batch_index+1}/{len(self.experiment["trials"])} · '
                 f'비트 {spec["settings"]["bit_ms"]} ms · 측정 {spec["sample_ms"]} ms · '
@@ -140,7 +163,7 @@ class OokExperimentMixin:
         if self.busy:
             raise ValueError('실험을 마치거나 중지한 후 분석하세요.')
         folder = filedialog.askdirectory(title='experiment.json이 있는 실험 폴더 선택',
-                                         initialdir=str(self.last_experiment or self.app.stage_dir('M4-4')))
+                                         initialdir=str(self.last_experiment or self.app.stage_dir(self.stage_name)))
         if folder:
             self.start_analysis(folder)
 
@@ -149,8 +172,7 @@ class OokExperimentMixin:
             raise ValueError('분석 중입니다.')
         def run():
             try:
-                from Tx.Controller.ook_analysis import analyze_experiment
-                self.analysis_events.put((True, analyze_experiment(folder)))
+                self.analysis_events.put((True, analyze_saved_experiment(folder)))
             except Exception as exc:
                 self.analysis_events.put((False, str(exc)))
         self.experiment_status.set('원시 데이터 분석 중…')
