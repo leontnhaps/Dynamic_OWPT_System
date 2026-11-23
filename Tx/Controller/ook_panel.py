@@ -1,4 +1,4 @@
-"""M4-4 laser controls and raw OOK tests; no command-frame encoding yet."""
+"""M4-4 raw OOK tests and the M6-4 fixed-source receiver experiment."""
 import json
 import math
 import time
@@ -8,14 +8,18 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from common.laser_pattern import pattern_settings
+from common.arc_protocol import DEFAULT_BIT_MS, DEFAULT_PERIOD_S
 from common.tx_setup import TX_CAMERA_SETTINGS
 from Tx.Controller.arduino_capture import ArduinoSerial, RxCapture, parse_reading, serial_ports
 from Tx.Controller.pi_ook_rx import PI_RECEIVER, PiSshReceiver, PiCapture
 from Tx.Controller.ook_experiment_panel import OokExperimentMixin
+from Tx.Controller.arc_sender import ArcSender
 from common.ook_experiment import interval_value
 
 
 class OokPanel(OokExperimentMixin, ttk.Frame):
+    arc = None
+
     def __init__(self, parent, app):
         super().__init__(parent, padding=8)
         self.app = app
@@ -73,12 +77,31 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         ttk.Label(self, textvariable=self.rx_status, wraplength=1100).pack(anchor='w')
         ttk.Label(self, textvariable=self.saved_status, wraplength=1100).pack(anchor='w')
         self.build_experiment_controls()
+        arc_row = ttk.Frame(self)
+        arc_row.pack(fill='x', pady=3)
+        self.arc_bit_ms = tk.StringVar(value=str(DEFAULT_BIT_MS))
+        self.arc_period_s = tk.StringVar(value=f'{DEFAULT_PERIOD_S:g}')
+        self.arc_steps = tk.StringVar(value='180')
+        self.arc_pair = tk.StringVar()
+        self.arc_mode = tk.StringVar(value='A')
+        ttk.Label(arc_row, text='비교 ID').pack(side='left', padx=3)
+        ttk.Entry(arc_row, textvariable=self.arc_pair, width=12).pack(side='left')
+        ttk.Label(arc_row, text='조건').pack(side='left', padx=3)
+        ttk.Combobox(arc_row, textvariable=self.arc_mode, values=('A', 'B'),
+                     state='readonly', width=3).pack(side='left')
+        for label, variable in [('비트(ms)', self.arc_bit_ms), ('1° 간격(s)', self.arc_period_s),
+                                ('마지막 단계', self.arc_steps)]:
+            ttk.Label(arc_row, text=label).pack(side='left', padx=3)
+            ttk.Entry(arc_row, textvariable=variable, width=5).pack(side='left')
+        ttk.Button(arc_row, text='반원 2번 · 광프레임 송신',
+                   command=lambda: self.guard(self.start_arc)).pack(side='left', padx=6)
         ttk.Label(self, text='1=ON, 0=OFF · Pi에서 송신 · 시험 종료 시 OFF · 자동 저장은 WAIT 대기 없음\n'
-                  '측정 간격은 목표값입니다. 누락·실제 간격을 결과에서 확인하세요. 각도 제어는 하지 않습니다.').pack(anchor='w')
+                  '속도 시험은 전압을 기록합니다. 반원 시험은 별도 실행한 Rx 프로그램에서 조건별 Pan 명령을 적용합니다.').pack(anchor='w')
 
     @property
     def busy(self):
-        return self.experiment is not None or self.output_requested or self.run_id is not None or self.rx_phase is not None
+        return (self.experiment is not None or self.output_requested or self.run_id is not None
+                or self.rx_phase is not None or (self.arc is not None and self.arc.active))
 
     @property
     def using_pi_rx(self):
@@ -333,8 +356,34 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         if not frame or time.monotonic() - frame[2] > 2:
             raise ValueError('카메라 시작 후 최근 영상을 확인하세요.')
         active = self.output_requested or self.run_id is not None or self.rx_phase is not None
-        if active or (self.experiment is not None and not for_experiment) or self.hardware.get('pattern_active'):
+        if (active or (self.arc is not None and self.arc.active)
+                or (self.experiment is not None and not for_experiment) or self.hardware.get('pattern_active')):
             raise ValueError('레이저 OFF / 시험 중지 후 다시 실행하세요.')
+
+    def start_arc(self):
+        self.check_ready()
+        if self.hardware.get('simulated') is not False or 'laser_pattern' not in self.hardware.get('capabilities', []):
+            raise ValueError('실제 Tx Pi를 연결하고 카메라 시작 / 상태 조회를 누르세요.')
+        if self.arduino and (self.arduino.connected or self.arduino.worker.is_alive()):
+            raise ValueError('기존 Rx 연결 해제 후 Rx 터미널에서 반원 측정을 먼저 시작하세요.')
+        log_path = (self.app.stage_dir('M6-4') /
+                    ('arc_tx_' + datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_' + uuid.uuid4().hex[:6] + '.jsonl'))
+
+        def record(event):
+            with log_path.open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(dict(event, pc_unix_ns=time.time_ns()), ensure_ascii=False) + '\n')
+
+        self.arc = ArcSender(self.app.send, record, self.experiment_status.set,
+                             float(self.arc_bit_ms.get()), float(self.arc_period_s.get()), int(self.arc_steps.get()),
+                             pair_id=self.arc_pair.get(), mode=self.arc_mode.get())
+        self.arc.start()
+        self.saved_status.set(f'반원 Tx 기록: {log_path}')
+
+    def check_arc_finished(self):
+        if self.arc is not None and self.arc.phase == 'done':
+            # An unconfirmed OFF blocks all further patterns until an explicit OFF/status succeeds.
+            self.output_requested = not self.arc.off_confirmed
+            self.arc = None
 
     def query_status(self):
         if self.busy or self.pending:
@@ -359,6 +408,10 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         self.request(dict(cmd='ir_cut', level=level))
 
     def off(self):
+        if self.arc is not None and self.arc.active:
+            self.arc.stop('user_stop')
+            self.check_arc_finished()
+            return
         try:
             self.cancel_experiment('user_stop')
         except OSError:
@@ -427,10 +480,23 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
     def event(self, event):
         try:
             self.handle_event(event)
+            if self.arc is not None and self.arc.active:
+                if not self.online:
+                    self.arc.complete(False, 'pi_disconnected')
+                elif event.get('event') in ('outputs_off', 'agent', 'ready', 'hello'):
+                    self.arc.stop('external_output_or_session_change')
+                elif event.get('event') == 'laser' and event.get('request_id') != self.arc.token:
+                    self.arc.stop('external_laser_command')
+                else:
+                    self.arc.handle_event(event)
         except OSError as exc:
+            if self.arc is not None:
+                self.arc.stop('recording_error')
             if self.capture:
                 self.abort_capture('recording_error')
             self.rx_status.set('이벤트 저장 오류: ' + str(exc))
+        finally:
+            self.check_arc_finished()
 
     def handle_event(self, event):
         kind = event.get('event')
@@ -513,9 +579,17 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         try:
             self.tick_capture()
             self.tick_experiment()
+            if self.arc is not None and self.arc.active:
+                frame = self.app.current
+                self.arc.tick(self.online and self.hardware and frame and time.monotonic() - frame[2] <= 2)
         except OSError as exc:
-            self.abort_capture('recording_error')
+            if self.arc is not None:
+                self.arc.stop('recording_error')
+            else:
+                self.abort_capture('recording_error')
             self.rx_status.set('수신/저장 오류: ' + str(exc))
+        finally:
+            self.check_arc_finished()
 
     def tick_capture(self):
         self.poll_rx()
@@ -557,7 +631,15 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
             self.off()
 
     def close(self):
-        self.leave()
-        if self.arduino:
-            self.arduino.close()
+        try:
+            self.leave()
+            if self.arc is not None and self.arc.active:
+                # This window can no longer receive the pending OFF response.
+                self.arc.complete(False, 'window_closed_before_off_ack')
+        except OSError as exc:
+            self.rx_status.set('종료 기록 오류: ' + str(exc))
+        finally:
+            self.check_arc_finished()
+            if self.arduino:
+                self.arduino.close()
 
