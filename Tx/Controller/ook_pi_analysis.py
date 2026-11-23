@@ -11,7 +11,8 @@ from uuid import uuid4
 
 import numpy as np
 
-from common.ook_experiment import HEADER, PAYLOAD_BITS, PI_DECODER, PI_RECEIVER, PRESENTATION_REFERENCE, RULES
+from common.ook_experiment import (HEADER, PAYLOAD_BITS, PI_COMPARISON_PRESET, PI_DECODER,
+                                   PI_RECEIVER, PRESENTATION_REFERENCE, RULES)
 from Tx.Controller.ook_analysis import read_json, score_payload, write_csv, write_json
 
 
@@ -277,7 +278,8 @@ def analyze_experiment(root):
             source_rules=manifest.get('rules'), planned_trials=len(rows),
             saved_trials=sum(r['status'] != 'not_started' for r in rows)))
         if summary:
-            plot_rates(out, summary, show_reference=manifest.get('preset') == 'm4-4-presentation-150')
+            show_reference = manifest.get('preset') in (PI_COMPARISON_PRESET, 'm4-4-presentation-150')
+            plot_rates(out, summary, show_reference=show_reference)
         for (sample_ms, bit_ms), (trial, (t, volts)) in waveforms.items():
             fig = Figure(figsize=(8, 3), layout='constrained')
             ax = fig.subplots()

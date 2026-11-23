@@ -34,6 +34,8 @@ PRESENTATION_REFERENCE = {
 }
 PI_RECEIVER = 'pi_ina219_ssh'
 PI_DECODER = 'ook-header-ls-point-mean-1'
+PI_TRIALS_PER_RATE = 30
+PI_COMPARISON_PRESET = 'm6-4-pi-7rates-30each'
 
 
 def interval_value(value):
@@ -87,8 +89,7 @@ def make_plan(bit_times, sample_times, blocks, seed, pattern='random', mode='swe
 
 
 def make_pi_comparison_plan(seed, note=''):
-    blocks = {period: old.blocks for period, old in PRESENTATION_REFERENCE.items()}
-    plan = make_plan(list(blocks), [5], blocks, seed, note=note)
-    plan.update(preset='m4-4-presentation-150', reference='M4-4 issue #39',
+    plan = make_plan(list(PRESENTATION_REFERENCE), [5], PI_TRIALS_PER_RATE, seed, note=note)
+    plan.update(preset=PI_COMPARISON_PRESET, reference='M4-4 issue #39',
                 receiver=PI_RECEIVER, decoder_version=PI_DECODER)
     return plan

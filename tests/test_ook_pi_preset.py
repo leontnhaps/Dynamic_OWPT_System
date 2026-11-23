@@ -17,9 +17,10 @@ class PresentationPresetTests(unittest.TestCase):
         self.assertEqual(plan['decoder_version'], PI_DECODER)
         trials = plan['trials']
         periods = [trial['settings']['bit_ms'] for trial in trials]
-        self.assertEqual(Counter(periods), {100: 10, 50: 10, 30: 10, 20: 30, 15: 30, 14: 30, 12: 30})
+        self.assertEqual(len(trials), 210)
+        self.assertEqual(Counter(periods), dict.fromkeys((100, 50, 30, 20, 15, 14, 12), 30))
         self.assertNotEqual(periods, sorted(periods))
-        self.assertEqual(sum(len(trial['payload']) for trial in trials), 4800)
+        self.assertEqual(sum(len(trial['payload']) for trial in trials), 6720)
         for trial in trials:
             self.assertEqual(trial['sample_ms'], 5)
             self.assertEqual(trial['settings']['bits'], HEADER + trial['payload'] + '0000')

@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog
-from common.ook_experiment import (PI_DECODER, PI_RECEIVER, make_pi_comparison_plan,
+from common.ook_experiment import (PI_DECODER, PI_RECEIVER, PI_TRIALS_PER_RATE, make_pi_comparison_plan,
                                    make_plan, number_list)
 
 
@@ -41,14 +41,14 @@ class OokExperimentMixin:
         self.sweep_seed = tk.StringVar(value='20261028')
         self.sweep_pattern = tk.StringVar(value='난수32bit')
         self.condition_note = tk.StringVar(value='5m; ambient= ; alignment= ')
-        self.experiment_status = tk.StringVar(value='조건별 10회는 탐색용 · 경계 재측정 후 새 데이터로 검증')
+        self.experiment_status = tk.StringVar(value='Pi 일괄 시험은 5 ms 간격으로 측정합니다.')
 
     def build_experiment_controls(self):
         box = ttk.LabelFrame(self, text='반복 실험 · 현재 조건을 고정하고 실행', padding=4)
         box.pack(fill='x', pady=4)
         row = ttk.Frame(box); row.pack(fill='x')
         for label, variable, width in [('비트(ms)', self.sweep_bits, 25),
-                                      ('측정(ms)', self.sweep_samples, 8), ('조건별 횟수', self.sweep_count, 5),
+                                      ('측정(ms)', self.sweep_samples, 8), ('①·② 조건별 횟수', self.sweep_count, 5),
                                       ('Seed', self.sweep_seed, 10)]:
             ttk.Label(row, text=label).pack(side='left', padx=3)
             ttk.Entry(row, textvariable=variable, width=width).pack(side='left')
@@ -57,7 +57,7 @@ class OokExperimentMixin:
                      state='readonly', width=16).pack(side='left')
         for text, callback in [('① 1초 ON/OFF 반복', lambda: self.start_experiment('step')),
                                ('② 속도 비교 시작', lambda: self.start_experiment('sweep')),
-                               ('Pi Rx · 기존 7속도 150회 + 그래프', lambda: self.start_experiment('presentation')),
+                               (f'Pi Rx · 7속도 × {PI_TRIALS_PER_RATE}회 + 그래프', lambda: self.start_experiment('presentation')),
                                ('결과 폴더 분석', self.choose_analysis)]:
             ttk.Button(row, text=text, command=lambda fn=callback:self.guard(fn)).pack(side='left', padx=3)
         row = ttk.Frame(box); row.pack(fill='x')
