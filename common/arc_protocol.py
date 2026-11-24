@@ -21,10 +21,10 @@ MIN_CONTRAST_V = 0.024  # Proposed bench criterion: six INA219 bus-voltage count
 SAMPLE_S = 0.005
 
 
-def _crc8(sequence):
-    # CRC-8/ATM over the bench discriminator 0xb2 and the sequence byte.
+def crc8(*octets):
+    """CRC-8/ATM, initial value zero, most significant bit first."""
     crc = 0
-    for byte in (0xb2, sequence):
+    for byte in octets:
         crc ^= byte
         for _ in range(8):
             crc = ((crc << 1) ^ (0x07 if crc & 0x80 else 0)) & 0xff
@@ -34,7 +34,7 @@ def _crc8(sequence):
 def frame_bits(seq):
     if type(seq) is not int or not 0 <= seq <= 180:
         raise ValueError('arc sequence must be an integer from 0 through 180')
-    return f'{SYNC}{seq:08b}{_crc8(seq):08b}'
+    return f'{SYNC}{seq:08b}{crc8(0xb2, seq):08b}'
 
 
 def _bit_seconds(bit_ms):
@@ -61,10 +61,12 @@ def timing(bit_ms, period_s):
         raise ValueError(f'arc step period must be at least {minimum:.3f} s for this bit duration')
 
 
-class FrameDecoder:
-    """Fit low/high to the measured sync word and check sequence and CRC before delivery."""
+class VoltageFrameDecoder:
+    """Sample bit centres using levels from a known sync word, then validate the payload."""
 
-    def __init__(self, bit_ms):
+    def __init__(self, bit_ms, sync, frame_len):
+        self.sync = sync
+        self.frame_len = frame_len
         self.bit_s = _bit_seconds(bit_ms)
         self.history = deque()
         self.last = None
@@ -83,7 +85,7 @@ class FrameDecoder:
         bit = self.bit_s
         # Check a grid of positions as new samples arrive. The report is an estimated
         # optical onset in the receiver clock, not a timestamp from the transmitter.
-        start = t_seconds - (FRAME_LEN - 0.10) * bit
+        start = t_seconds - (self.frame_len - 0.10) * bit
         while self.history and self.history[0][0] < start - bit:
             self.history.popleft()
         if t_seconds < self.next_search or self.history[0][0] > start + 0.25 * bit:
@@ -97,23 +99,38 @@ class FrameDecoder:
                 return None
             return sum(values[left:right]) / (right - left)
 
-        header = [centre_value(i) for i in range(len(SYNC))]
+        header = [centre_value(i) for i in range(len(self.sync))]
         if None in header:
             return None
-        low = median(v for s, v in zip(SYNC, header) if s == '0')
-        high = median(v for s, v in zip(SYNC, header) if s == '1')
+        low = median(v for s, v in zip(self.sync, header) if s == '0')
+        high = median(v for s, v in zip(self.sync, header) if s == '1')
         if high - low < MIN_CONTRAST_V:
             return None
         threshold = (low + high) / 2
         margin = 0.10 * (high - low)
-        if any((v-threshold if s == '1' else threshold-v) < margin for s, v in zip(SYNC, header)):
+        if any((v-threshold if s == '1' else threshold-v) < margin for s, v in zip(self.sync, header)):
             return None
-        data = [centre_value(i) for i in range(len(SYNC), FRAME_LEN)]
+        data = [centre_value(i) for i in range(len(self.sync), self.frame_len)]
         if any(v is None or abs(v - threshold) < margin for v in data):
             return None
         word = int(''.join('1' if v >= threshold else '0' for v in data), 2)
+        decoded = self.decode_word(word, start)
+        if decoded is not None:
+            self.next_search = t_seconds + self.frame_len * bit * 0.90
+        return decoded
+
+    def decode_word(self, word, start):
+        raise NotImplementedError
+
+
+class FrameDecoder(VoltageFrameDecoder):
+    """Decode the original arc bench sequence and return its estimated onset."""
+
+    def __init__(self, bit_ms):
+        super().__init__(bit_ms, SYNC, FRAME_LEN)
+
+    def decode_word(self, word, start):
         seq, crc = divmod(word, 256)
-        if seq > 180 or crc != _crc8(seq):
+        if seq > 180 or crc != crc8(0xb2, seq):
             return None
-        self.next_search = t_seconds + FRAME_LEN * bit * 0.90
         return seq, start

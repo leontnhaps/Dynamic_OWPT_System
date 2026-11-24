@@ -17,6 +17,7 @@ from Tx.Controller.detection_panel import DetectionPanel
 from Tx.Controller.timing_panel import TimingPanel
 from Tx.Controller.stationary_panel import StationaryPanel
 from Tx.Controller.ook_panel import OokPanel
+from Tx.Controller.angle_demo_panel import AngleDemoPanel
 
 class App:
     def __init__(self,root,args):
@@ -35,6 +36,8 @@ class App:
         self.timing=TimingPanel(tabs,self);tabs.add(self.timing,text='M1-5 (응답 · 제어 시간)')
         self.stationary=StationaryPanel(tabs,self);tabs.add(self.stationary,text='M3-2 (정지 PV · SAC)')
         self.ook=OokPanel(tabs,self);tabs.add(self.ook,text='OOK 속도 (M4-4 · M6-4)')
+        self.angle_demo = AngleDemoPanel(tabs, self)
+        tabs.add(self.angle_demo, text='Rx 각도 시연 (M6-4)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -61,6 +64,10 @@ class App:
         self.preview.pack(expand=True,fill='both')
         def show_preview(event=None):
             if tabs.select()!=str(self.ook): self.ook.leave()
+            if tabs.select() == str(self.angle_demo):
+                self.angle_demo.selected = True
+            elif self.angle_demo.selected:
+                self.angle_demo.leave()
             if self.timing.profile.running and tabs.select()!=str(self.timing):
                 self.timing.profile.finish('탭 변경으로 처리 시간 측정 중단')
             if tabs.select() in (str(self.detection),str(self.timing),str(self.stationary)):self.preview_area.pack_forget()
@@ -107,6 +114,14 @@ class App:
         stationary=getattr(self,'stationary',None)
         ook=getattr(self,'ook',None)
         action=cmd.get('cmd')
+        demo = getattr(self, 'angle_demo', None)
+        if demo is not None and (demo.optical or demo.off_token):
+            own_pattern = demo.optical and action == 'laser_pattern' and cmd.get('request_id') == demo.token
+            if (action in ('move', 'servo_config', 'preview', 'snap', 'ir_cut')
+                    or (action == 'laser_pattern' and not own_pattern)
+                    or (action == 'laser' and cmd.get('value') != 0)):
+                self.record(dict(event='command_blocked', reason='Rx 각도 시연 송신 중', command=cmd))
+                return False
         if action in ('laser_pattern','laser') and not (action=='laser' and cmd.get('value')==0):
             if (stationary is not None and (stationary.active or getattr(stationary,'preparing',None))) or (hasattr(self,'timing') and (self.timing.active or self.timing.profile.running)):
                 self.record(dict(event='command_blocked',reason='진행 중인 추적/측정 종료 후 레이저 시험',command=cmd))
@@ -170,6 +185,7 @@ class App:
                 self.timing.event(event)
                 self.stationary.event(event)
                 self.ook.event(event)
+                self.angle_demo.event(event)
                 if kind=='network':self.links[str(event['port'])]=event['state']
                 if kind in ('hello','agent'):self.links['Pi']=event.get('agent_state',event.get('state'))
                 if kind=='pong':
@@ -180,6 +196,7 @@ class App:
         except queue.Empty:pass
         self.servo.tick()
         self.ook.tick()
+        self.angle_demo.tick()
         frame,count=self.net.pop();now=time.monotonic()
         self.received_count=count
         if frame:
@@ -231,6 +248,7 @@ class App:
 
     def close(self):
         self.closing=True
+        self.angle_demo.leave()
         self.ook.close()
         self.stationary.close()
         self.timing.close()

@@ -15,6 +15,8 @@ SAMPLER = Path(__file__).resolve().parents[2] / 'Rx' / 'ina219_ook_stream.py'
 
 class PiSshReceiver:
     source = PI_RECEIVER
+    startup_timeout_message = 'INA219 수집기 시작 응답 시간 초과'
+    closed_message = 'Rx SSH sampler closed'
 
     def __init__(self, target, password=None):
         username, sep, host = target.strip().rpartition('@')
@@ -34,14 +36,17 @@ class PiSshReceiver:
         self.worker.start()
 
     def send(self, command, token):
-        if not self.connected or self.stopping.is_set():
-            raise OSError('Rx SSH 연결이 끊겼습니다.')
         if command == 'stop':
             payload = dict(cmd='stop', token=token)
         elif command.startswith('raw '):
             payload = dict(cmd='start', token=token, interval_ms=int(command[4:]))
         else:
             raise ValueError('Unknown Rx command')
+        self._enqueue(payload)
+
+    def _enqueue(self, payload):
+        if not self.connected or self.stopping.is_set():
+            raise OSError('Rx SSH 연결이 끊겼습니다.')
         try:
             self.commands.put_nowait(payload)
         except queue.Full as exc:
@@ -62,11 +67,17 @@ class PiSshReceiver:
             if self.connected or (event.get('bus'), event.get('address')) != (3, 0x40):
                 raise OSError('Unexpected INA219 device or restarted sampler')
             self.connected = True
+        self._publish(event)
+
+    def _publish(self, event):
         event.update(pc_receive_unix_ns=time.time_ns(), pc_receive_monotonic_ns=time.monotonic_ns())
         try:
             self.events.put_nowait(event)
         except queue.Full as exc:
             raise OSError('Rx 수신 큐가 가득 찼습니다. 수집을 중단합니다.') from exc
+
+    def _remote_command(self):
+        return 'exec python3 -u -c ' + shlex.quote(SAMPLER.read_text(encoding='utf-8'))
 
     def _run(self, paramiko, host, username, password):
         client = paramiko.SSHClient()
@@ -78,7 +89,7 @@ class PiSshReceiver:
                            banner_timeout=6, auth_timeout=10, channel_timeout=6)
             if self.stopping.is_set():
                 return
-            command = 'exec python3 -u -c ' + shlex.quote(SAMPLER.read_text(encoding='utf-8'))
+            command = self._remote_command()
             stream = client.get_transport().open_session(timeout=6)
             stream.settimeout(2)
             stream.exec_command(command)
@@ -102,9 +113,9 @@ class PiSshReceiver:
                     if len(partial) > 4096:
                         raise OSError('Unterminated Rx record')
                 elif stream.exit_status_ready() or stream.closed or not client.get_transport().is_active():
-                    raise OSError(err.decode('utf-8', 'replace').strip() or 'Rx SSH sampler closed')
+                    raise OSError(err.decode('utf-8', 'replace').strip() or self.closed_message)
                 elif not self.connected and time.monotonic() > ready_by:
-                    raise OSError('INA219 수집기 시작 응답 시간 초과')
+                    raise OSError(self.startup_timeout_message)
                 else:
                     self.stopping.wait(.004)
         except Exception as exc:
