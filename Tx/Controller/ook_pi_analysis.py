@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import numpy as np
 
+from common.ook_frame_decode import HEADER_EDGES, bit_decisions, header_residual
 from common.ook_experiment import (HEADER, PAYLOAD_BITS, PI_COMPARISON_PRESET, PI_DECODER,
                                    PI_RECEIVER, PRESENTATION_REFERENCE, RULES)
 from Tx.Controller.ook_analysis import read_json, score_payload, write_csv, write_json
@@ -25,7 +26,7 @@ def find_header(t, y, bit_ms):
     if limit < 0:
         return None
     # SSE/SST can change only when a sample crosses the header's ends or a 0/1 transition.
-    edges = np.array([0, *[i for i in range(1, len(HEADER)) if HEADER[i] != HEADER[i - 1]], len(HEADER)])
+    edges = np.array(HEADER_EDGES)
     offsets = edges * bit_ms
     cuts = np.unique(np.clip((t[:, None] - offsets).ravel(), 0, limit))
     origins = (cuts[:-1] + cuts[1:]) / 2 if len(cuts) > 1 else cuts
@@ -46,9 +47,7 @@ def find_header(t, y, bit_ms):
         y0 = total_y - y1
         sum_squares = squares[indices[:, -1]] - squares[indices[:, 0]]
         with np.errstate(divide='ignore', invalid='ignore'):
-            lo, hi = y0 / n0, y1 / n1
-            sst = sum_squares - total_y ** 2 / total
-            sse = sum_squares - y0 * lo - y1 * hi
+            lo, hi, sse, sst = header_residual(n0, n1, y0, y1, sum_squares, total_y)
             valid = (n0 > 0) & (n1 > 0) & (sst > 0) & (hi > lo)
             scores[start:start + len(candidates)] = np.where(valid, np.maximum(0, sse) / sst, np.inf)
     best_score = np.min(scores)
@@ -78,11 +77,7 @@ def decode(t, volts, bit_ms):
     low = sums[header][~is_on].sum() / counts[header][~is_on].sum()
     high = sums[header][is_on].sum() / counts[header][is_on].sum()
     threshold = (low + high) / 2
-    decisions = []
-    for count, value in zip(counts[len(HEADER):], sums[len(HEADER):]):
-        mean = float(value / count) if count else None
-        decisions.append(dict(samples=int(count), mean_v=mean,
-                              decision='?' if mean is None else str(int(mean >= threshold))))
+    decisions = bit_decisions(counts[len(HEADER):], sums[len(HEADER):], threshold)
     return dict(origin_ms=origin, header_sse_sst=score, threshold_v=float(threshold),
                 header_low_v=float(low), header_high_v=float(high), bits=decisions)
 

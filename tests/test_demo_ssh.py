@@ -24,11 +24,24 @@ class DemoSshTests(unittest.TestCase):
 
     def test_command_channel_cannot_carry_a_pose(self):
         self.rx._receive(b'{"kind":"ready"}')
-        for command in ('arm', 'home', 'cancel', 'measure'):
+        for command in ('arm', 'home', 'cancel', 'measure', 'commit'):
             self.rx.send(command, 'request-1')
             self.assertEqual(self.rx.commands.get_nowait(), {'cmd': command, 'token': 'request-1'})
         with self.assertRaises(ValueError):
             self.rx.send('move 103 20', 'request-1')
+        with self.assertRaises(ValueError):
+            self.rx.send('commit 103 20', 'request-1')
+
+    def test_decoded_can_report_corrupted_uint16_but_applied_must_be_in_range(self):
+        self.rx._receive(b'{"kind":"ready"}')
+        self.rx.events.get_nowait()
+        event = dict(kind='decoded', token='1', pan=65535, tilt=65535, rx_payload_bits='1' * 32)
+        self.rx._receive(json.dumps(event))
+        self.assertEqual(self.rx.events.get_nowait()['rx_payload_bits'], '1' * 32)
+        for override in [dict(rx_payload_bits='00'), dict(rx_payload_bits='2' * 32),
+                         dict(pan=65536), dict(kind='applied')]:
+            with self.assertRaises(OSError):
+                self.rx._receive(json.dumps(dict(event, **override)))
 
     def test_jog_carries_only_bounded_relative_steps_and_checks_reply(self):
         self.rx._receive(b'{"kind":"ready"}')

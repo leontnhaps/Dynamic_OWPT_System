@@ -1,6 +1,6 @@
 """M6-4 single-frame demonstration for the receiver's two servo channels."""
 
-from common.arc_protocol import VoltageFrameDecoder, crc8
+from common.ook_experiment import HEADER, PAYLOAD_BITS, TRAILING_ZEROS, make_frame
 
 
 HOME_PAN = 103
@@ -16,34 +16,34 @@ VOLTAGE_WINDOW_NS = 1_000_000_000
 EXPECTED_SAMPLES = VOLTAGE_WINDOW_NS // (VOLTAGE_SAMPLE_MS * 1_000_000)
 MIN_VOLTAGE_SAMPLES = EXPECTED_SAMPLES * 9 // 10
 MAX_VOLTAGE_GAP_NS = 50_000_000
-# The distinct sync word and CRC discriminator identify version 1 of this demo.
-SYNC = '1010101011010011'
-DISCRIMINATOR = 0xA1
-FRAME_LEN = len(SYNC) + 8 + 8 + 8 + 1
+FRAME_LEN = len(HEADER) + PAYLOAD_BITS + len(TRAILING_ZEROS)
 
 
-def encode_angles(pan, tilt):
-    """Encode absolute servo angles, each expressed in whole degrees."""
+def validate_angles(pan, tilt):
     if type(pan) is not int or not 0 <= pan <= MAX_PAN:
         raise ValueError(f'Pan 서보각은 0~{MAX_PAN}° 정수입니다.')
     if type(tilt) is not int or not 0 <= tilt <= MAX_TILT:
         raise ValueError(f'Tilt 서보각은 0~{MAX_TILT}° 정수입니다.')
-    check = crc8(DISCRIMINATOR, pan, tilt)
-    # A final bright bit keeps idle darkness from completing a truncated zero tail.
-    return f'{SYNC}{pan:08b}{tilt:08b}{check:08b}1'
 
 
-class AngleDecoder(VoltageFrameDecoder):
-    def __init__(self):
-        super().__init__(BIT_MS, SYNC, FRAME_LEN, sample_s=DECODE_SAMPLE_MS / 1000)
+def encode_angles(pan, tilt):
+    """Transmit absolute whole-degree commands as two unsigned big-endian words."""
+    validate_angles(pan, tilt)
+    return make_frame(f'{pan:016b}{tilt:016b}')
 
-    def decode_word(self, word, start):
-        if not word & 1:
-            return None
-        pan, tilt, check = (word >> 1).to_bytes(3, 'big')
-        if pan > MAX_PAN or tilt > MAX_TILT or check != crc8(DISCRIMINATOR, pan, tilt):
-            return None
-        return pan, tilt
+
+def payload_from_frame(frame):
+    payload = frame[len(HEADER):len(HEADER) + PAYLOAD_BITS]
+    if make_frame(payload) != frame:
+        raise ValueError('OOK 프레임의 헤더 또는 끝 비트가 일치하지 않습니다.')
+    return payload
+
+
+def decode_angles(payload):
+    """Unpack the actual decisions, including out-of-range values for diagnostics."""
+    if not isinstance(payload, str) or len(payload) != PAYLOAD_BITS or set(payload) - {'0', '1'}:
+        raise ValueError('OOK 각도 payload는 결정된 32비트여야 합니다.')
+    return int(payload[:16], 2), int(payload[16:], 2)
 
 
 def validate_jog(pan_step, tilt_step):

@@ -2,12 +2,13 @@
 import base64
 import io
 import json
+import math
 import shlex
 import zipfile
 from pathlib import Path
 
 from common.angle_demo import HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, validate_jog
-from common.ook_experiment import interval_value
+from common.ook_experiment import PAYLOAD_BITS, interval_value
 from Rx.ina219_ook_stream import SAMPLE_CONFIG
 from Tx.Controller.pi_ook_rx import PiSshReceiver
 
@@ -16,7 +17,35 @@ ROOT = Path(__file__).resolve().parents[2]
 RECEIVER_MODULES = (
     'Rx/angle_demo.py', 'Rx/arc_bench.py', 'Rx/ina219_ook_stream.py',
     'common/angle_demo.py', 'common/arc_protocol.py', 'common/laser_pattern.py',
+    'common/ook_experiment.py', 'common/ook_frame_decode.py',
 )
+
+
+def optical_servo_writes(event):
+    """Read back the two successful bus write records in receiver-clock order."""
+    rows = event.get('servo_writes')
+    if not isinstance(rows, list) or len(rows) != 2:
+        raise ValueError('Rx의 Pan·Tilt 서보 쓰기 기록 두 개가 필요합니다.')
+    last_end = 0.0
+    angles = []
+    for axis, row in enumerate(rows):
+        if not isinstance(row, list) or len(row) != 6:
+            raise ValueError('Rx 서보 쓰기 기록의 형식이 잘못되었습니다.')
+        start, end, channel, angle, step, action = row
+        if (type(channel) is not int or channel != axis or type(angle) is not int
+                or not 0 <= angle <= (MAX_PAN, MAX_TILT)[axis] or step != '' or action != 'applied'):
+            raise ValueError('Rx 서보 쓰기의 채널·각도·동작이 잘못되었습니다.')
+        if type(start) not in (str, int, float) or type(end) not in (str, int, float):
+            raise ValueError('Rx 서보 쓰기 시각을 읽을 수 없습니다.')
+        try:
+            start, end = float(start), float(end)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError('Rx 서보 쓰기 시각을 읽을 수 없습니다.') from exc
+        if not (math.isfinite(start) and math.isfinite(end) and last_end <= start <= end):
+            raise ValueError('Rx 서보 쓰기 시각의 순서가 잘못되었습니다.')
+        last_end = end
+        angles.append(angle)
+    return tuple(angles)
 
 
 def receiver_archive():
@@ -52,7 +81,7 @@ class DemoSsh(PiSshReceiver):
             raise ValueError('잘못된 Rx 시연 명령 또는 요청 ID입니다.')
         if command.startswith('raw '):
             self._enqueue(dict(cmd='start', token=token, interval_ms=interval_value(command[4:])))
-        elif command in ('arm', 'home', 'cancel', 'measure', 'stop'):
+        elif command in ('arm', 'commit', 'home', 'cancel', 'measure', 'stop'):
             self._enqueue(dict(cmd=command, token=token))
         else:
             raise ValueError('잘못된 Rx 시연 명령입니다.')
@@ -77,7 +106,7 @@ class DemoSsh(PiSshReceiver):
                 raise OSError('Rx 시연 오류 응답에 설명이 없습니다.')
             if not event.get('token'):
                 raise OSError(event['message'])
-        elif not self.connected or kind not in ('armed', 'applied', 'home', 'jogged', 'cancelled', 'timeout',
+        elif not self.connected or kind not in ('armed', 'decoded', 'applied', 'home', 'jogged', 'cancelled', 'timeout',
                                                 'voltage', 'measured', 'started', 'sample', 'stopped'):
             raise OSError('예상하지 못한 Rx 시연 응답입니다.')
         elif not isinstance(event.get('token'), str) or not event['token']:
@@ -95,10 +124,15 @@ class DemoSsh(PiSshReceiver):
                     ('count', 'window_start_ns', 'window_end_ns', 'max_gap_ns'))
                     or not event['count'] or event['window_end_ns'] <= event['window_start_ns']):
                 raise OSError('Rx 전압 측정 결과 형식이 잘못되었습니다.')
-        elif kind in ('applied', 'home', 'jogged'):
+        elif kind in ('decoded', 'applied', 'home', 'jogged'):
             pan, tilt = event.get('pan'), event.get('tilt')
-            if (type(pan) is not int or not 0 <= pan <= MAX_PAN
-                    or type(tilt) is not int or not 0 <= tilt <= MAX_TILT):
+            if kind in ('decoded', 'applied'):
+                payload = event.get('rx_payload_bits')
+                if not isinstance(payload, str) or len(payload) != PAYLOAD_BITS or set(payload) - {'0', '1'}:
+                    raise OSError(f'Rx 광복호 payload가 올바른 {PAYLOAD_BITS}비트 문자열이어야 합니다.')
+            max_pan, max_tilt = (65535, 65535) if kind == 'decoded' else (MAX_PAN, MAX_TILT)
+            if (type(pan) is not int or not 0 <= pan <= max_pan
+                    or type(tilt) is not int or not 0 <= tilt <= max_tilt):
                 raise OSError('Rx 시연 응답의 적용 각도가 잘못되었습니다.')
             if kind == 'home' and (pan, tilt) != (HOME_PAN, HOME_TILT):
                 raise OSError('Rx 원위치 응답의 각도가 일치하지 않습니다.')

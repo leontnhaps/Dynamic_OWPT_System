@@ -8,8 +8,9 @@ import uuid
 from datetime import datetime
 from tkinter import ttk
 
-from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, RX_VIEWPOINT, encode_angles
-from Tx.Controller.demo_ssh import DemoSsh
+from common.angle_demo import (BIT_MS, HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, RX_VIEWPOINT,
+                               encode_angles, payload_from_frame)
+from Tx.Controller.demo_ssh import DemoSsh, optical_servo_writes
 from Tx.Controller.pi_ook_rx import DEFAULT_RX_TARGET
 
 
@@ -32,6 +33,7 @@ class AngleDemoPanel(ttk.Frame):
         self.off_status = tk.StringVar()
         self.status = tk.StringVar(value='원위치 기준으로 각도를 입력하세요.')
         self.applied = tk.StringVar(self)
+        self.verification = tk.StringVar(self)
         self.clear_servo_pose('Rx 미연결')
         row = ttk.Frame(self)
         row.pack(anchor='w', pady=4)
@@ -72,6 +74,7 @@ class AngleDemoPanel(ttk.Frame):
         ttk.Label(self, text=f'입력 (0°, 0°) = 발판 중앙 · 셀 수직 '
                              f'(서보 Pan {HOME_PAN}°, Tilt {HOME_TILT}°)').pack(anchor='w')
         ttk.Label(self, textvariable=self.status).pack(anchor='w')
+        ttk.Label(self, textvariable=self.verification).pack(anchor='w')
         ttk.Label(self, textvariable=self.off_status).pack(anchor='w')
 
     @property
@@ -179,10 +182,14 @@ class AngleDemoPanel(ttk.Frame):
             if hw.get('simulated') is not False or 'laser_pattern' not in hw.get('capabilities', []):
                 raise ValueError('광신호 전송에는 실제 Tx 연결이 필요합니다.')
             self.goal = (pan, tilt)
-            self.tx_done = self.rx_done = False
+            self.tx_payload = payload_from_frame(self.bits)
+            self.decoded_payload = self.decoded_pose = self.write_pose = self.servo_rows = None
+            self.tx_done = self.rx_done = self.commit_sent = False
+            self.show_verification()
             self.off_status.set('')
             self.begin('off')
-            self.record(dict(event='requested', token=self.token, pan=pan, tilt=tilt, bit_ms=BIT_MS))
+            self.record(dict(event='requested', token=self.token, pan=pan, tilt=tilt, bit_ms=BIT_MS,
+                             tx_frame_bits=self.bits, tx_payload_bits=self.tx_payload))
             self.status.set('Tx OFF 확인 중…')
             if not self.app.send(dict(cmd='laser', value=0, request_id=self.token)):
                 self.stop('Tx OFF 요청 실패')
@@ -205,7 +212,8 @@ class AngleDemoPanel(ttk.Frame):
 
     def stop(self, reason):
         optical, old_token = self.optical, self.token
-        if self.phase in ('check_home', 'check_jog', 'home', 'bench_home', 'optical'):
+        if (self.phase in ('check_home', 'check_jog', 'home', 'bench_home')
+                or (self.phase == 'optical' and self.commit_sent)):
             self.clear_servo_pose('마지막 명령 미확인 · 원위치 (SSH)로 다시 확인하세요.')
         self.phase = self.token = None  # Late ACKs must not dispatch a frame.
         if optical:
@@ -221,6 +229,29 @@ class AngleDemoPanel(ttk.Frame):
         if old_token:
             self.record(dict(event='stopped', token=old_token, reason=reason))
         self.status.set(reason)
+        if optical:
+            self.log_verification(old_token, False, reason)
+
+    def show_verification(self):
+        def pose_text(pose):
+            return '—' if pose is None else f'{pose[0]}° / {pose[1]}°'
+        detail = ''
+        if self.decoded_payload is not None:
+            diff = sum(tx != rx for tx, rx in zip(self.tx_payload, self.decoded_payload))
+            detail = f' · payload {len(self.tx_payload) - diff}/{len(self.tx_payload)}비트 일치'
+        self.verification.set(f'최근 OOK (Pan / Tilt)    Tx 요청 {pose_text(self.goal)}    '
+                              f'Rx 광복호 {pose_text(self.decoded_pose)}    '
+                              f'Rx 서보 쓰기 {pose_text(self.write_pose)}{detail}')
+
+    def record_verification(self, event):
+        self.record(event)
+
+    def log_verification(self, token, success, reason):
+        self.record_verification(dict(event='angle_verification', token=token, success=success, reason=reason,
+                                      tx_completed=self.tx_done, tx_payload_bits=self.tx_payload,
+                                      tx_angles=self.goal, rx_payload_bits=self.decoded_payload,
+                                      rx_angles=self.decoded_pose, commit_sent=self.commit_sent,
+                                      servo_angles=self.write_pose, servo_writes=self.servo_rows))
 
     def applied_pose(self, pan, tilt):
         self.last_servo_pose = (pan, tilt)
@@ -237,14 +268,21 @@ class AngleDemoPanel(ttk.Frame):
         if kind == 'ready':
             self.rx_status.set('Rx SSH 연결됨')
             self.clear_servo_pose('원위치 또는 두 축 확인을 눌러 시작하세요.')
+            self.verification.set('')
             return
         if kind == 'error' and not event.get('token'):
             self.stop('Rx 오류 · ' + event.get('message', ''))
             return
         if not self.token or event.get('token') != self.token:
             return
-        if kind in ('error', 'timeout', 'cancelled'):
+        if kind == 'timeout' and self.optical:
+            self.stop(self.verification_timeout())
+        elif kind in ('error', 'timeout', 'cancelled'):
             self.stop(event.get('message') or '유효한 광명령 수신을 확인하지 못했습니다.')
+        elif kind in ('decoded', 'applied') and self.optical and self.phase != 'optical':
+            if kind == 'applied':
+                self.clear_servo_pose('승인과 대응하지 않는 Rx 서보 응답')
+            self.stop('광프레임 송신 요청 전에 Rx 응답이 도착했습니다.')
         elif ((self.phase == 'check_home' and kind == 'home') or
               (self.phase == 'check_jog' and kind == 'jogged')):
             if (event.get('pan'), event.get('tilt')) != self.check_goal:
@@ -275,21 +313,59 @@ class AngleDemoPanel(ttk.Frame):
             if not self.app.send(dict(cmd='laser_pattern', request_id=self.token,
                                       bits=self.bits, bit_ms=BIT_MS, repeats=1)):
                 self.stop('광프레임 송신 요청 실패')
-        elif kind == 'applied' and self.phase == 'optical':
-            pan, tilt = event['pan'], event['tilt']
-            self.applied_pose(pan, tilt)
-            if (pan, tilt) != self.goal:
-                self.stop('Rx가 적용한 각도와 요청한 각도가 다릅니다.')
+        elif kind == 'decoded' and self.phase == 'optical':
+            self.decoded_payload = event['rx_payload_bits']
+            self.decoded_pose = (event['pan'], event['tilt'])
+            self.show_verification()
+            if self.decoded_payload != self.tx_payload or self.decoded_pose != self.goal:
+                self.stop('Tx 요청과 Rx 광복호 payload 또는 각도가 다릅니다.')
             else:
-                self.rx_done = True
-                self.finish_if_confirmed()
+                self.commit_if_verified()
+        elif kind == 'applied' and self.phase == 'optical':
+            if not self.commit_sent:
+                self.clear_servo_pose('승인과 대응하지 않는 Rx 서보 응답')
+                self.stop('PC의 적용 승인 전에 Rx 서보 응답이 도착했습니다.')
+                return
+            self.servo_rows = event.get('servo_writes')
+            try:
+                self.write_pose = optical_servo_writes(event)
+            except ValueError as exc:
+                self.stop(str(exc))
+                return
+            self.show_verification()
+            if (event.get('rx_payload_bits') != self.decoded_payload
+                    or (event.get('pan'), event.get('tilt')) != self.goal or self.write_pose != self.goal):
+                self.stop('Rx 서보 쓰기와 검증한 광명령이 일치하지 않습니다.')
+                return
+            self.applied_pose(*self.write_pose)
+            self.rx_done = True
+            self.finish_if_confirmed()
+
+    def commit_if_verified(self):
+        if not self.tx_done:
+            self.status.set('Rx 광복호 일치 · Tx 송신 완료와 OFF 응답 대기')
+        elif self.decoded_pose is None:
+            self.status.set('Tx 송신 완료 · Rx 광복호 응답 대기')
+        elif not self.commit_sent:
+            self.rx.send('commit', self.token)
+            self.commit_sent = True
+            self.deadline = time.monotonic() + 5
+            self.status.set('Tx 완료 · Rx 광복호 일치 · 두 축 서보 쓰기 응답 대기')
+
+    def verification_timeout(self):
+        if self.commit_sent:
+            return '적용 승인 후 Rx 두 축의 서보 쓰기 응답 시간 초과'
+        if self.decoded_pose is not None:
+            return 'Rx 광복호 일치 · Tx 송신 완료 확인 시간 초과'
+        if self.phase == 'optical':
+            return 'Rx 각도 payload 복호 응답 시간 초과'
+        return 'OOK 전송 준비 응답 시간 초과'
 
     def finish_if_confirmed(self):
         if self.tx_done and self.rx_done:
+            self.log_verification(self.token, True, '')
             self.phase = self.token = None
             self.status.set('OOK 수신 성공 · Rx 광복호 및 서보 명령 적용 확인')
-        elif self.tx_done:
-            self.status.set('Tx 프레임 송신 완료 · Rx 광복호 응답 대기')
 
     def event(self, event):
         if self.off_token and event.get('event') == 'ready':
@@ -329,12 +405,19 @@ class AngleDemoPanel(ttk.Frame):
             elif kind == 'laser_pattern' and self.phase == 'optical' and event.get('state') != 'started':
                 off = event.get('off_call_done_ms')
                 if (event.get('state') != 'completed' or event.get('simulated') is not False
-                        or type(off) not in (int, float) or not math.isfinite(off) or off < 0
+                        or type(off) not in (int, float) or not math.isfinite(off) or off < len(self.bits) * BIT_MS
                         or event.get('settings') != dict(bits=self.bits, bit_ms=BIT_MS, repeats=1)):
                     self.stop('Tx 송신 완료 또는 종료 OFF를 확인하지 못했습니다.')
                     return
+                trace = event.get('trace')
+                if (not isinstance(trace, list) or len(trace) != len(self.bits)
+                        or any(not isinstance(row, dict) or type(row.get('index')) is not int
+                               or row['index'] != i or type(row.get('level')) is not int
+                               or row['level'] != int(bit) for i, (row, bit) in enumerate(zip(trace, self.bits)))):
+                    self.stop('Tx GPIO 비트 기록과 요청한 프레임이 다릅니다.')
+                    return
                 self.tx_done = True
-                self.finish_if_confirmed()
+                self.commit_if_verified()
         except (ValueError, OSError) as exc:
             self.stop(str(exc))
 
@@ -359,7 +442,7 @@ class AngleDemoPanel(ttk.Frame):
                 self.stop(str(exc))
             if self.rx.terminal_error:
                 detail = self.rx.terminal_error
-                self.stop('Rx SSH 연결 종료')
+                self.stop(f'Rx SSH 연결 종료 · {detail}')
                 self.rx_status.set(detail)
                 self.rx.close()
                 self.rx = None
@@ -370,7 +453,7 @@ class AngleDemoPanel(ttk.Frame):
             except (ValueError, OSError) as exc:
                 self.stop(str(exc))
         elif self.phase and self.phase != 'check_pause' and time.monotonic() > self.deadline:
-            self.stop('응답 시간 초과 · Rx 서보 적용 상태를 확인하세요.')
+            self.stop(self.verification_timeout() if self.optical else '응답 시간 초과 · Rx 서보 적용 상태를 확인하세요.')
         elif self.optical and (not self.app.current or time.monotonic()-self.app.current[2] > 2):
             self.stop('Tx 카메라 영상 수신 중단')
 

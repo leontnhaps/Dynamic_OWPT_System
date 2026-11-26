@@ -1,12 +1,15 @@
-"""Reproducible OOK test frames, deliberately separate from angle commands."""
+"""Shared OOK frame envelope and reproducible speed-test payloads."""
 import math
 import random
 from typing import NamedTuple
 from common.laser_pattern import pattern_settings
 
 VERSION = 'ook-test-v2'
-HEADER = '00000000' + '11111111' + '1111100110101'
+THRESHOLD_BITS = '0000000011111111'
+SYNC_WORD = '1111100110101'
+HEADER = THRESHOLD_BITS + SYNC_WORD
 PAYLOAD_BITS = 32
+TRAILING_ZEROS = '0000'
 LEGACY_RULES = dict(version='ook-test-v1', header=HEADER, payload_bits=PAYLOAD_BITS,
              decision_phase=0.5, nearest_sample_window_bits=0.25,
              min_contrast_adc=6, max_header_errors=1,
@@ -40,6 +43,13 @@ PI_LIMIT_PRESET = 'm6-4-pi-speed-limit-v1'
 PI_LIMIT_PERIODS = (12, 10, 8, 6, 5)
 PI_LIMIT_SAMPLE_MS = 2
 DEFAULT_SEED = 20261028
+
+
+def make_frame(payload):
+    """Use the speed-test wire envelope for any 32-bit optical payload."""
+    if not isinstance(payload, str) or len(payload) != PAYLOAD_BITS or set(payload) - {'0', '1'}:
+        raise ValueError(f'OOK payload must contain exactly {PAYLOAD_BITS} bits.')
+    return HEADER + payload + TRAILING_ZEROS
 
 
 def interval_value(value):
@@ -80,7 +90,7 @@ def make_plan(bit_times, sample_times, blocks, seed, pattern='random', mode='swe
         for bit_ms, n in conditions:
             payload = (''.join(str(rng.randrange(2)) for _ in range(PAYLOAD_BITS)) if pattern == 'random'
                        else ('10' * 16 if pattern == 'alternating' else '00001111' * 4))
-            bits = '010' if mode == 'step' else HEADER + payload + '0000'
+            bits = '010' if mode == 'step' else make_frame(payload)
             settings = pattern_settings(dict(bits=bits, bit_ms=bit_ms, repeats=1))
             trials.append(dict(settings=settings, sample_ms=sample_ms, mode=mode, pattern=pattern,
                                payload=None if mode == 'step' else payload, repeat_index=n,

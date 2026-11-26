@@ -4,8 +4,9 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
-from common.angle_demo import (BIT_MS, FRAME_LEN, HOME_PAN, HOME_TILT, SYNC, VOLTAGE_SETTLE_NS,
-                               VOLTAGE_WINDOW_NS, encode_angles)
+from common.angle_demo import (BIT_MS, FRAME_LEN, HOME_PAN, HOME_TILT, VOLTAGE_SETTLE_NS,
+                               VOLTAGE_WINDOW_NS, encode_angles, payload_from_frame)
+from common.ook_experiment import SYNC_WORD, THRESHOLD_BITS, TRAILING_ZEROS
 from Tx.Controller.angle_demo_panel import AngleDemoPanel
 from Tx.Controller.bench_pose import BenchPoseInputs
 from Tx.Controller.final_speed_panel import FinalSpeedPanel
@@ -61,9 +62,15 @@ class PointComparisonPanel(AngleDemoPanel):
         except ValueError:
             self.frame_label.set('각도 프레임 · 범위 안의 정수 각도를 입력하세요.')
             return
-        payload = bits[len(SYNC):]
-        self.frame_label.set(f'각도 명령 {FRAME_LEN} bit · {1000/BIT_MS:g} bit/s ({BIT_MS} ms/bit) · 시작 {SYNC}  |  '
-                             f'Pan {payload[:8]}  |  Tilt {payload[8:16]}  |  CRC-8 {payload[16:24]}  |  끝 {payload[-1]}')
+        payload = payload_from_frame(bits)
+        self.frame_label.set(f'각도 명령 {FRAME_LEN} bit · {1000/BIT_MS:g} bit/s ({BIT_MS} ms/bit)\n'
+                             f'레벨 {THRESHOLD_BITS}  |  동기 {SYNC_WORD}  |  Pan {payload[:16]}  |  '
+                             f'Tilt {payload[16:]}  |  끝 {TRAILING_ZEROS}')
+
+    def record_verification(self, event):
+        super().record_verification(event)
+        if self.run is not None and self.run.trial_folder is not None:
+            self.run.log(event)
 
     def check_axis(self, axis, offset):
         if self.phase or self.method or self.off_token:

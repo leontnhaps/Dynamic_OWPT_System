@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles
+from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
 from Tx.Controller.angle_demo_panel import AngleDemoPanel
 
 
@@ -20,7 +20,7 @@ class DemoTabTests(unittest.TestCase):
         p.pan, p.tilt = Mock(), Mock()
         p.pan.get.return_value, p.tilt.get.return_value = '5', '-1'
         p.off_token = None
-        p.applied, p.status, p.rx_status, p.off_status = Mock(), Mock(), Mock(), Mock()
+        p.applied, p.status, p.rx_status, p.off_status, p.verification = (Mock() for _ in range(5))
         p.selected = p.prepared = True
 
     def start(self):
@@ -35,27 +35,101 @@ class DemoTabTests(unittest.TestCase):
                                            bits=encode_angles(108, 19), bit_ms=BIT_MS, repeats=1))
         return token
 
-    def test_success_requires_both_actual_tx_and_optical_servo_ack_in_either_order(self):
+    def optical_receipts(self, token):
+        bits = encode_angles(108, 19)
+        decoded = dict(kind='decoded', token=token, pan=108, tilt=19, rx_payload_bits=payload_from_frame(bits))
+        applied = dict(decoded, kind='applied', servo_writes=[
+            ['1.00', '1.01', 0, 108, '', 'applied'], ['1.01', '1.02', 1, 19, '', 'applied']])
+        tx = dict(event='laser_pattern', state='completed', simulated=False, request_id=token,
+                  off_call_done_ms=len(bits)*BIT_MS + 0.1,
+                  trace=[dict(index=i, level=int(bit)) for i, bit in enumerate(bits)],
+                  settings=dict(bits=bits, bit_ms=BIT_MS, repeats=1))
+        return tx, decoded, applied
+
+    def test_success_requires_verified_tx_decode_and_matching_writes_in_either_order(self):
         for optical_first in (False, True):
             with self.subTest(optical_first=optical_first):
                 self.setUp()
                 p = self.panel
                 token = self.start()
-                applied = dict(kind='applied', token=token, pan=108, tilt=19)
-                complete = dict(event='laser_pattern', state='completed', simulated=False,
-                                request_id=token, off_call_done_ms=2050,
-                                settings=dict(bits=encode_angles(108, 19), bit_ms=BIT_MS, repeats=1))
+                complete, decoded, applied = self.optical_receipts(token)
                 if optical_first:
-                    p.on_rx(applied)
-                    self.assertEqual(p.phase, 'optical')
+                    p.on_rx(decoded)
+                    p.rx.send.assert_called_once_with('arm', token)
                     p.event(complete)
                 else:
                     p.event(complete)
-                    self.assertEqual(p.phase, 'optical')
-                    p.on_rx(applied)
+                    p.rx.send.assert_called_once_with('arm', token)
+                    p.on_rx(decoded)
+                p.on_rx(decoded)
+                p.event(complete)
+                self.assertEqual(p.rx.send.call_count, 2)
+                p.rx.send.assert_called_with('commit', token)
+                self.assertEqual(p.phase, 'optical')
+                p.on_rx(applied)
                 self.assertIsNone(p.phase)
                 self.assertIn('OOK 수신 성공', p.status.set.call_args.args[0])
-                p.rx.send.assert_called_once_with('arm', token)
+                report = p.record.call_args.args[0]
+                self.assertTrue(report['success'])
+                self.assertEqual(report['rx_payload_bits'], report['tx_payload_bits'])
+                self.assertEqual(report['rx_angles'], report['servo_angles'])
+                self.assertIn('32/32비트 일치', p.verification.set.call_args.args[0])
+
+    def test_payload_mismatch_or_bad_tx_trace_prevents_commit(self):
+        for problem in ('bits', 'pose', 'trace', 'short'):
+            with self.subTest(problem=problem):
+                self.setUp()
+                p = self.panel
+                p.applied_pose(105, 22)
+                token = self.start()
+                complete, decoded, _ = self.optical_receipts(token)
+                if problem == 'bits':
+                    decoded['rx_payload_bits'] = '1' * 32
+                elif problem == 'pose':
+                    decoded['pan'] = 110
+                elif problem == 'trace':
+                    complete['trace'][3]['level'] ^= 1
+                else:
+                    complete['off_call_done_ms'] = 0
+                p.event(complete)
+                p.on_rx(decoded)
+                self.assertFalse(p.commit_sent)
+                self.assertIsNone(p.phase)
+                self.assertEqual(p.last_servo_pose, (105, 22))
+                self.assertNotIn('성공', p.status.set.call_args.args[0])
+
+    def test_stale_approval_or_partial_servo_write_cannot_confirm_receipt(self):
+        for problem in ('early', 'missing', 'channel', 'angle', 'order', 'action', 'different_bits'):
+            with self.subTest(problem=problem):
+                self.setUp()
+                p = self.panel
+                token = self.start()
+                complete, decoded, applied = self.optical_receipts(token)
+                p.on_rx(dict(decoded, token='stale'))
+                p.event(complete)
+                self.assertFalse(p.commit_sent)
+                if problem != 'early':
+                    p.on_rx(decoded)
+                    p.rx.send.assert_called_with('commit', token)
+                rows = applied['servo_writes']
+                if problem == 'missing':
+                    rows.pop()
+                elif problem == 'channel':
+                    rows[1][2] = 0
+                elif problem == 'angle':
+                    rows[1][3] = 21
+                elif problem == 'order':
+                    rows[1][0] = '0.99'
+                elif problem == 'action':
+                    rows[0][5] = 'jogged'
+                elif problem == 'different_bits':
+                    applied['rx_payload_bits'] = '1' * 32
+                p.on_rx(applied)
+                self.assertIsNone(p.phase)
+                p.rx.send.assert_called_with('cancel', token)
+                self.assertFalse(p.rx_done)
+                self.assertIsNone(p.last_servo_pose)
+                self.assertFalse(p.record.call_args.args[0]['success'])
 
     def test_home_stops_an_inflight_command_and_late_events_do_not_move_the_receiver(self):
         p = self.panel

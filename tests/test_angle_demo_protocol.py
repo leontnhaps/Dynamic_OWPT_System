@@ -1,64 +1,40 @@
-import random
 import unittest
 
-from common.angle_demo import (AngleDecoder, BIT_MS, DISCRIMINATOR, FRAME_LEN,
-                               HOME_PAN, HOME_TILT, SYNC, encode_angles)
-from common.arc_protocol import DEFAULT_BIT_MS, FrameDecoder, crc8, stimulus_bits
-
-
-def receive(bits, *, omit=None, contrast=0.20, receiver=None, bit_ms=BIT_MS):
-    receiver = receiver or AngleDecoder()
-    rng = random.Random(13)
-    found = []
-    period = bit_ms / 1000
-    start = 0.274
-    # At the 1 ms sampling target, the recorded Pi samples were about 2 ms apart.
-    sample_s = 0.002
-    for i in range(int((start + len(bits) * period + 0.12) / sample_s)):
-        t = i * sample_s + rng.uniform(-0.00035, 0.00035)
-        if omit is not None and omit[0] < t < omit[1]:
-            continue
-        index = int((t - start) // period)
-        high = 0 <= index < len(bits) and bits[index] == '1'
-        # 4 mV INA219 bus-voltage increments with some ambient noise.
-        volts = round((0.4 + high * contrast + rng.uniform(-0.006, 0.006)) / 0.004) * 0.004
-        command = receiver.feed(t, volts)
-        if command is not None:
-            found.append(command)
-    return found
+from common.angle_demo import (BIT_MS, FRAME_LEN, HOME_PAN, HOME_TILT, decode_angles,
+                               encode_angles, payload_from_frame, validate_angles)
+from common.ook_experiment import make_plan
 
 
 class AngleDemoProtocolTest(unittest.TestCase):
-    def test_one_command_per_frame_including_both_axis_boundaries(self):
-        self.assertEqual(BIT_MS, 8)
-        for pair in ((0, 0), (180, 35), (HOME_PAN, HOME_TILT), (HOME_PAN+1, HOME_TILT-1)):
+    def test_command_replaces_only_the_speed_test_payload(self):
+        reference = make_plan([BIT_MS], [1], 1, 123)['trials'][0]['settings']['bits']
+        for pair in ((0, 0), (180, 35), (HOME_PAN, HOME_TILT), (102, 21)):
             with self.subTest(pair=pair):
                 frame = encode_angles(*pair)
-                self.assertEqual(len(frame), FRAME_LEN)
-                self.assertEqual(receive(frame), [pair])
+                self.assertEqual((BIT_MS, FRAME_LEN, len(frame)), (8, 65, 65))
+                self.assertEqual(frame[:29], reference[:29])
+                self.assertEqual(frame[-4:], reference[-4:])
+                self.assertEqual(decode_angles(payload_from_frame(frame)), pair)
+        self.assertEqual(payload_from_frame(encode_angles(103, 20)),
+                         '0000000001100111' '0000000000010100')
 
-    def test_refuse_invalid_inputs_and_received_angles_even_with_valid_crc(self):
+    def test_ranges_checked_before_transmission_or_motion(self):
         for pair in ((-1, 0), (181, 2), (0, 36), (0, -1), (1, 1.5), (True, 0)):
             with self.subTest(pair=pair), self.assertRaises(ValueError):
                 encode_angles(*pair)
-        for pan, tilt in ((181, 20), (103, 36)):
-            invalid = f'{SYNC}{pan:08b}{tilt:08b}{crc8(DISCRIMINATOR, pan, tilt):08b}1'
-            self.assertEqual(receive(invalid), [])
+        received = decode_angles('1' * 32)
+        self.assertEqual(received, (65535, 65535))
+        with self.assertRaises(ValueError):
+            validate_angles(*received)
 
-    def test_damage_dropout_and_ambient_light_do_not_issue_commands(self):
-        frame = encode_angles(112, 25)
-        for index in (4, 17, 25, 34, 40):
-            corrupt = frame[:index] + str(1 - int(frame[index])) + frame[index+1:]
-            self.assertEqual(receive(corrupt), [])
-        self.assertEqual(receive(frame[:-6]), [])
-        self.assertEqual(receive(frame, omit=(0.42, 0.44)), [])
-        self.assertEqual(receive(frame, contrast=0.006), [])
-        self.assertEqual(receive('1' * FRAME_LEN), [])
-
-    def test_angle_frames_and_legacy_arc_frames_are_distinct(self):
-        self.assertEqual(receive(stimulus_bits(103, DEFAULT_BIT_MS)), [])
-        self.assertEqual(receive(encode_angles(103, 20), receiver=FrameDecoder(DEFAULT_BIT_MS),
-                                 bit_ms=DEFAULT_BIT_MS), [])
+    def test_invalid_frame_or_erased_bit_is_never_a_command(self):
+        frame = encode_angles(10, 4)
+        for damaged in ('1' + frame[1:], frame[:-1], frame[:-1] + '1'):
+            with self.subTest(damaged=damaged), self.assertRaises(ValueError):
+                payload_from_frame(damaged)
+        for payload in ('', '0' * 31 + '?', '0' * 33):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                decode_angles(payload)
 
 
 if __name__ == '__main__':

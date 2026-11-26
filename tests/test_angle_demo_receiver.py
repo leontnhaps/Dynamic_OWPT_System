@@ -2,7 +2,9 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
-from common.angle_demo import BIT_MS, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, encode_angles
+from common.angle_demo import (BIT_MS, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, encode_angles,
+                               payload_from_frame)
+from common.ook_experiment import make_frame
 from Rx.angle_demo import CaptureConflict, LISTEN_NS, Receiver, ServoWrites, serve
 from Rx.arc_bench import PanTilt
 from Rx.ina219_ook_stream import BUS_VOLTAGE, CONFIG, INA219, SAMPLE_CONFIG
@@ -74,6 +76,7 @@ class ReceiverTests(unittest.TestCase):
     def test_jog_from_optical_position_checks_both_limits_before_writing(self):
         self.arm()
         self.samples('00' + encode_angles(175, 35) + '00')
+        self.rx.command(dict(cmd='commit', token='T'))
         self.assertEqual(self.events[-1]['kind'], 'applied')
         self.bus.write.reset_mock()
         for delta in [(5, 1), (0, 0), (True, 0), (1, 2), (1, 1.0)]:
@@ -139,21 +142,67 @@ class ReceiverTests(unittest.TestCase):
         self.assertFalse(self.sensor_open)
         self.bus.write.assert_not_called()
 
-    def test_one_real_decoder_frame_gives_one_ack_with_servo_writes(self):
+    def test_one_decoded_frame_waits_for_a_matching_commit_and_writes_once(self):
         self.arm()
         self.assertEqual(self.rx.wait_seconds(), 0.001)
         self.assertEqual(self.events, [])  # Wait for an actual ADC sample before arming Tx.
         self.assertFalse(self.bus.write.called)
         bits = encode_angles(104, 19)
         self.samples('00' + bits + '00' + bits)
-        self.assertEqual([e['kind'] for e in self.events], ['armed', 'applied'])
+        self.assertEqual([e['kind'] for e in self.events], ['armed', 'decoded'])
+        payload = payload_from_frame(bits)
+        self.assertEqual(self.events[-1], dict(kind='decoded', token='T', rx_payload_bits=payload,
+                                              pan=104, tilt=19))
+        self.assertFalse(self.sensor_open)
+        self.bus.write.assert_not_called()
+        with self.assertRaises(CaptureConflict):
+            self.rx.command(dict(cmd='commit', token='old'))
+        self.rx.command(dict(cmd='commit', token='T'))
         applied = self.events[-1]
+        self.assertEqual((applied['kind'], applied['rx_payload_bits']), ('applied', payload))
         self.assertEqual((applied['token'], applied['pan'], applied['tilt']), ('T', 104, 19))
         self.assertEqual([(r[2], r[3]) for r in applied['servo_writes']], [(0, 104), (1, 19)])
         self.assertEqual(self.sensor.registers[CONFIG], 0x399F)
         self.assertFalse(self.sensor_open)
+        with self.assertRaises(CaptureConflict):
+            self.rx.command(dict(cmd='commit', token='T'))
         angle_writes = [c for c in self.bus.write.call_args_list if len(c.args[0]) == 5]
         self.assertEqual(len(angle_writes), 2)
+
+    def test_decoded_pose_cannot_move_after_cancel_or_expiry(self):
+        for outcome in ('cancel', 'tick', 'late_commit', 'disconnect'):
+            with self.subTest(outcome=outcome):
+                self.arm()
+                self.samples('00' + encode_angles(103, 20) + '00')
+                self.assertEqual(self.events[-1]['kind'], 'decoded')
+                self.assertGreater(self.rx.wait_seconds(), 0)
+                if outcome == 'cancel':
+                    self.rx.command(dict(cmd='cancel', token='T'))
+                elif outcome == 'disconnect':
+                    with patch('Rx.angle_demo.select.select', return_value=([123], [], [])), patch(
+                            'Rx.angle_demo.os.read', return_value=b''):
+                        serve(self.rx, 123, Mock(pending=False))
+                else:
+                    self.now += LISTEN_NS
+                    if outcome == 'tick':
+                        self.rx.tick()
+                    else:
+                        self.rx.command(dict(cmd='commit', token='T'))
+                    self.assertEqual(self.events[-1]['kind'], 'timeout')
+                self.assertIsNone(self.rx.wait_seconds())
+                with self.assertRaises(CaptureConflict):
+                    self.rx.command(dict(cmd='commit', token='T'))
+        self.bus.write.assert_not_called()
+
+    def test_decoded_out_of_range_payload_is_observable_but_cannot_move(self):
+        self.arm()
+        self.samples('00' + make_frame('1' * 32) + '00')
+        self.assertEqual(self.events[-1]['kind'], 'decoded')
+        self.assertEqual(self.events[-1]['pan'], 65535)
+        with self.assertRaises(ValueError):
+            self.rx.command(dict(cmd='commit', token='T'))
+        self.assertIsNone(self.rx.pending_payload)
+        self.bus.write.assert_not_called()
 
     def test_home_clears_partial_frame_and_works_without_light_or_sensor(self):
         self.arm()

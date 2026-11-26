@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles
+from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
 from Tx.Controller.point_comparison_panel import FIXED_LIGHT, METHODS, PointComparisonPanel
 
 
@@ -39,7 +39,7 @@ class StationaryPointFlow(unittest.TestCase):
         p.selected = p.prepared = True
         p.pan, p.tilt = Value('0'), Value('0')
         p.status, p.off_status, p.applied = Value(), Value(), Value()
-        p.rx_status, p.location = Value(), Value()
+        p.rx_status, p.location, p.verification = Value(), Value(), Value()
         p.results = {key: Value() for key in METHODS}
         p.inputs = Mock()
         p.inputs.snapshot.return_value = {'point_id': 'P1', 'xyz_m': [1, 2, 3]}
@@ -138,11 +138,19 @@ class StationaryPointFlow(unittest.TestCase):
                 p.tick()
                 pattern = dict(bits=encode_angles(*goal), bit_ms=BIT_MS, repeats=1)
                 p.app.send.assert_called_with(dict(cmd='laser_pattern', request_id=token, **pattern))
-                p.rx.events.put(dict(kind='applied', token=token, pan=goal[0], tilt=goal[1]))
+                decoded = dict(kind='decoded', token=token, pan=goal[0], tilt=goal[1],
+                               rx_payload_bits=payload_from_frame(pattern['bits']))
+                p.rx.events.put(decoded)
                 p.tick()
                 self.assertEqual(p.phase, 'optical')
                 p.event(dict(event='laser_pattern', request_id=token, state='completed', simulated=False,
-                             settings=pattern, off_call_done_ms=2050.0))
+                             settings=pattern, off_call_done_ms=len(pattern['bits']) * BIT_MS + .1,
+                             trace=[dict(index=i, level=int(bit)) for i, bit in enumerate(pattern['bits'])]))
+                p.rx.send.assert_called_with('commit', token)
+                self.assertEqual(p.phase, 'optical')
+                p.rx.events.put(dict(decoded, kind='applied', servo_writes=[
+                    ['1.00','1.01',0,goal[0],'','applied'], ['1.01','1.02',1,goal[1],'','applied']]))
+                p.tick()
                 self.assertEqual(p.phase, 'pose_settle')
                 self.after_settle()
                 light_token = self.begin_voltage()
@@ -154,6 +162,9 @@ class StationaryPointFlow(unittest.TestCase):
                 events = (p.run.folder/row['trial_id']/'events.jsonl').read_text(encoding='utf-8').splitlines()
                 estimates = [json.loads(e) for e in events if '"event": "estimate"' in e]
                 self.assertEqual((estimates[0]['pan'], estimates[0]['tilt']), goal)
+                checks = [json.loads(e) for e in events if '"event": "angle_verification"' in e]
+                self.assertEqual(len(checks), 1)
+                self.assertTrue(checks[0]['success'])
 
     def test_early_light_end_fails_and_late_voltage_cannot_reverse_outcome(self):
         p = self.panel

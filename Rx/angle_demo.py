@@ -9,9 +9,11 @@ import time
 from collections import deque
 from contextlib import ExitStack, contextmanager
 
-from common.angle_demo import (AngleDecoder, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, EXPECTED_SAMPLES,
+from common.angle_demo import (BIT_MS, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, EXPECTED_SAMPLES,
                                MIN_VOLTAGE_SAMPLES, MAX_VOLTAGE_GAP_NS, VOLTAGE_SAMPLE_MS,
-                               VOLTAGE_SETTLE_NS, VOLTAGE_WINDOW_NS, MAX_PAN, MAX_TILT, validate_jog)
+                               VOLTAGE_SETTLE_NS, VOLTAGE_WINDOW_NS, decode_angles, validate_angles,
+                               validate_jog)
+from common.ook_frame_decode import PayloadDecoder
 from Rx.arc_bench import PanTilt, i2c_bus
 from Rx.ina219_ook_stream import INA219, JsonPipe, NS_PER_MS, Sampler
 
@@ -45,6 +47,7 @@ class Receiver:
         self.resources = None
         self.sampler = None
         self.decoder = None
+        self.pending_payload = None
         self.token = None
         self.armed = False
         self.expires = None
@@ -56,6 +59,7 @@ class Receiver:
     def disarm(self):
         resources, self.resources = self.resources, None
         self.sampler = self.decoder = self.token = None
+        self.pending_payload = None
         self.armed = False
         self.expires = None
         self.window_start_ns = None
@@ -93,7 +97,7 @@ class Receiver:
                 sampler.command(dict(cmd='start', token=token, interval_ms=interval_ms))
                 now = self.clock()
                 if op == 'arm':
-                    self.decoder = AngleDecoder()
+                    self.decoder = PayloadDecoder(BIT_MS)
                     self.expires = now + LISTEN_NS
                 elif op == 'measure':
                     self.window_start_ns = now + VOLTAGE_SETTLE_NS
@@ -103,6 +107,16 @@ class Receiver:
                     self.voltage_count = 0
                 self.sampler, self.token = sampler, token
                 self.resources = stack.pop_all()
+        elif op == 'commit':
+            if token != self.token or self.pending_payload is None:
+                raise CaptureConflict('대응하는 광복호 결과가 없습니다.')
+            if self.clock() >= self.expires:
+                self.timeout()
+                return
+            payload = self.pending_payload
+            self.disarm()  # Consume it before I/O. A repeated commit can never reapply the pose.
+            pan, tilt = decode_angles(payload)
+            self.move(pan, tilt, 'applied', token, rx_payload_bits=payload)
         elif op == 'stop':
             if self.token is not None and self.expires is not None:
                 raise CaptureConflict('속도 측정 stop 명령으로 각도·전압 측정을 중지할 수 없습니다.')
@@ -124,9 +138,8 @@ class Receiver:
         else:
             raise ValueError('Unknown Rx demo command.')
 
-    def move(self, pan, tilt, kind, token):
-        if not (0 <= pan <= MAX_PAN and 0 <= tilt <= MAX_TILT):
-            raise ValueError(f'Rx 명령 범위를 벗어납니다. Pan 0~{MAX_PAN}°, Tilt 0~{MAX_TILT}°.')
+    def move(self, pan, tilt, kind, token, **evidence):
+        validate_angles(pan, tilt)
         self.last_pose = None
         try:
             if not self.servo_initialised:
@@ -140,7 +153,7 @@ class Receiver:
             raise
         self.last_pose = (pan, tilt)
         self.emit(kind=kind, token=token, pan=pan, tilt=tilt,
-                  servo_writes=list(self.servos.commands))
+                  servo_writes=list(self.servos.commands), **evidence)
 
     def release_servos(self):
         self.last_pose = None
@@ -172,11 +185,15 @@ class Receiver:
         if not self.armed:
             self.armed = True
             self.emit(kind='armed', token=self.token)
-        angles = self.decoder.feed(sample['rx_monotonic_ns'] / 1e9, code * 0.004)
-        if angles is not None:
+        payload = self.decoder.feed(sample['rx_monotonic_ns'] / 1e9, code * 0.004)
+        if payload is not None:
             token = self.token
             self.disarm()
-            self.move(*angles, 'applied', token)
+            self.token = token
+            self.pending_payload = payload
+            self.expires = self.clock() + LISTEN_NS
+            pan, tilt = decode_angles(payload)
+            self.emit(kind='decoded', token=token, rx_payload_bits=payload, pan=pan, tilt=tilt)
 
     def timeout(self):
         token = self.token
@@ -196,19 +213,16 @@ class Receiver:
         self.emit(kind='timeout', token=token)
 
     def wait_seconds(self):
-        if self.sampler is None:
-            return None
-        deadline = self.sampler.deadline
-        if self.expires is not None:
-            deadline = min(deadline, self.expires)
-        return max(0, deadline - self.clock()) / 1e9
+        deadline = self.expires
+        if self.sampler is not None:
+            deadline = self.sampler.deadline if deadline is None else min(deadline, self.sampler.deadline)
+        return None if deadline is None else max(0, deadline - self.clock()) / 1e9
 
     def tick(self):
-        if self.sampler is not None:
-            if self.expires is not None and self.clock() >= self.expires:
-                self.timeout()
-            else:
-                self.sampler.sample_due()
+        if self.expires is not None and self.clock() >= self.expires:
+            self.timeout()
+        elif self.sampler is not None:
+            self.sampler.sample_due()
 
 
 def serve(receiver, input_fd, output):
