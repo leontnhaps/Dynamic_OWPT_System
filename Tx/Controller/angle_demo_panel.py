@@ -23,7 +23,6 @@ class AngleDemoPanel(ttk.Frame):
         super().__init__(parent, padding=8)
         self.app = app
         self.rx = self.token = self.phase = self.logpath = self.off_token = None
-        self.last_servo_pose = None
         self.selected = self.prepared = False
         self.target = tk.StringVar(value=DEFAULT_RX_TARGET)
         self.password = tk.StringVar()
@@ -32,7 +31,8 @@ class AngleDemoPanel(ttk.Frame):
         self.rx_status = tk.StringVar(value='Rx 미연결')
         self.off_status = tk.StringVar()
         self.status = tk.StringVar(value='원위치 기준으로 각도를 입력하세요.')
-        self.applied = tk.StringVar(value='Rx 서보 명령 확인 전')
+        self.applied = tk.StringVar(self)
+        self.clear_servo_pose('Rx 미연결')
         row = ttk.Frame(self)
         row.pack(anchor='w', pady=4)
         for label, variable, width, mask in [('Rx SSH', self.target, 24, ''),
@@ -41,16 +41,22 @@ class AngleDemoPanel(ttk.Frame):
             ttk.Entry(row, textvariable=variable, width=width, show=mask).pack(side='left')
         ttk.Button(row, text='SSH 연결', command=self.connect).pack(side='left', padx=5)
         ttk.Label(row, textvariable=self.rx_status).pack(side='left', padx=4)
-        check = ttk.Frame(self)
-        check.pack(anchor='w', pady=3)
-        ttk.Label(check, text='Rx 서보 점검 (SSH)').pack(side='left', padx=3)
+        check_box = ttk.LabelFrame(self, text='Rx 서보 점검 (SSH)', padding=4)
+        check_box.pack(anchor='w', pady=3)
+        readout = ttk.Frame(check_box)
+        readout.pack(anchor='w')
+        ttk.Label(readout, text='마지막 확인 명령각').pack(side='left', padx=3)
+        ttk.Label(readout, textvariable=self.applied, font='TkHeadingFont').pack(side='left', padx=6)
+        check = ttk.Frame(check_box)
+        check.pack(anchor='w')
         ttk.Button(check, text='두 축 한 번에 확인', command=self.check_both).pack(side='left', padx=3)
         ttk.Button(check, text='점검 중지', command=self.stop_servo_check).pack(side='left', padx=3)
         self.jog_size = tk.IntVar(value=1)
         for step in (1, 5):
             ttk.Radiobutton(check, text=f'{step}°', variable=self.jog_size, value=step).pack(side='left')
-        for axis, dp, dt in (('Pan −', -1, 0), ('Pan +', 1, 0), ('Tilt −', 0, -1), ('Tilt +', 0, 1)):
-            ttk.Button(check, text=axis, width=7,
+        for axis, dp, dt in (('오른쪽 (Pan −)', -1, 0), ('왼쪽 (Pan +)', 1, 0),
+                             ('위 (Tilt −)', 0, -1), ('아래 (Tilt +)', 0, 1)):
+            ttk.Button(check, text=axis,
                        command=lambda p=dp, t=dt: self.jog(p, t)).pack(side='left', padx=2)
         row = ttk.Frame(self)
         row.pack(anchor='w', pady=4)
@@ -66,7 +72,6 @@ class AngleDemoPanel(ttk.Frame):
         ttk.Label(self, text=f'입력 (0°, 0°) = 발판 중앙 · 셀 수직 '
                              f'(서보 Pan {HOME_PAN}°, Tilt {HOME_TILT}°)').pack(anchor='w')
         ttk.Label(self, textvariable=self.status).pack(anchor='w')
-        ttk.Label(self, textvariable=self.applied).pack(anchor='w')
         ttk.Label(self, textvariable=self.off_status).pack(anchor='w')
 
     @property
@@ -200,9 +205,8 @@ class AngleDemoPanel(ttk.Frame):
 
     def stop(self, reason):
         optical, old_token = self.optical, self.token
-        if self.phase in ('check_home', 'check_jog', 'home', 'optical'):
-            self.last_servo_pose = None
-            self.applied.set('마지막 명령의 적용 여부 미확인 · 원위치 (SSH)로 다시 확인하세요.')
+        if self.phase in ('check_home', 'check_jog', 'home', 'bench_home', 'optical'):
+            self.clear_servo_pose('마지막 명령 미확인 · 원위치 (SSH)로 다시 확인하세요.')
         self.phase = self.token = None  # Late ACKs must not dispatch a frame.
         if optical:
             if self.rx is not None and self.rx.connected:
@@ -220,16 +224,19 @@ class AngleDemoPanel(ttk.Frame):
 
     def applied_pose(self, pan, tilt):
         self.last_servo_pose = (pan, tilt)
-        self.applied.set(f'Rx가 적용한 서보 명령 · 기준 대비 Pan {pan-HOME_PAN:+d}°, '
-                         f'Tilt {tilt-HOME_TILT:+d}° · 서보 Pan {pan}°, Tilt {tilt}°')
+        self.applied.set(f'Pan {pan}°    Tilt {tilt}°     (원위치 대비 Pan {pan-HOME_PAN:+d}°, '
+                         f'Tilt {tilt-HOME_TILT:+d}°)')
+
+    def clear_servo_pose(self, reason):
+        self.last_servo_pose = None
+        self.applied.set(f'Pan —    Tilt —     ({reason})')
 
     def on_rx(self, event):
         kind = event['kind']
         self.record(event)
         if kind == 'ready':
             self.rx_status.set('Rx SSH 연결됨')
-            self.last_servo_pose = None
-            self.applied.set('이 SSH 연결에서 확인된 서보 명령 없음')
+            self.clear_servo_pose('원위치 또는 두 축 확인을 눌러 시작하세요.')
             return
         if kind == 'error' and not event.get('token'):
             self.stop('Rx 오류 · ' + event.get('message', ''))
@@ -356,8 +363,7 @@ class AngleDemoPanel(ttk.Frame):
                 self.rx_status.set(detail)
                 self.rx.close()
                 self.rx = None
-                self.last_servo_pose = None
-                self.applied.set('SSH 연결 종료 · 현재 서보 명령 미확인')
+                self.clear_servo_pose('SSH 연결 종료')
         if self.phase == 'check_pause' and time.monotonic() >= self.check_due:
             try:
                 self.next_check_step()
@@ -375,6 +381,5 @@ class AngleDemoPanel(ttk.Frame):
         if self.rx:
             self.rx.close()
             self.rx = None
-            self.last_servo_pose = None
-            self.applied.set('Rx 미연결 · 현재 서보 명령 미확인')
+            self.clear_servo_pose('Rx 미연결')
             self.rx_status.set('Rx 미연결')

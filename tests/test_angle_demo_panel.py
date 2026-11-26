@@ -131,6 +131,24 @@ class DemoTabTests(unittest.TestCase):
         self.assertEqual(p.last_servo_pose, (175, 30))
         p.app.send.assert_not_called()
 
+    def test_pose_readout_tracks_current_session_servo_ack(self):
+        p = self.panel
+        p.on_rx(dict(kind='ready'))
+        self.assertIn('Pan —    Tilt —', p.applied.set.call_args.args[0])
+        p.applied_pose(HOME_PAN, HOME_TILT)
+        p.jog_size = Mock()
+        p.jog_size.get.return_value = 1
+        p.jog(-1, 0)
+        p.on_rx(dict(kind='jogged', token='old', pan=99, tilt=22))
+        self.assertIn('Pan 103°    Tilt 20°', p.applied.set.call_args.args[0])
+        p.on_rx(dict(kind='jogged', token=p.token, pan=102, tilt=20))
+        self.assertIn('원위치 대비 Pan -1°, Tilt +0°', p.applied.set.call_args.args[0])
+        p.jog(0, 1)
+        p.on_rx(dict(kind='jogged', token=p.token, pan=102, tilt=21))
+        self.assertIn('Pan 102°    Tilt 21°', p.applied.set.call_args.args[0])
+        p.leave()
+        self.assertIn('Pan —    Tilt —', p.applied.set.call_args.args[0])
+
     def test_stopped_or_mismatched_check_never_dispatches_another_step(self):
         p = self.panel
         p.app.ook.online = False
