@@ -22,7 +22,7 @@ class DemoSshTests(unittest.TestCase):
         self.rx.events = queue.Queue()
         self.rx.stopping = threading.Event()
 
-    def test_command_channel_cannot_carry_a_pose(self):
+    def test_optical_control_commands_cannot_carry_a_pose(self):
         self.rx._receive(b'{"kind":"ready"}')
         for command in ('arm', 'home', 'cancel', 'measure', 'finish_angle', 'commit'):
             self.rx.send(command, 'request-1')
@@ -44,6 +44,26 @@ class DemoSshTests(unittest.TestCase):
                          dict(pan=65536), dict(kind='applied')]:
             with self.assertRaises(OSError):
                 self.rx._receive(json.dumps(dict(event, **override)))
+
+    def test_xyz_ssh_request_and_reply_require_both_bounded_axes_and_matching_writes(self):
+        self.rx._receive(b'{"kind":"ready"}')
+        self.rx.events.get_nowait()
+        self.rx.move_xyz('station-3', 62, 23)
+        self.assertEqual(self.rx.commands.get_nowait(), dict(cmd='move_xyz', token='station-3', pan=62, tilt=23))
+        for token, pan, tilt in (('', 62, 23), ('x', -1, 23), ('x', 62, True), ('x', 62, 36)):
+            with self.assertRaises(ValueError):
+                self.rx.move_xyz(token, pan, tilt)
+        self.assertTrue(self.rx.commands.empty())
+        pan_write = [1, 2, 0, 62, '', 'xyz_applied']
+        tilt_write = [2, 3, 1, 23, '', 'xyz_applied']
+        ack = dict(kind='xyz_applied', token='station-3', pan=62, tilt=23, servo_writes=[pan_write, tilt_write])
+        self.rx._receive(json.dumps(ack))
+        self.assertEqual(self.rx.events.get_nowait()['servo_writes'], ack['servo_writes'])
+        for bad in (dict(pan=63), dict(tilt=36), dict(servo_writes=[]), dict(servo_writes=[tilt_write, pan_write]),
+                    dict(servo_writes=[pan_write, [2, 3, 1, 23, '', 'applied']])):
+            with self.subTest(bad=bad), self.assertRaises(OSError):
+                self.rx._receive(json.dumps(dict(ack, **bad)))
+        self.assertTrue(self.rx.events.empty())
 
     def test_selected_rate_and_raw_angle_chunks_round_trip_without_pose_fields(self):
         self.rx._receive(b'{"kind":"ready"}')

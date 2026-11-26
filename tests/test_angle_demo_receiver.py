@@ -92,7 +92,26 @@ class ReceiverTests(unittest.TestCase):
             self.jog(1, -5)
         self.bus.write.assert_not_called()
 
-    def test_jog_during_capture_preserves_each_capture_and_never_writes(self):
+    def test_ssh_xyz_moves_absolute_axes_without_home_sensor_or_ook(self):
+        cmd = dict(cmd='move_xyz', token='point-3', pan=62, tilt=23)
+        for bad in (dict(pan=-1), dict(pan=True), dict(tilt=36), dict(tilt=23.0), dict(bit_ms=8)):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.rx.command(dict(cmd, **bad))
+        self.bus.write.assert_not_called()
+        self.rx.sensor_context = Mock(side_effect=AssertionError('unexpected ADC access'))
+        self.rx.command(cmd)
+        self.rx.sensor_context.assert_not_called()
+        self.assertEqual(self.rx.last_pose, (62, 23))
+        event, = self.events
+        self.assertEqual((event['kind'], event['token'], event['pan'], event['tilt']),
+                         ('xyz_applied', 'point-3', 62, 23))
+        self.assertEqual([row[2:] for row in event['servo_writes']],
+                         [[0, 62, '', 'xyz_applied'], [1, 23, '', 'xyz_applied']])
+        self.assertNotIn('rx_payload_bits', event)
+        with self.assertRaises(CaptureConflict):
+            self.rx.command(dict(cmd='commit', token='point-3'))
+
+    def test_jog_and_xyz_during_capture_preserve_each_capture_and_never_write(self):
         for op in ('arm', 'measure', 'start'):
             command = dict(cmd=op, token=op)
             if op == 'start':
@@ -100,6 +119,8 @@ class ReceiverTests(unittest.TestCase):
             self.rx.command(command)
             with self.assertRaises(CaptureConflict):
                 self.jog(1, -1)
+            with self.assertRaises(CaptureConflict):
+                self.rx.command(dict(cmd='move_xyz', token='other', pan=62, tilt=23))
             self.assertEqual(self.rx.token, op)
             self.assertTrue(self.sensor_open)
             self.rx.disarm()
@@ -157,6 +178,9 @@ class ReceiverTests(unittest.TestCase):
                                               pan=104, tilt=19))
         self.assertFalse(self.sensor_open)
         self.bus.write.assert_not_called()
+        with self.assertRaises(CaptureConflict):
+            self.rx.command(dict(cmd='move_xyz', token='X', pan=62, tilt=23))
+        self.assertEqual(self.rx.pending_payload, payload)
         with self.assertRaises(CaptureConflict):
             self.rx.command(dict(cmd='commit', token='old'))
         self.rx.command(dict(cmd='commit', token='T'))

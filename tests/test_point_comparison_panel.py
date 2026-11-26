@@ -8,10 +8,16 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
+from Tx.Controller.bench_pose import STATION_COORDS_M, xyz_pose
 from Tx.Controller.point_comparison_panel import METHODS, PointComparisonPanel
 from Tx.Controller.station_tx_controls import StationTxControls
 from tests.test_angle_demo_panel import armed, completed_pattern, decoded_frame, init_wave_test, waveform_receipt
 from tests.test_ook_panel import Value
+
+
+def ssh_xyz_receipt(token, pan, tilt):
+    return dict(kind='xyz_applied', token=token, pan=pan, tilt=tilt, servo_writes=[
+        ['1.0', '1.1', 0, pan, '', 'xyz_applied'], ['1.1', '1.2', 1, tilt, '', 'xyz_applied']])
 
 
 class StationaryPointFlow(unittest.TestCase):
@@ -117,6 +123,104 @@ class StationaryPointFlow(unittest.TestCase):
         self.assertIn(f'{goal[0]}° / {goal[1]}°', p.targets[method].get())
         return token
 
+    def select_point_three(self):
+        p = self.panel
+        p.inputs.snapshot.return_value = dict(point_id='③', rx_minus_tx_m=list(STATION_COORDS_M['③']),
+                                              rx_home_yaw_deg=0, rx_pan_plus='왼쪽', rx_tilt_plus='아래')
+        p.inputs.estimate_xyz.side_effect = xyz_pose
+        p.station_changed()
+
+    def test_direct_xyz_uses_point_three_without_tx_camera_light_or_optical_command(self):
+        p = self.panel
+        self.select_point_three()
+        p.app.current = None
+        p.app.ook.online = False
+        p.tx_controls.light_level.return_value = 1
+        p.move_xyz_ssh()
+        token = p.token
+        self.assertEqual(p.phase, 'xyz_ssh', p.status.get())
+        p.rx.move_xyz.assert_called_once_with(token, 62, 23)
+        self.assertIsNone(p.pose_method)
+        p.on_rx(ssh_xyz_receipt('previous-request', 62, 23))
+        self.assertEqual(p.token, token)
+        self.assertIsNone(p.pose_method)
+        p.on_rx(ssh_xyz_receipt(token, 62, 23))
+        self.assertIsNone(p.phase)
+        self.assertEqual((p.pose_method, p.last_servo_pose), ('xyz', (62, 23)))
+        self.assertEqual(p.pose_source['transport'], 'ssh')
+        p.app.ook.check_ready.assert_not_called()
+        p.tx_controls.light_level.assert_not_called()
+        p.rx.arm_angle.assert_not_called()
+        p.rx.send.assert_not_called()
+        p.app.send.assert_not_called()
+        self.assertIsNone(p.wave)
+
+    def test_direct_xyz_keeps_baseline_and_tags_voltage_with_actual_transport(self):
+        p = self.panel
+        self.select_point_three()
+        self.home()
+        self.begin_voltage(1)
+        self.voltage_receipt(250)
+        self.gpio('-after', 1, 80)
+        run = p.run
+        baseline = run.results[0]['trial_id']
+        p.app.send.reset_mock()
+        p.move_xyz_ssh()
+        token = p.token
+        receipt = ssh_xyz_receipt(token, 62, 23)
+        p.on_rx(receipt)
+        p.app.send.assert_not_called()
+        self.begin_voltage(1)
+        self.voltage_receipt(275)
+        self.gpio('-after', 1, 80)
+        row = run.results[-1]
+        self.assertEqual((p.run, row['success'], row['method'], row['pose_transport'], row['baseline_trial_id']),
+                         (run, True, 'xyz', 'ssh', baseline))
+        self.assertAlmostEqual(row['delta_v'], .1)
+        trial = run.folder / row['trial_id'] / 'manifest.json'
+        source = json.loads(trial.read_text(encoding='utf-8'))['settings']['pose_source']
+        self.assertEqual(source['transport'], 'ssh')
+        self.assertEqual(source['servo_writes'], receipt['servo_writes'])
+        self.assertNotIn('ook_token', source)
+        events = [json.loads(line) for line in (run.folder / 'events.jsonl').read_text(encoding='utf-8').splitlines()]
+        self.assertFalse(any(e.get('event') == 'angle_verification' for e in events))
+
+    def test_direct_xyz_never_confirms_partial_mismatched_or_timed_out_writes(self):
+        p = self.panel
+        self.select_point_three()
+        for failure in ('partial', 'wrong_target', 'wrong_writes', 'optical_writes', 'error', 'timeout'):
+            with self.subTest(failure=failure):
+                self.home()
+                if failure == 'timeout':
+                    p.off_token = 'previous-optical-shutdown'
+                p.move_xyz_ssh()
+                token = p.token
+                self.assertEqual(p.phase, 'xyz_ssh')
+                reply = ssh_xyz_receipt(token, 62, 23)
+                if failure == 'timeout':
+                    p.deadline = 0
+                else:
+                    if failure == 'partial':
+                        reply['servo_writes'].pop()
+                    elif failure == 'wrong_target':
+                        reply = ssh_xyz_receipt(token, 63, 23)
+                    elif failure == 'wrong_writes':
+                        reply['servo_writes'][1][3] = 24
+                    elif failure == 'optical_writes':
+                        for record in reply['servo_writes']:
+                            record[-1] = 'applied'
+                    else:
+                        reply = dict(kind='error', token=token, message='I2C write failed')
+                    p.rx.events.put(reply)
+                p.tick()
+                self.assertIsNone(p.phase)
+                p.on_rx(ssh_xyz_receipt(token, 62, 23))
+                self.assertIsNone(p.pose_method)
+                self.assertIsNone(p.last_servo_pose)
+                if failure == 'timeout':
+                    self.assertEqual(p.off_token, 'previous-optical-shutdown')
+        p.app.send.assert_not_called()
+
     def test_six_independent_windows_never_switch_output_or_move_pose(self):
         p = self.panel
         for method in METHODS:
@@ -143,6 +247,9 @@ class StationaryPointFlow(unittest.TestCase):
                 self.assertEqual(p.pose_method, method)
                 if method == 'yolo':
                     self.assertEqual((p.run.folder / row['trial_id'] / 'frame.jpg').read_bytes(), b'PV snapshot')
+                if method in ('xyz', 'yolo'):
+                    data = (p.run.folder / row['trial_id'] / 'manifest.json').read_text(encoding='utf-8')
+                    self.assertEqual(json.loads(data)['settings']['pose_source']['transport'], 'ook')
         self.assertIn('6/6', p.location.get())
         events = [json.loads(line) for line in (p.run.folder / 'events.jsonl').read_text(encoding='utf-8').splitlines()]
         self.assertEqual([e['method'] for e in events if e['event'] == 'angle_verification' and e['success']],
@@ -207,6 +314,8 @@ class StationaryPointFlow(unittest.TestCase):
         token = p.token
         p.measure()
         p.move_to('xyz')
+        p.move_xyz_ssh()
+        p.rx.move_xyz.assert_not_called()
         p.home()
         self.assertEqual((p.token, p.phase), (token, 'voltage_window'))
         self.assertEqual(p.run.results[-1]['status'], 'running')

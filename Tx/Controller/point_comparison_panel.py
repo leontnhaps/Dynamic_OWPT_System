@@ -7,6 +7,7 @@ from common.angle_demo import FRAME_LEN, HOME_PAN, HOME_TILT, encode_angles, pay
 from common.ook_experiment import SYNC_WORD, THRESHOLD_BITS, TRAILING_ZEROS
 from Tx.Controller.angle_demo_panel import AngleDemoPanel
 from Tx.Controller.bench_pose import BenchPoseInputs, frame_pose
+from Tx.Controller.demo_ssh import verified_servo_writes
 from Tx.Controller.final_speed_panel import FinalSpeedPanel
 from Tx.Controller.pv_comparison import ComparisonRun
 from Tx.Controller.station_tx_controls import StationTxControls
@@ -38,9 +39,10 @@ class PointComparisonPanel(AngleDemoPanel):
         self.tx_controls.pack(fill='x')
         actions = ttk.Frame(self)
         actions.pack(anchor='w', pady=(4, 0))
-        for method in ('xyz', 'yolo'):
-            ttk.Button(actions, text=f'{METHODS[method]} 각도로 이동 · OOK',
-                       command=lambda m=method: self.move_to(m)).pack(side='left', padx=3)
+        for label, command in (('실측 XYZ 각도로 이동 · OOK', lambda: self.move_to('xyz')),
+                               ('실측 XYZ 각도로 이동 · SSH', self.move_xyz_ssh),
+                               ('YOLO 각도로 이동 · OOK', lambda: self.move_to('yolo'))):
+            ttk.Button(actions, text=label, command=command).pack(side='left', padx=3)
         ttk.Button(actions, text='현재 전압 10초 측정', command=self.measure).pack(side='left', padx=(9, 2))
         self.active_condition = tk.StringVar(self)
         ttk.Label(actions, textvariable=self.active_condition).pack(side='left', padx=6)
@@ -131,7 +133,7 @@ class PointComparisonPanel(AngleDemoPanel):
         self.transmit()
 
     def station_changed(self, force_new=False):
-        if self.method is not None:
+        if self.method is not None or self.phase == 'xyz_ssh':
             self.stop('지점 또는 보정 설정이 변경되어 이번 동작을 중지했습니다.')
         try:
             station = self.inputs.snapshot()
@@ -226,6 +228,37 @@ class PointComparisonPanel(AngleDemoPanel):
         self.pose_method = self.pose_source = self.pose_frame = None
         super().home()
 
+    def move_xyz_ssh(self):
+        try:
+            if self.phase:
+                raise ValueError('진행 중인 동작이 끝나면 Rx를 이동할 수 있습니다.')
+            self.ready_rx()
+            if self.wave is not None:
+                raise ValueError('이전 송신의 Rx 파형을 저장하고 있습니다.')
+            station = self.inputs.snapshot()
+            pan, tilt, estimate = self.inputs.estimate_xyz(station)
+        except ValueError as exc:
+            self.status.set(str(exc))
+            return
+
+        self.begin('xyz_ssh')
+        self.clear_servo_pose('실측 XYZ · SSH 쓰기 응답 대기')
+        self.targets['xyz'].set(pose_label(pan, tilt))
+        self.pose_source = dict(method='xyz', transport='ssh', ssh_token=self.token,
+                                pan=pan, tilt=tilt, estimate=estimate, pose_settings=station)
+        try:
+            self.log_xyz_ssh('xyz_ssh_requested')
+            self.rx.move_xyz(self.token, pan, tilt)
+            self.status.set(f'실측 XYZ · SSH · {pose_label(pan, tilt)} · 두 축 쓰기 응답 대기')
+        except (OSError, ValueError) as exc:
+            self.stop(str(exc))
+
+    def log_xyz_ssh(self, name, **details):
+        event = dict(event=name, token=self.token, **self.pose_source, **details)
+        self.record(event)
+        if self.run is not None and self.station == self.pose_source['pose_settings']:
+            self.run.log_station(event)
+
     def move_to(self, method):
         started = False
         try:
@@ -257,7 +290,7 @@ class PointComparisonPanel(AngleDemoPanel):
         pan, tilt, meta = result
         self.check_station()
         self.targets[self.method].set(pose_label(pan, tilt))
-        self.pose_source = dict(method=self.method, estimate=meta, tx_view=self.station_view,
+        self.pose_source = dict(method=self.method, transport='ook', estimate=meta, tx_view=self.station_view,
                                 pose_settings=self.station)
         self.run.log_station(dict(event='estimate', **self.pose_source, pan=pan, tilt=tilt))
         self.pan.set(str(pan-HOME_PAN))
@@ -381,6 +414,33 @@ class PointComparisonPanel(AngleDemoPanel):
 
     def on_rx(self, event):
         kind = event['kind']
+        if (self.phase == 'xyz_ssh' and event.get('token') == self.token
+                and kind in ('error', 'timeout', 'cancelled')):
+            self.stop(event.get('message') or '실측 XYZ · Rx SSH 서보 쓰기를 확인하지 못했습니다.')
+            return
+        if kind == 'xyz_applied':
+            if self.phase != 'xyz_ssh' or event.get('token') != self.token:
+                return
+            if time.monotonic() > self.deadline:
+                self.stop('실측 XYZ · Rx SSH 서보 쓰기 응답 시간 초과')
+                return
+            source = self.pose_source
+            goal = source['pan'], source['tilt']
+            try:
+                writes = verified_servo_writes(event, 'xyz_applied')
+                if writes != goal or (event.get('pan'), event.get('tilt')) != goal:
+                    raise ValueError('실측 XYZ 목표각과 Rx SSH 서보 쓰기 응답이 다릅니다.')
+                source['servo_writes'] = event['servo_writes']
+                self.log_xyz_ssh('xyz_ssh_applied')
+            except (ValueError, OSError) as exc:
+                self.stop(str(exc))
+                return
+            self.applied_pose(*goal)
+            self.pose_method = 'xyz'
+            self.phase = self.token = None
+            self.status.set(f'실측 XYZ · SSH · {pose_label(*goal)} 두 축 쓰기 확인 · '
+                            '현재 전압 10초 측정을 누르세요.')
+            return
         if kind in ('started', 'sample', 'stopped'):
             return
         if kind in ('voltage', 'measured'):
@@ -424,6 +484,17 @@ class PointComparisonPanel(AngleDemoPanel):
             self.speed.stop()
             return
         was_measuring = self.phase in MEASURING
+        if self.phase == 'xyz_ssh':
+            if reason.startswith('응답 시간 초과'):
+                reason = '실측 XYZ · Rx SSH 서보 쓰기 응답 시간 초과'
+            try:
+                self.log_xyz_ssh('xyz_ssh_unconfirmed', reason=reason)
+            except OSError as exc:
+                reason = f'{reason} · 기록 오류 {exc}'
+            self.clear_servo_pose('실측 XYZ · SSH 적용 미확인')
+            self.phase = self.token = None
+            self.status.set(reason)
+            return
         if reason.startswith('응답 시간 초과'):
             if self.phase in ('light_before', 'light_after'):
                 reason = 'Tx 조명 상태 조회 응답 시간 초과'
@@ -453,6 +524,8 @@ class PointComparisonPanel(AngleDemoPanel):
             self.tx_controls.tick()
             if hasattr(self, 'active_condition'):
                 method = METHODS.get(self.pose_method, '자세 미확인')
+                if self.pose_method and self.pose_source and self.pose_source.get('transport'):
+                    method += ' (' + self.pose_source['transport'].upper() + ')'
                 light = {0: 'OFF', 1: 'ON'}.get(self.tx_controls.light, '미확인')
                 text = f'현재 조건 · {method} / Laser {light}'
                 if self.active_condition.get() != text:

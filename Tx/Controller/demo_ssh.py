@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 from common.angle_demo import (DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT,
-                               validate_angle_bit_ms, validate_jog)
+                               validate_angle_bit_ms, validate_angles, validate_jog)
 from common.ook_experiment import PAYLOAD_BITS, TRAILING_ZEROS, interval_value
 from Rx.ina219_ook_stream import SAMPLE_CONFIG
 from Tx.Controller.pi_ook_rx import PiSshReceiver
@@ -23,6 +23,10 @@ RECEIVER_MODULES = (
 
 
 def optical_servo_writes(event):
+    return verified_servo_writes(event, 'applied')
+
+
+def verified_servo_writes(event, expected_action):
     """Read back the two successful bus write records in receiver-clock order."""
     rows = event.get('servo_writes')
     if not isinstance(rows, list) or len(rows) != 2:
@@ -34,7 +38,7 @@ def optical_servo_writes(event):
             raise ValueError('Rx 서보 쓰기 기록의 형식이 잘못되었습니다.')
         start, end, channel, angle, step, action = row
         if (type(channel) is not int or channel != axis or type(angle) is not int
-                or not 0 <= angle <= (MAX_PAN, MAX_TILT)[axis] or step != '' or action != 'applied'):
+                or not 0 <= angle <= (MAX_PAN, MAX_TILT)[axis] or step != '' or action != expected_action):
             raise ValueError('Rx 서보 쓰기의 채널·각도·동작이 잘못되었습니다.')
         if type(start) not in (str, int, float) or type(end) not in (str, int, float):
             raise ValueError('Rx 서보 쓰기 시각을 읽을 수 없습니다.')
@@ -93,6 +97,12 @@ class DemoSsh(PiSshReceiver):
         validate_jog(pan_step, tilt_step)
         self._enqueue(dict(cmd='jog', token=token, pan_step=pan_step, tilt_step=tilt_step))
 
+    def move_xyz(self, token, pan, tilt):
+        if not isinstance(token, str) or not 1 <= len(token) <= 128:
+            raise ValueError('잘못된 Rx 실측 XYZ 이동 요청 ID입니다.')
+        validate_angles(pan, tilt)
+        self._enqueue(dict(cmd='move_xyz', token=token, pan=pan, tilt=tilt))
+
     def arm_angle(self, token, bit_ms):
         if not isinstance(token, str) or not 1 <= len(token) <= 128:
             raise ValueError('잘못된 Rx 각도 수신 요청 ID입니다.')
@@ -112,7 +122,7 @@ class DemoSsh(PiSshReceiver):
                 raise OSError('Rx 시연 오류 응답에 설명이 없습니다.')
             if not event.get('token'):
                 raise OSError(event['message'])
-        elif not self.connected or kind not in ('armed', 'decoded', 'applied', 'home', 'jogged', 'cancelled', 'timeout',
+        elif not self.connected or kind not in ('armed', 'decoded', 'applied', 'home', 'jogged', 'xyz_applied', 'cancelled', 'timeout',
                                                 'angle_samples', 'angle_samples_end', 'voltage', 'measured',
                                                 'started', 'sample', 'stopped'):
             raise OSError('예상하지 못한 Rx 시연 응답입니다.')
@@ -151,7 +161,7 @@ class DemoSsh(PiSshReceiver):
                     ('count', 'window_start_ns', 'window_end_ns', 'max_gap_ns'))
                     or not event['count'] or event['window_end_ns'] <= event['window_start_ns']):
                 raise OSError('Rx 전압 측정 결과 형식이 잘못되었습니다.')
-        elif kind in ('decoded', 'applied', 'home', 'jogged'):
+        elif kind in ('decoded', 'applied', 'home', 'jogged', 'xyz_applied'):
             pan, tilt = event.get('pan'), event.get('tilt')
             if kind in ('decoded', 'applied'):
                 payload = event.get('rx_payload_bits')
@@ -163,6 +173,13 @@ class DemoSsh(PiSshReceiver):
                 raise OSError('Rx 시연 응답의 적용 각도가 잘못되었습니다.')
             if kind == 'home' and (pan, tilt) != (HOME_PAN, HOME_TILT):
                 raise OSError('Rx 원위치 응답의 각도가 일치하지 않습니다.')
+            if kind == 'xyz_applied':
+                try:
+                    written = verified_servo_writes(event, 'xyz_applied')
+                except ValueError as exc:
+                    raise OSError(str(exc)) from exc
+                if written != (pan, tilt):
+                    raise OSError('Rx 실측 XYZ 응답 각도와 서보 쓰기 기록이 다릅니다.')
         if kind in ('decoded', 'error') and 'frame_check' in event:
             check = event['frame_check']
             if (not isinstance(check, dict) or type(check.get('header_verified')) is not bool

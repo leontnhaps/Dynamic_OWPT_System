@@ -67,6 +67,20 @@ class VoltageComparisonTests(unittest.TestCase):
         with (self.run.folder/'summary.csv').open(encoding='utf-8', newline='') as stream:
             self.assertEqual([r['status'] for r in csv.DictReader(stream)], ['failed', 'complete'])
 
+    def test_xyz_transport_is_saved_with_the_same_voltage_condition(self):
+        baseline = self.trial('baseline', 200, False)
+        for transport in ('ook', 'ssh'):
+            self.run.start('xyz', {'pose_source': {'transport': transport}}, laser_on=False)
+            self.run.measured(self.sample_window(230))
+            result = self.run.finish(True, 'OK')
+            self.assertEqual(result['baseline_trial_id'], baseline['trial_id'])
+            path = self.run.folder / result['trial_id'] / 'manifest.json'
+            self.assertEqual(json.loads(path.read_text(encoding='utf-8'))['pose_transport'], transport)
+        with (self.run.folder/'summary.csv').open(encoding='utf-8', newline='') as stream:
+            records = list(csv.DictReader(stream))
+        self.assertEqual([(r['method'], r['pose_transport']) for r in records],
+                         [('baseline', 'ssh'), ('xyz', 'ook'), ('xyz', 'ssh')])
+
     def test_short_gaps_are_saved_and_excessive_gaps_rejected(self):
         self.run.start('baseline', {}, laser_on=False)
         self.run.measured(self.sample_window(150, [i for i in range(2000) if i != 20]))

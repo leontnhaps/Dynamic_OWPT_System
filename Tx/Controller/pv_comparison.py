@@ -17,7 +17,7 @@ RAW_COLUMNS = ('seq', 'rx_monotonic_ns', 'bus_raw', 'pv_v', 'pc_receive_monotoni
 RESULT_COLUMNS = ('point_id', 'trial_id', 'method', 'laser_on', 'rx_pan_deg', 'rx_tilt_deg',
                   'status', 'success', 'reason',
                   'started_pc_unix_ns', 'end_pc_unix_ns', 'n', 'mean_v', 'sd_v',
-                  'baseline_trial_id', 'delta_v', 'window_start_ns', 'window_end_ns')
+                  'baseline_trial_id', 'delta_v', 'window_start_ns', 'window_end_ns', 'pose_transport')
 
 
 class ComparisonRun:
@@ -28,7 +28,7 @@ class ComparisonRun:
         self.folder = Path(root_stage_dir) / f'point_{stamp}_{uuid4().hex[:8]}'
         self.folder.mkdir(parents=True)
         self.point_id = point_metadata['point_id']
-        write_manifest(self.folder, dict(schema_version=2, point=point_metadata,
+        write_manifest(self.folder, dict(schema_version=3, point=point_metadata,
                                          voltage_lsb_v=.004, sample_ms=VOLTAGE_SAMPLE_MS,
                                          settle_ns=VOLTAGE_SETTLE_NS, window_ns=VOLTAGE_WINDOW_NS,
                                          sd_definition='sample standard deviation (n-1)'))
@@ -53,11 +53,13 @@ class ComparisonRun:
         trial_id = f'trial_{len(self.results)+1:03d}_{method}_{illumination}_{uuid4().hex[:12]}'
         trial_folder = self.folder / trial_id
         trial_folder.mkdir()
+        pose_source = metadata.get('pose_source') or {}
         row = dict(point_id=self.point_id, trial_id=trial_id, method=method, laser_on=laser_on,
+                   pose_transport='ssh' if method == 'baseline' else pose_source.get('transport'),
                    rx_pan_deg=metadata.get('rx_pan_deg'), rx_tilt_deg=metadata.get('rx_tilt_deg'),
                    status='running',
                    started_pc_unix_ns=time.time_ns())
-        write_manifest(trial_folder, dict(schema_version=2, **row, settings=metadata))
+        write_manifest(trial_folder, dict(schema_version=3, **row, settings=metadata))
         raw = (trial_folder / 'voltage.csv').open('x', encoding='utf-8', newline='')
         try:
             self.writer = csv.writer(raw)

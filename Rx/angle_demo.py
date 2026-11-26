@@ -93,10 +93,10 @@ class Receiver:
         elif op == 'arm' and 'bit_ms' in cmd:
             fields.add('bit_ms')
             bit_ms = validate_angle_bit_ms(cmd['bit_ms'])
-        elif op == 'jog':
+        elif op in ('jog', 'move_xyz'):
             if self.token is not None:
-                raise CaptureConflict('Rx 수신 또는 전압 측정을 마친 뒤 서보를 점검하세요.')
-            fields.update(('pan_step', 'tilt_step'))
+                raise CaptureConflict('Rx 수신 또는 전압 측정을 마친 뒤 서보를 움직이세요.')
+            fields.update(('pan_step', 'tilt_step') if op == 'jog' else ('pan', 'tilt'))
         if set(cmd) != fields:
             raise ValueError('Unexpected Rx command fields.')
         token = cmd['token']
@@ -161,6 +161,8 @@ class Receiver:
         elif op == 'home':
             self.disarm()
             self.move(HOME_PAN, HOME_TILT, 'home', token)
+        elif op == 'move_xyz':
+            self.move(cmd['pan'], cmd['tilt'], 'xyz_applied', token)
         elif op == 'jog':
             pan_step, tilt_step = cmd['pan_step'], cmd['tilt_step']
             validate_jog(pan_step, tilt_step)
