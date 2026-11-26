@@ -90,7 +90,6 @@ class FinalSpeedPanelTests(unittest.TestCase):
                 self.assertEqual(plan['receiver'], PI_RECEIVER)
                 self.assertEqual(Counter((t['settings']['bit_ms'], t['sample_ms']) for t in plan['trials']),
                                  {(ms, sample): 30 for ms in periods})
-                p.start_trial('baseline')
                 p.home()
                 self.assertTrue(self.rx.commands.empty())
                 self.assertIsNone(p.method)
@@ -180,10 +179,8 @@ class FinalSpeedPanelTests(unittest.TestCase):
         p.speed.table.insert.assert_called_once_with('', 'end', values=row)
         self.assertFalse(p.speed.running)
         self.assertIsNone(e.arduino)
-        p.station, p.run, p.inputs = {'point_id': 'P1'}, Mock(), Mock()
-        p.inputs.snapshot.return_value = p.station
-        p.start_trial('baseline')
-        self.assertEqual(p.phase, 'bench_home', p.status.get())
+        p.home()
+        self.assertEqual(p.phase, 'home', p.status.get())
         self.assertEqual(self.rx.commands.get_nowait(), dict(cmd='home', token=p.token))
 
     def test_leaving_cancels_plan_and_releases_receiver_with_off_pending(self):
@@ -207,3 +204,13 @@ class FinalSpeedPanelTests(unittest.TestCase):
         self.assertIsNone(p.phase)
         self.assertFalse(any((self.captures / 'M6-4').iterdir()))
         self.assertFalse(self.rx.stopping.is_set())
+
+    def test_manual_tx_jog_or_unconfirmed_off_blocks_speed_run(self):
+        p = self.panel
+        for busy, owns_output in [(True, False), (False, True)]:
+            with self.subTest(busy=busy, owns_output=owns_output):
+                p.tx_controls = Mock(busy=busy, owns_output=owns_output)
+                p.speed.start('reference')
+                self.assertFalse(p.speed.running)
+                self.assertTrue(self.rx.commands.empty())
+                self.assertFalse(any((self.captures / 'M6-4').iterdir()))

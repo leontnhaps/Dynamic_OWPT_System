@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from common.angle_demo import HOME_PAN, HOME_TILT
-from Tx.Controller.bench_pose import BenchPoseInputs, CAMERA, detector_pose, frame_pose, xyz_pose
+from Tx.Controller.bench_pose import BenchPoseInputs, CAMERA, STATION_COORDS_M, detector_pose, frame_pose, xyz_pose
 
 
 def settings(**fields):
@@ -24,6 +24,15 @@ def preview(command_id='test', when=None):
 
 
 class BenchPoseTests(unittest.TestCase):
+    def test_four_station_commands_for_the_observed_receiver_axes(self):
+        expected = [(103, 24), (84, 23), (62, 23), (75, 24)]
+        for (label, coords), target in zip(STATION_COORDS_M.items(), expected):
+            with self.subTest(station=label):
+                pan, tilt, meta = xyz_pose(settings(rx_minus_tx_m=coords, rx_pan_plus='왼쪽'))
+                self.assertEqual((pan, tilt), target)
+                self.assertEqual(meta['rx_minus_tx_m'][2], .4)
+                self.assertAlmostEqual(meta['rx_elevation_up_deg'], -meta['elevation_deg'])
+
     def test_face_to_face_geometry_signs_and_independent_methods(self):
         cfg = settings()
         ref = (CAMERA.laser_u, CAMERA.laser_v)

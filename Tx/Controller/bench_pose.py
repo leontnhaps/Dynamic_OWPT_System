@@ -15,6 +15,12 @@ from Tx.Controller.detection_panel import PVDetector
 CAMERA = TrackingConfig()
 PAN_SIGN = {'오른쪽': 1, '왼쪽': -1}
 TILT_SIGN = {'위': 1, '아래': -1}
+STATION_COORDS_M = {
+    '①': (0.00, 6.30, 0.40),
+    '②': (2.70, 7.65, 0.40),
+    '③': (5.40, 6.30, 0.40),
+    '④': (2.70, 5.00, 0.40),
+}
 
 
 def number(text, name):
@@ -51,7 +57,9 @@ def xyz_pose(station):
     azimuth = math.degrees(math.atan2(x, y))
     elevation = math.degrees(math.atan2(z, horizontal))
     pan, tilt, meta = servo_pose(azimuth, elevation, station)
-    return pan, tilt, dict(meta, method='xyz', rx_minus_tx_m=[x, y, z], distance_m=math.hypot(horizontal, z))
+    return pan, tilt, dict(meta, method='xyz', rx_minus_tx_m=[x, y, z],
+                           horizontal_m=horizontal, distance_m=math.hypot(horizontal, z),
+                           azimuth_deg=azimuth, elevation_deg=elevation)
 
 
 def frame_pose(frame):
@@ -112,11 +120,15 @@ class BenchPoseInputs(ttk.Frame):
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.future = self.pose_stamp = self.model = self.model_key = None
         self.fields = {}
+        self.on_change = None
+        self.station_coordinates = {key: tuple(f'{n:.2f}' for n in xyz)
+                                    for key, xyz in STATION_COORDS_M.items()}
+        self.active_point = next(iter(STATION_COORDS_M))
         top = ttk.Frame(self)
         top.pack(anchor='w')
-        for key, label, default, width in [('point_id','지점','P01',10), ('x','X(m)','',6),
-                                           ('y','Y(m)','',6), ('z','Z(m)','',6)]:
-            self.field(top, key, label, default, width)
+        self.field(top, 'point_id', '측정 지점', self.active_point, 3, STATION_COORDS_M)
+        for axis, value in zip('xyz', self.station_coordinates[self.active_point]):
+            self.field(top, axis, f'{axis.upper()} (m)', value, 6)
         self.detail = ttk.Frame(self)
         ttk.Button(top, text='좌표·축 설정', command=self.toggle).pack(side='left', padx=4)
         ttk.Label(top, text='Tx 원점 · Tx 뒤에서 +X 우측, +Y 정면, +Z 위').pack(side='left')
@@ -129,7 +141,7 @@ class BenchPoseInputs(ttk.Frame):
         self.field(axes, 'tx_p0', 'Tx 정면 Pan°', '0')
         self.field(axes, 'tx_t0', '수평 Tilt°', '0')
         self.field(axes, 'rx_yaw', 'Rx 원위치 방위차°', '0')
-        self.rx_axes_observed = tk.BooleanVar(self, value=False)
+        self.rx_axes_observed = tk.BooleanVar(self, value=True)
         ttk.Checkbutton(axes, text='Rx 두 축 방향 실물 확인', variable=self.rx_axes_observed).pack(side='left')
         for key in ('rx_pan_plus', 'rx_tilt_plus'):
             self.fields[key].trace_add('write', lambda *_: self.rx_axes_observed.set(False))
@@ -141,6 +153,27 @@ class BenchPoseInputs(ttk.Frame):
             self.field(lens, key, key+'(px)', '')
         ttk.Label(lens, text=f'미입력 시 기준점 ({CAMERA.laser_u:g}, {CAMERA.laser_v:g}) ±{CAMERA.hit_px:g}px. '
                               '입력 시 수평 카메라·현재 해상도의 핀홀 보정값 사용.').pack(side='left')
+        self.fields['point_id'].trace_add('write', self.select_point)
+        for key, var in self.fields.items():
+            if key != 'point_id':
+                var.trace_add('write', self.changed)
+        self.rx_axes_observed.trace_add('write', self.changed)
+
+    def select_point(self, *_):
+        key = self.fields['point_id'].get()
+        if key == self.active_point:
+            return
+        self.station_coordinates[self.active_point] = tuple(self.fields[k].get() for k in 'xyz')
+        # Notify the experiment once all three coordinates refer to the new point.
+        self.active_point = None
+        for axis, value in zip('xyz', self.station_coordinates[key]):
+            self.fields[axis].set(value)
+        self.active_point = key
+        self.changed()
+
+    def changed(self, *_):
+        if self.active_point is not None and self.on_change is not None:
+            self.on_change()
 
     def field(self, row, key, label, default, width=5, options=None):
         var = tk.StringVar(self, value=default)

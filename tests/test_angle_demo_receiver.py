@@ -223,19 +223,19 @@ class ReceiverTests(unittest.TestCase):
         start = self.now
         self.rx.command(dict(cmd='measure', token='window1'))
         self.sensor.registers[BUS_VOLTAGE] = 120 << 3
-        for i in range(1, 301):
+        for i in range(1, 2101):
             self.now = start + i * 5_000_000
             if i == 100:
                 self.sensor.registers[BUS_VOLTAGE] = 720 << 3
             self.rx.tick()
         samples = self.events[:-1]
-        self.assertEqual(len(samples), 200)
+        self.assertEqual(len(samples), 2000)
         self.assertTrue(all(ev['kind'] == 'voltage' and ev['bus_raw'] == 720 for ev in samples))
         self.assertEqual((samples[0]['rx_monotonic_ns'], samples[-1]['rx_monotonic_ns']),
-                         (start + 500_000_000, start + 1_495_000_000))
-        self.assertEqual((samples[0]['seq'], samples[-1]['seq']), (99, 298))
-        self.assertEqual(self.events[-1], dict(kind='measured', token='window1', count=200,
-                         window_start_ns=start + 500_000_000, window_end_ns=start + 1_500_000_000,
+                         (start + 500_000_000, start + 10_495_000_000))
+        self.assertEqual((samples[0]['seq'], samples[-1]['seq']), (99, 2098))
+        self.assertEqual(self.events[-1], dict(kind='measured', token='window1', count=2000,
+                         window_start_ns=start + 500_000_000, window_end_ns=start + 10_500_000_000,
                          max_gap_ns=5_000_000))
         self.assertFalse(self.sensor_open)
         self.assertEqual(self.sensor.registers[CONFIG], 0x399F)
@@ -246,7 +246,7 @@ class ReceiverTests(unittest.TestCase):
             self.events.clear()
             start = self.now
             self.rx.command(dict(cmd='measure', token='M'))
-            for i in range(1, 301):
+            for i in range(1, 2101):
                 self.now = start + i * 5_000_000
                 if not exclude(i):
                     self.rx.tick()

@@ -43,12 +43,18 @@ class AngleDemoPanel(ttk.Frame):
             ttk.Entry(row, textvariable=variable, width=width, show=mask).pack(side='left')
         ttk.Button(row, text='SSH 연결', command=self.connect).pack(side='left', padx=5)
         ttk.Label(row, textvariable=self.rx_status).pack(side='left', padx=4)
-        check_box = ttk.LabelFrame(self, text=f'Rx 서보 점검 (SSH) · {RX_VIEWPOINT}', padding=4)
-        check_box.pack(anchor='w', pady=3)
-        readout = ttk.Frame(check_box)
+        ttk.Button(row, text='Rx 0°, 0° (SSH)', command=self.home).pack(side='left', padx=4)
+        self.diagnostic_toggle = ttk.Button(row, text='서보·OOK 점검 열기', command=self.toggle_diagnostics)
+        self.diagnostic_toggle.pack(side='left', padx=4)
+        readout = ttk.Frame(self)
         readout.pack(anchor='w')
-        ttk.Label(readout, text='마지막 확인 명령각').pack(side='left', padx=3)
+        ttk.Label(readout, text='Rx 마지막 확인 명령각').pack(side='left', padx=3)
         ttk.Label(readout, textvariable=self.applied, font='TkHeadingFont').pack(side='left', padx=6)
+        self.diagnostic_slot = ttk.Frame(self)
+        self.diagnostic_slot.pack(fill='x')
+        self.diagnostics = ttk.Frame(self.diagnostic_slot)
+        check_box = ttk.LabelFrame(self.diagnostics, text=f'Rx 서보 점검 (SSH) · {RX_VIEWPOINT}', padding=4)
+        check_box.pack(anchor='w', pady=3)
         check = ttk.Frame(check_box)
         check.pack(anchor='w')
         ttk.Button(check, text='두 축 한 번에 확인', command=self.check_both).pack(side='left', padx=3)
@@ -60,7 +66,7 @@ class AngleDemoPanel(ttk.Frame):
                              ('위 (Tilt −)', 0, -1), ('아래 (Tilt +)', 0, 1)):
             ttk.Button(check, text=axis,
                        command=lambda p=dp, t=dt: self.jog(p, t)).pack(side='left', padx=2)
-        row = ttk.Frame(self)
+        row = ttk.Frame(self.diagnostics)
         row.pack(anchor='w', pady=4)
         for label, variable, low, high in [('Pan', self.pan, -HOME_PAN, MAX_PAN-HOME_PAN),
                                            ('Tilt', self.tilt, -HOME_TILT, MAX_TILT-HOME_TILT)]:
@@ -68,14 +74,21 @@ class AngleDemoPanel(ttk.Frame):
             ttk.Spinbox(row, from_=low, to=high, increment=1, width=6,
                         textvariable=variable).pack(side='left')
         ttk.Button(row, text='전송 (OOK)', command=self.transmit).pack(side='left', padx=6)
-        ttk.Button(row, text='원위치 (SSH)', command=self.home).pack(side='left', padx=3)
         ttk.Button(row, text='송신 중지', command=lambda: self.stop('사용자 중지')).pack(side='left', padx=3)
         ttk.Button(row, text='Tx 카메라 다시 준비', command=self.retry_preview).pack(side='left', padx=3)
-        ttk.Label(self, text=f'입력 (0°, 0°) = 발판 중앙 · 셀 수직 '
+        ttk.Label(self.diagnostics, text=f'입력 (0°, 0°) = 발판 중앙 · 셀 수직 '
                              f'(서보 Pan {HOME_PAN}°, Tilt {HOME_TILT}°)').pack(anchor='w')
         ttk.Label(self, textvariable=self.status).pack(anchor='w')
         ttk.Label(self, textvariable=self.verification).pack(anchor='w')
         ttk.Label(self, textvariable=self.off_status).pack(anchor='w')
+
+    def toggle_diagnostics(self):
+        if self.diagnostics.winfo_manager():
+            self.diagnostics.pack_forget()
+            self.diagnostic_toggle.configure(text='서보·OOK 점검 열기')
+        else:
+            self.diagnostics.pack(anchor='w')
+            self.diagnostic_toggle.configure(text='서보·OOK 점검 닫기')
 
     @property
     def optical(self):

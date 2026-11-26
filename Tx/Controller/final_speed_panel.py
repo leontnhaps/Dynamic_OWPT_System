@@ -48,7 +48,9 @@ class FinalSpeedPanel(ttk.LabelFrame):
 
     def start(self, profile):
         p, e = self.panel, self.engine
-        if self.running or p.phase or p.off_token or p.method or e.busy or e.pending:
+        controls = p.tx_controls
+        if (self.running or p.phase or p.off_token or p.method or e.busy or e.pending
+                or (controls and (controls.busy or controls.owns_output))):
             self.progress.set('현재 동작 또는 OFF 확인이 끝난 후 속도 측정을 시작하세요.')
             return
         try:
