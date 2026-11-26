@@ -60,6 +60,55 @@ class VideoPipelineTests(unittest.TestCase):
         a.timing.profile.render.assert_called_once();a.timing.render.assert_not_called()
         a.preview.configure.assert_not_called()
 
+    @patch('Tx.Controller.Com_main.ImageTk.PhotoImage')
+    def test_rx_preview_marks_calibrated_laser_center_on_the_display_copy(self, photo):
+        a = self.app()
+        a.preview_area = Mock()
+        a.tabs.select.return_value = str(a.angle_demo)
+        data = io.BytesIO()
+        Image.new('RGB', (1296, 972), 'white').save(data, format='JPEG')
+        frame = (data.getvalue(), {'seq': 4}, 10, 0)
+        a.current = frame
+        # One layout is limited by width; the other is limited by height.
+        for bounds, expected_size, center in [((648, 600), (648, 486), (348, 192)),
+                                              ((800, 243), (324, 243), (174, 96))]:
+            with self.subTest(bounds=bounds):
+                a.preview_area.winfo_width.return_value = bounds[0] + 4
+                a.preview_area.winfo_height.return_value = bounds[1] + 4
+                a.render()
+                image = photo.call_args.args[0]
+                self.assertEqual(image.size, expected_size)
+                x, y = center
+                for dx, dy in [(6, 0), (-6, 0), (0, 6), (0, -6)]:
+                    self.assertEqual(image.getpixel((x + dx, y + dy)), (0, 255, 255))
+                self.assertEqual(image.getpixel(center), (255, 255, 255))
+        a.render()
+        self.assertEqual(photo.call_count, 2)
+        self.assertIs(a.current, frame)
+        with Image.open(io.BytesIO(frame[0])) as original:
+            self.assertEqual(original.getpixel((696 + 6, 384)), (255, 255, 255))
+
+        # The same cached frame must appear without the Rx overlay on a raw tab.
+        a.tabs.select.return_value = str(a.servo)
+        a.render()
+        self.assertEqual(photo.call_count, 3)
+        self.assertEqual(photo.call_args.args[0].getextrema(), ((255, 255),) * 3)
+
+    @patch('Tx.Controller.Com_main.ImageTk.PhotoImage')
+    def test_rx_preview_omits_calibrated_marker_for_another_source_resolution(self, photo):
+        a = self.app()
+        a.preview_area = Mock()
+        a.preview_area.winfo_width.return_value = 644
+        a.preview_area.winfo_height.return_value = 484
+        a.tabs.select.return_value = str(a.angle_demo)
+        data = io.BytesIO()
+        Image.new('RGB', (640, 480), 'white').save(data, format='JPEG')
+        a.current = (data.getvalue(), {'seq': 6}, 15, 0)
+        a.render()
+        image = photo.call_args.args[0]
+        self.assertEqual(image.size, (640, 480))
+        self.assertNotIn((0, 255, 255), [color for _, color in image.getcolors(image.width * image.height)])
+
     @patch('Tx.Controller.detection_panel.ImageTk.PhotoImage',return_value=object())
     def test_detection_records_before_render_and_keeps_full_resolution(self,photo):
         p=DetectionPanel.__new__(DetectionPanel)

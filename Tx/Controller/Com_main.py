@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk,messagebox
-from PIL import Image,ImageTk
+from PIL import Image, ImageDraw, ImageTk
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from Tx.Controller.network_client import Network
 from Tx.Controller.servo_panel import ServoPanel
@@ -18,6 +18,22 @@ from Tx.Controller.timing_panel import TimingPanel
 from Tx.Controller.stationary_panel import StationaryPanel
 from Tx.Controller.ook_panel import OokPanel
 from Tx.Controller.point_comparison_panel import PointComparisonPanel
+from Tx.Controller.bench_pose import CAMERA
+
+
+def draw_laser_center(preview, source_size):
+    """Mark the M1-4 reference on the resized camera preview."""
+    if source_size != (CAMERA.width, CAMERA.height):
+        return
+    x = int((CAMERA.laser_u + 0.5) * preview.width / CAMERA.width)
+    y = int((CAMERA.laser_v + 0.5) * preview.height / CAMERA.height)
+    arms = ((x-10, y, x-3, y), (x+3, y, x+10, y),
+            (x, y-10, x, y-3), (x, y+3, x, y+10))
+    draw = ImageDraw.Draw(preview)
+    for color, width in (('black', 3), ('cyan', 1)):
+        for arm in arms:
+            draw.line(arm, fill=color, width=width)
+
 
 class App:
     def __init__(self,root,args):
@@ -219,7 +235,13 @@ class App:
         if self.current and now-self.status_mark>=.2:
             self.status_mark=now
             age=now-self.current[2];meta=self.current[1]
-            self.status.set(f'{"SIMULATION | " if meta["simulated"] else ""}Frame {meta["seq"]} | {self.size} | receive {self.fps:.1f} fps | last receive {age:.2f}s ago'+(' — STALE / STOPPED' if age>2 else ''))
+            status = f'{"SIMULATION | " if meta["simulated"] else ""}Frame {meta["seq"]} | {self.size} | receive {self.fps:.1f} fps | last receive {age:.2f}s ago'
+            if self.tabs.select() == str(self.angle_demo):
+                if self.size == (CAMERA.width, CAMERA.height):
+                    status += f' | 레이저 중심 ({CAMERA.laser_u:g}, {CAMERA.laser_v:g}) px'
+                else:
+                    status += f' | 레이저 기준점 표시 해상도 {CAMERA.width}×{CAMERA.height}'
+            self.status.set(status + (' — STALE / STOPPED' if age>2 else ''))
         self.root.after(max(1,5-int((time.monotonic()-started)*1000)),self.poll)
 
     def render(self):
@@ -236,11 +258,15 @@ class App:
             elif self.current and self.preview_area.winfo_ismapped():
                 bounds=(max(1,self.preview_area.winfo_width()-4),
                         max(1,self.preview_area.winfo_height()-4))
-                preview_key=(self.current[2],bounds)
+                show_laser_center = selected == str(self.angle_demo)
+                preview_key=(self.current[2],bounds,show_laser_center)
                 if preview_key!=self.preview_frame:
                     with Image.open(io.BytesIO(self.current[0])) as source:
-                        image=source.copy()
+                        source_size = source.size
+                        image = source.convert('RGB') if show_laser_center else source.copy()
                     image.thumbnail(bounds,Image.Resampling.LANCZOS)
+                    if show_laser_center:
+                        draw_laser_center(image, source_size)
                     photo=ImageTk.PhotoImage(image);self.preview.configure(image=photo);self.preview.image=photo
                     self.preview_frame=preview_key
         except (ValueError,OSError,tk.TclError) as exc:
