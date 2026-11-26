@@ -23,11 +23,24 @@ class DemoSshTests(unittest.TestCase):
 
     def test_command_channel_cannot_carry_a_pose(self):
         self.rx._receive(b'{"kind":"ready"}')
-        for command in ('arm', 'home', 'cancel'):
+        for command in ('arm', 'home', 'cancel', 'measure'):
             self.rx.send(command, 'request-1')
             self.assertEqual(self.rx.commands.get_nowait(), {'cmd': command, 'token': 'request-1'})
         with self.assertRaises(ValueError):
             self.rx.send('move 103 20', 'request-1')
+
+    def test_voltage_stream_preserves_rx_time_and_rejects_malformed_rows(self):
+        self.rx._receive(b'{"kind":"ready"}')
+        self.rx.events.get_nowait()
+        self.rx._receive(b'{"kind":"voltage","token":"t","seq":101,"rx_monotonic_ns":5555,"bus_raw":777}')
+        sample = self.rx.events.get_nowait()
+        self.assertEqual((sample['seq'], sample['rx_monotonic_ns'], sample['bus_raw']), (101, 5555, 777))
+        self.rx._receive(b'{"kind":"measured","token":"t","count":200,"window_start_ns":1,"window_end_ns":1000000001,"max_gap_ns":5000000}')
+        self.assertEqual(self.rx.events.get_nowait()['count'], 200)
+        with self.assertRaises(OSError):
+            self.rx._receive(b'{"kind":"voltage","token":"t","seq":true,"rx_monotonic_ns":1,"bus_raw":777}')
+        with self.assertRaises(OSError):
+            self.rx._receive(b'{"kind":"measured","token":"t"}')
 
     def test_failed_arm_still_allows_home_and_unsolicited_ack_fails(self):
         with self.assertRaises(OSError):

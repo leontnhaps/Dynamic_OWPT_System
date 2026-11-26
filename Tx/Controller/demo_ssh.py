@@ -46,7 +46,7 @@ class DemoSsh(PiSshReceiver):
         return 'exec python3 -I -u -c ' + shlex.quote(script)
 
     def send(self, command, token):
-        if command not in ('arm', 'home', 'cancel') or not isinstance(token, str) or not token:
+        if command not in ('arm', 'home', 'cancel', 'measure') or not isinstance(token, str) or not token:
             raise ValueError('잘못된 Rx 시연 명령 또는 요청 ID입니다.')
         self._enqueue(dict(cmd=command, token=token))
 
@@ -64,12 +64,20 @@ class DemoSsh(PiSshReceiver):
                 raise OSError('Rx 시연 오류 응답에 설명이 없습니다.')
             if not event.get('token'):
                 raise OSError(event['message'])
-            if not event.get('token'):
-                self.closed_message = event['message']
-        elif not self.connected or kind not in ('armed', 'applied', 'home', 'cancelled', 'timeout'):
+        elif not self.connected or kind not in ('armed', 'applied', 'home', 'cancelled', 'timeout',
+                                                'voltage', 'measured'):
             raise OSError('예상하지 못한 Rx 시연 응답입니다.')
         elif not isinstance(event.get('token'), str) or not event['token']:
             raise OSError('Rx 시연 응답에 요청 ID가 없습니다.')
+        elif kind == 'voltage':
+            if (any(type(event.get(k)) is not int or event[k] < 0 for k in ('seq', 'rx_monotonic_ns', 'bus_raw'))
+                    or event['bus_raw'] > 8191):
+                raise OSError('Rx 전압 표본 형식이 잘못되었습니다.')
+        elif kind == 'measured':
+            if (any(type(event.get(k)) is not int or event[k] < 0 for k in
+                    ('count', 'window_start_ns', 'window_end_ns', 'max_gap_ns'))
+                    or not event['count'] or event['window_end_ns'] <= event['window_start_ns']):
+                raise OSError('Rx 전압 측정 결과 형식이 잘못되었습니다.')
         elif kind in ('applied', 'home'):
             pan, tilt = event.get('pan'), event.get('tilt')
             if (type(pan) is not int or not 0 <= pan <= MAX_PAN

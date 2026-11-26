@@ -17,7 +17,7 @@ from Tx.Controller.detection_panel import DetectionPanel
 from Tx.Controller.timing_panel import TimingPanel
 from Tx.Controller.stationary_panel import StationaryPanel
 from Tx.Controller.ook_panel import OokPanel
-from Tx.Controller.angle_demo_panel import AngleDemoPanel
+from Tx.Controller.point_comparison_panel import PointComparisonPanel
 
 class App:
     def __init__(self,root,args):
@@ -36,8 +36,8 @@ class App:
         self.timing=TimingPanel(tabs,self);tabs.add(self.timing,text='M1-5 (응답 · 제어 시간)')
         self.stationary=StationaryPanel(tabs,self);tabs.add(self.stationary,text='M3-2 (정지 PV · SAC)')
         self.ook=OokPanel(tabs,self);tabs.add(self.ook,text='OOK 속도 (M4-4 · M6-4)')
-        self.angle_demo = AngleDemoPanel(tabs, self)
-        tabs.add(self.angle_demo, text='Rx 각도 시연 (M6-4)')
+        self.angle_demo = PointComparisonPanel(tabs, self)
+        tabs.add(self.angle_demo, text='Rx 각도 · 지점 전압 (M6-4)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -115,8 +115,8 @@ class App:
         ook=getattr(self,'ook',None)
         action=cmd.get('cmd')
         demo = getattr(self, 'angle_demo', None)
-        if demo is not None and (demo.optical or demo.off_token):
-            own_pattern = demo.optical and action == 'laser_pattern' and cmd.get('request_id') == demo.token
+        if demo is not None and demo.owns_output:
+            own_pattern = demo.token is not None and action == 'laser_pattern' and cmd.get('request_id') == demo.token
             if (action in ('move', 'servo_config', 'preview', 'snap', 'ir_cut')
                     or (action == 'laser_pattern' and not own_pattern)
                     or (action == 'laser' and cmd.get('value') != 0)):
@@ -248,7 +248,7 @@ class App:
 
     def close(self):
         self.closing=True
-        self.angle_demo.leave()
+        self.angle_demo.close()
         self.ook.close()
         self.stationary.close()
         self.timing.close()

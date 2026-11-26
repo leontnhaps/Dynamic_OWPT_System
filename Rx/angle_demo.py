@@ -9,9 +9,11 @@ import time
 from collections import deque
 from contextlib import ExitStack, contextmanager
 
-from common.angle_demo import AngleDecoder, HOME_PAN, HOME_TILT
+from common.angle_demo import (AngleDecoder, HOME_PAN, HOME_TILT, EXPECTED_SAMPLES,
+                               MIN_VOLTAGE_SAMPLES, MAX_VOLTAGE_GAP_NS, VOLTAGE_SAMPLE_MS,
+                               VOLTAGE_SETTLE_NS, VOLTAGE_WINDOW_NS)
 from Rx.arc_bench import PanTilt, SAMPLE_MS, i2c_bus
-from Rx.ina219_ook_stream import INA219, JsonPipe, Sampler
+from Rx.ina219_ook_stream import INA219, JsonPipe, NS_PER_MS, Sampler
 
 
 LISTEN_NS = 7_000_000_000
@@ -42,6 +44,7 @@ class Receiver:
         self.token = None
         self.armed = False
         self.expires = 0
+        self.window_start_ns = None
         self.servo_initialised = False
         self.servo_touched = False
 
@@ -49,6 +52,7 @@ class Receiver:
         resources, self.resources = self.resources, None
         self.sampler = self.decoder = self.token = None
         self.armed = False
+        self.window_start_ns = None
         if resources is not None:
             resources.close()
 
@@ -58,16 +62,25 @@ class Receiver:
         op, token = cmd['cmd'], cmd['token']
         if not isinstance(token, str) or not 1 <= len(token) <= 128:
             raise ValueError('Expected a request token.')
-        if op == 'arm':
+        if op in ('arm', 'measure'):
             if self.token is not None:
-                raise ValueError('Already waiting for an optical frame.')
+                raise ValueError('Rx가 이미 수신 또는 전압 측정 중입니다.')
             with ExitStack() as stack:
                 sensor = stack.enter_context(self.sensor_context())
                 sampler = Sampler(sensor, 3, 0x40, self.on_sample, self.clock)
                 stack.callback(sampler.stop)
-                sampler.command(dict(cmd='start', token=token, interval_ms=SAMPLE_MS))
-                self.decoder = AngleDecoder()
-                self.expires = self.clock() + LISTEN_NS
+                interval_ms = SAMPLE_MS if op == 'arm' else VOLTAGE_SAMPLE_MS
+                sampler.command(dict(cmd='start', token=token, interval_ms=interval_ms))
+                now = self.clock()
+                if op == 'arm':
+                    self.decoder = AngleDecoder()
+                    self.expires = now + LISTEN_NS
+                else:
+                    self.window_start_ns = now + VOLTAGE_SETTLE_NS
+                    self.expires = self.window_start_ns + VOLTAGE_WINDOW_NS
+                    self.last_voltage_ns = self.window_start_ns
+                    self.max_gap_ns = 0
+                    self.voltage_count = 0
                 self.sampler, self.token = sampler, token
                 self.resources = stack.pop_all()
         elif op == 'home':
@@ -102,6 +115,17 @@ class Receiver:
     def on_sample(self, **sample):
         if sample['kind'] != 'sample' or self.token is None:
             return
+        if self.window_start_ns is not None:
+            t = sample['rx_monotonic_ns']
+            if self.window_start_ns <= t < self.expires:
+                self.max_gap_ns = max(self.max_gap_ns, t - self.last_voltage_ns)
+                self.voltage_count += 1
+                self.last_voltage_ns = t
+                self.emit(kind='voltage', token=self.token, seq=sample['seq'],
+                          rx_monotonic_ns=t, bus_raw=sample['bus_raw'])
+                if sample['bus_raw'] == 8191:
+                    raise ValueError('INA219 전압이 포화됐습니다.')
+            return
         if self.clock() >= self.expires:
             self.timeout()
             return
@@ -119,6 +143,18 @@ class Receiver:
 
     def timeout(self):
         token = self.token
+        if self.window_start_ns is not None:
+            start, end, count = self.window_start_ns, self.expires, self.voltage_count
+            max_gap = max(self.max_gap_ns, end - self.last_voltage_ns)
+            self.disarm()
+            stats = dict(count=count, window_start_ns=start, window_end_ns=end, max_gap_ns=max_gap)
+            if count < MIN_VOLTAGE_SAMPLES or max_gap > MAX_VOLTAGE_GAP_NS:
+                self.emit(kind='error', token=token, **stats,
+                          message=f'전압 표본 부족: {count}/{EXPECTED_SAMPLES}개, '
+                                  f'최대 공백 {max_gap / NS_PER_MS:.1f} ms.')
+            else:
+                self.emit(kind='measured', token=token, **stats)
+            return
         self.disarm()
         self.emit(kind='timeout', token=token)
 

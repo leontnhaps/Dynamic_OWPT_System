@@ -80,6 +80,66 @@ class ReceiverTests(unittest.TestCase):
         self.rx.command(dict(cmd='home', token='HOME2'))
         self.assertEqual(self.events[-1]['token'], 'HOME2')
 
+    def test_measure_excludes_settling_and_keeps_actual_time_sequence_and_raw_codes(self):
+        start = self.now
+        self.rx.command(dict(cmd='measure', token='window1'))
+        self.sensor.registers[BUS_VOLTAGE] = 120 << 3
+        for i in range(1, 301):
+            self.now = start + i * 5_000_000
+            if i == 100:
+                self.sensor.registers[BUS_VOLTAGE] = 720 << 3
+            self.rx.tick()
+        samples = self.events[:-1]
+        self.assertEqual(len(samples), 200)
+        self.assertTrue(all(ev['kind'] == 'voltage' and ev['bus_raw'] == 720 for ev in samples))
+        self.assertEqual((samples[0]['rx_monotonic_ns'], samples[-1]['rx_monotonic_ns']),
+                         (start + 500_000_000, start + 1_495_000_000))
+        self.assertEqual((samples[0]['seq'], samples[-1]['seq']), (99, 298))
+        self.assertEqual(self.events[-1], dict(kind='measured', token='window1', count=200,
+                         window_start_ns=start + 500_000_000, window_end_ns=start + 1_500_000_000,
+                         max_gap_ns=5_000_000))
+        self.assertFalse(self.sensor_open)
+        self.assertEqual(self.sensor.registers[CONFIG], 0x399F)
+        self.assertFalse(self.bus.write.called)
+
+    def test_measure_rejects_a_long_gap_or_sparse_coverage_and_can_restart(self):
+        for exclude in (lambda i: 120 <= i < 131, lambda i: i >= 100 and i % 2 == 1):
+            self.events.clear()
+            start = self.now
+            self.rx.command(dict(cmd='measure', token='M'))
+            for i in range(1, 301):
+                self.now = start + i * 5_000_000
+                if not exclude(i):
+                    self.rx.tick()
+            self.assertEqual(self.events[-1]['kind'], 'error')
+            self.assertGreater(self.events[-1]['count'], 0)
+            self.assertTrue(all(ev['kind'] == 'voltage' for ev in self.events[:-1]))
+            self.assertFalse(self.sensor_open)
+
+    def test_cancel_discards_partial_measurement_and_restores_sensor(self):
+        self.rx.command(dict(cmd='measure', token='M'))
+        self.now += 520_000_000
+        self.rx.tick()
+        self.rx.command(dict(cmd='cancel', token='M'))
+        self.now += 3_000_000_000
+        self.rx.tick()
+        self.assertEqual([event['kind'] for event in self.events], ['voltage', 'cancelled'])
+        self.assertEqual(self.sensor.registers[CONFIG], 0x399F)
+        self.assertFalse(self.sensor_open)
+        self.assertFalse(self.bus.write.called)
+
+    def test_window_saturation_retains_raw_sample_and_fails(self):
+        self.rx.command(dict(cmd='measure', token='M'))
+        self.sensor.registers[BUS_VOLTAGE] = 8191 << 3
+        self.now += 495_000_000
+        self.rx.tick()
+        self.assertFalse(self.events)
+        self.now += 5_000_000
+        with self.assertRaisesRegex(ValueError, '포화'):
+            self.rx.tick()
+        self.assertEqual(self.events[-1]['bus_raw'], 8191)
+        self.assertFalse(self.bus.write.called)
+
     def test_cancel_timeout_and_invalid_ssh_angles_do_not_move(self):
         for cmd in [dict(cmd='move', token='T'), dict(cmd='home', token='T', tilt=25)]:
             with self.assertRaises(ValueError):
