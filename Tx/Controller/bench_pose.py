@@ -8,6 +8,7 @@ from tkinter import ttk
 from common.angle_demo import HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, RX_VIEWPOINT
 from common.model_paths import resolve_yolo_path
 from common.pv_detection import TARGET_SELECTION, fresh
+from common.tx_bearing import BEARING_MODEL, commanded_bearing
 from common.tx_tracking import TrackingConfig
 from Tx.Controller.detection_panel import PVDetector
 
@@ -15,6 +16,9 @@ from Tx.Controller.detection_panel import PVDetector
 CAMERA = TrackingConfig()
 PAN_SIGN = {'오른쪽': 1, '왼쪽': -1}
 TILT_SIGN = {'위': 1, '아래': -1}
+TX_PAN_PLUS, TX_TILT_PLUS = '오른쪽', '위'
+LENS_FIELDS = ('fx', 'fy', 'cx', 'cy')
+M5_INTRINSICS = tuple(BEARING_MODEL[key + '_px'] for key in LENS_FIELDS)
 STATION_COORDS_M = {
     '①': (0.00, 6.30, 0.40),
     '②': (2.70, 7.65, 0.40),
@@ -78,39 +82,31 @@ def frame_pose(frame):
 
 def detector_pose(station, tx_pan, tx_tilt, uv):
     """Convert only the receiving normal; the transmitter stays at its recorded pose."""
-    if station['tx_pan_plus'] not in PAN_SIGN or station['tx_tilt_plus'] not in TILT_SIGN:
-        raise ValueError('좌표·축 설정에서 실물로 확인한 Tx Pan+·Tilt+ 방향을 선택하세요.')
-    az = math.radians(PAN_SIGN[station['tx_pan_plus']] * (tx_pan - station['tx_ref_pan_deg']))
-    el = math.radians(TILT_SIGN[station['tx_tilt_plus']] * (tx_tilt - station['tx_ref_tilt_deg']))
+    pan_plus, tilt_plus = station.get('tx_pan_plus'), station.get('tx_tilt_plus')
+    # Older station snapshots used '선택' for unspecified mounting directions.
+    if pan_plus in (None, '선택'):
+        pan_plus = TX_PAN_PLUS
+    if tilt_plus in (None, '선택'):
+        tilt_plus = TX_TILT_PLUS
+    if pan_plus not in PAN_SIGN or tilt_plus not in TILT_SIGN:
+        raise ValueError('좌표·축 설정에서 Tx 축 방향을 확인하세요.')
+    model_pan = PAN_SIGN[pan_plus] * (tx_pan - station['tx_ref_pan_deg'])
+    model_tilt = TILT_SIGN[tilt_plus] * (tx_tilt - station['tx_ref_tilt_deg'])
     u, v = uv
+    lens_override = station.get('camera_intrinsics_px')
+    lens = M5_INTRINSICS if lens_override is None else tuple(lens_override)
+    azimuth, elevation = commanded_bearing(u, v, model_pan, model_tilt, intrinsics=lens)
+    azimuth, elevation = math.degrees(azimuth), math.degrees(elevation)
+    pan, tilt, meta = servo_pose(azimuth, elevation, station)
+    # Retain laser-to-PV pixel residuals for comparisons with earlier bench logs.
     ref_u, ref_v = CAMERA.laser_u, CAMERA.laser_v
-    error = math.hypot(u - ref_u, v - ref_v)
-    intrinsics = station['camera_intrinsics_px']
-    if intrinsics is None:
-        if error > CAMERA.hit_px:
-            raise ValueError(f'검출 중심이 기준점에서 {error:.1f}px 떨어졌습니다 '
-                             f'(허용 {CAMERA.hit_px:g}px). 영상 보정값이 필요합니다.')
-        method = 'confirmed_reference_sightline'
-    else:
-        # In image coordinates x points right, z points up, y points forward.
-        # Construct a local horizontal/vertical basis about the calibrated reference
-        # ray, which need not coincide with the principal point.
-        fx, fy, cx, cy = intrinsics
-        bx, bz = (ref_u-cx)/fx, (cy-ref_v)/fy
-        x, z = (u-cx)/fx, (cy-v)/fy
-        horizontal = math.hypot(1, bx)
-        norm = math.hypot(horizontal, bz)
-        right = (x-bx) / horizontal
-        forward = (x*bx + 1 + z*bz) / norm
-        up = (horizontal*z - (bx*x + 1)*bz/horizontal) / norm
-        horizontal_component = forward*math.cos(el) - up*math.sin(el)
-        vertical_component = forward*math.sin(el) + up*math.cos(el)
-        az += math.atan2(right, horizontal_component)
-        el = math.atan2(vertical_component, math.hypot(right, horizontal_component))
-        method = 'calibrated_pinhole'
-    pan, tilt, meta = servo_pose(math.degrees(az), math.degrees(el), station)
-    return pan, tilt, dict(meta, method='yolo', estimator=method, reference_px=[ref_u, ref_v],
-                           center_px=[u, v], residual_px=error, tx_command_deg=[tx_pan, tx_tilt])
+    return pan, tilt, dict(meta, method='yolo', estimator=BEARING_MODEL['version'],
+                           camera_intrinsics_px=list(lens),
+                           intrinsics_source='m5' if lens == M5_INTRINSICS else 'override',
+                           azimuth_deg=azimuth, elevation_deg=elevation,
+                           tx_model_angles_deg=[model_pan, model_tilt], tx_command_deg=[tx_pan, tx_tilt],
+                           center_px=[u, v], reference_px=[ref_u, ref_v],
+                           residual_px=math.hypot(u - ref_u, v - ref_v))
 
 
 class BenchPoseInputs(ttk.Frame):
@@ -135,7 +131,7 @@ class BenchPoseInputs(ttk.Frame):
         axes = ttk.Frame(self.detail)
         axes.pack(anchor='w')
         for key, label, default, options in [
-                ('tx_pan_plus','Tx Pan+', '선택', PAN_SIGN), ('tx_tilt_plus','Tx Tilt+', '선택', TILT_SIGN),
+                ('tx_pan_plus','Tx Pan+', TX_PAN_PLUS, PAN_SIGN), ('tx_tilt_plus','Tx Tilt+', TX_TILT_PLUS, TILT_SIGN),
                 ('rx_pan_plus','Rx Pan+', '왼쪽', PAN_SIGN), ('rx_tilt_plus','Rx Tilt+', '아래', TILT_SIGN)]:
             self.field(axes, key, label, default, 6, options)
         self.field(axes, 'tx_p0', 'Tx 정면 Pan°', '0')
@@ -149,10 +145,10 @@ class BenchPoseInputs(ttk.Frame):
                                     'Rx 원위치가 기준보다 자기 오른쪽이면 양수.').pack(anchor='w')
         lens = ttk.Frame(self.detail)
         lens.pack(anchor='w')
-        for key in ('fx','fy','cx','cy'):
-            self.field(lens, key, key+'(px)', '')
-        ttk.Label(lens, text=f'미입력 시 기준점 ({CAMERA.laser_u:g}, {CAMERA.laser_v:g}) ±{CAMERA.hit_px:g}px. '
-                              '입력 시 수평 카메라·현재 해상도의 핀홀 보정값 사용.').pack(side='left')
+        for key, value in zip(LENS_FIELDS, M5_INTRINSICS):
+            self.field(lens, key, key+'(px)', str(value), 9)
+        ttk.Label(lens, text=f'M5 카메라 모델 · {BEARING_MODEL["width"]}×{BEARING_MODEL["height"]}'
+                              ' · 네 칸을 모두 비우면 M5 기본값 사용').pack(side='left')
         self.fields['point_id'].trace_add('write', self.select_point)
         for key, var in self.fields.items():
             if key != 'point_id':
@@ -197,10 +193,12 @@ class BenchPoseInputs(ttk.Frame):
         if not point_id or len(point_id) > 80 or not point_id.isprintable():
             raise ValueError('지점 이름을 1~80자로 입력하세요.')
         xyz = [number(f[k], k.upper()) for k in 'xyz'] if any(f[k] for k in 'xyz') else None
-        lens = ('fx','fy','cx','cy')
-        intrinsics = [number(f[k], k) for k in lens] if any(f[k] for k in lens) else None
-        if intrinsics and (min(intrinsics[:2]) <= 0 or not 0 <= intrinsics[2] < CAMERA.width
-                           or not 0 <= intrinsics[3] < CAMERA.height):
+        lens_values = [f[k] for k in LENS_FIELDS]
+        if any(lens_values) and not all(lens_values):
+            raise ValueError('렌즈 보정값 4개를 모두 입력하거나 모두 비우세요.')
+        intrinsics = ([number(f[k], k) for k in LENS_FIELDS] if any(lens_values) else list(M5_INTRINSICS))
+        if (min(intrinsics[:2]) <= 0 or not 0 <= intrinsics[2] < CAMERA.width
+                or not 0 <= intrinsics[3] < CAMERA.height):
             raise ValueError('초점거리는 양수, 주점은 기준 영상 내부여야 합니다.')
         return dict(point_id=point_id, rx_minus_tx_m=xyz, room_axes='Tx origin: +X right, +Y front, +Z up',
                     rx_viewpoint=RX_VIEWPOINT,
@@ -216,10 +214,6 @@ class BenchPoseInputs(ttk.Frame):
         if self.future is not None:
             raise ValueError('이전 YOLO 검출을 기다리세요.')
         stamp = frame_pose(frame)
-        if snapshot['tx_pan_plus'] not in PAN_SIGN or snapshot['tx_tilt_plus'] not in TILT_SIGN:
-            if not self.detail.winfo_manager():
-                self.toggle()
-            raise ValueError('좌표·축 설정에서 Tx Pan+·Tilt+의 실물 방향을 선택하세요.')
         detection = self.app.detection
         path = resolve_yolo_path(detection.path.get())
         device = detection.device.get().strip()
