@@ -32,6 +32,10 @@ class ServoWrites(deque):
         self.append(row)
 
 
+class CaptureConflict(ValueError):
+    """Reject a competing command without interrupting the active capture."""
+
+
 class Receiver:
     def __init__(self, servos, emit, sensor_context=open_sensor, clock=time.monotonic_ns):
         self.servos = servos
@@ -43,7 +47,7 @@ class Receiver:
         self.decoder = None
         self.token = None
         self.armed = False
-        self.expires = 0
+        self.expires = None
         self.window_start_ns = None
         self.servo_initialised = False
         self.servo_touched = False
@@ -52,30 +56,38 @@ class Receiver:
         resources, self.resources = self.resources, None
         self.sampler = self.decoder = self.token = None
         self.armed = False
+        self.expires = None
         self.window_start_ns = None
         if resources is not None:
             resources.close()
 
     def command(self, cmd):
-        if not isinstance(cmd, dict) or set(cmd) != {'cmd', 'token'}:
-            raise ValueError('Expected only cmd and token over SSH.')
+        if self.sampler is not None and self.expires is None:
+            if cmd != {'cmd': 'stop', 'token': self.token}:
+                raise CaptureConflict('속도 측정 중입니다. 해당 측정 ID의 stop 명령이 필요합니다.')
+        if not isinstance(cmd, dict):
+            raise ValueError('Expected a command object over SSH.')
+        fields = {'cmd', 'token', 'interval_ms'} if cmd.get('cmd') == 'start' else {'cmd', 'token'}
+        if set(cmd) != fields:
+            raise ValueError('Unexpected Rx command fields.')
         op, token = cmd['cmd'], cmd['token']
         if not isinstance(token, str) or not 1 <= len(token) <= 128:
             raise ValueError('Expected a request token.')
-        if op in ('arm', 'measure'):
+        if op in ('arm', 'measure', 'start'):
             if self.token is not None:
-                raise ValueError('Rx가 이미 수신 또는 전압 측정 중입니다.')
+                raise CaptureConflict('Rx가 이미 수신 또는 전압 측정 중입니다.')
             with ExitStack() as stack:
                 sensor = stack.enter_context(self.sensor_context())
-                sampler = Sampler(sensor, 3, 0x40, self.on_sample, self.clock)
+                callback = self.emit if op == 'start' else self.on_sample
+                sampler = Sampler(sensor, 3, 0x40, callback, self.clock)
                 stack.callback(sampler.stop)
-                interval_ms = SAMPLE_MS if op == 'arm' else VOLTAGE_SAMPLE_MS
+                interval_ms = cmd.get('interval_ms', SAMPLE_MS if op == 'arm' else VOLTAGE_SAMPLE_MS)
                 sampler.command(dict(cmd='start', token=token, interval_ms=interval_ms))
                 now = self.clock()
                 if op == 'arm':
                     self.decoder = AngleDecoder()
                     self.expires = now + LISTEN_NS
-                else:
+                elif op == 'measure':
                     self.window_start_ns = now + VOLTAGE_SETTLE_NS
                     self.expires = self.window_start_ns + VOLTAGE_WINDOW_NS
                     self.last_voltage_ns = self.window_start_ns
@@ -83,6 +95,11 @@ class Receiver:
                     self.voltage_count = 0
                 self.sampler, self.token = sampler, token
                 self.resources = stack.pop_all()
+        elif op == 'stop':
+            if self.token is not None and self.expires is not None:
+                raise CaptureConflict('속도 측정 stop 명령으로 각도·전압 측정을 중지할 수 없습니다.')
+            self.disarm()
+            self.emit(kind='stopped', token=token)
         elif op == 'home':
             self.disarm()
             self.move(HOME_PAN, HOME_TILT, 'home', token)
@@ -161,11 +178,14 @@ class Receiver:
     def wait_seconds(self):
         if self.sampler is None:
             return None
-        return max(0, min(self.sampler.deadline, self.expires) - self.clock()) / 1e9
+        deadline = self.sampler.deadline
+        if self.expires is not None:
+            deadline = min(deadline, self.expires)
+        return max(0, deadline - self.clock()) / 1e9
 
     def tick(self):
         if self.sampler is not None:
-            if self.clock() >= self.expires:
+            if self.expires is not None and self.clock() >= self.expires:
                 self.timeout()
             else:
                 self.sampler.sample_due()
@@ -193,6 +213,8 @@ def serve(receiver, input_fd, output):
                         cmd = json.loads(line)
                         token = cmd.get('token') if isinstance(cmd, dict) else None
                         receiver.command(cmd)
+                    except CaptureConflict as exc:
+                        output.emit(kind='error', token=token, message=str(exc))
                     except (ValueError, OSError) as exc:
                         receiver.disarm()
                         output.emit(kind='error', token=token, message=str(exc))

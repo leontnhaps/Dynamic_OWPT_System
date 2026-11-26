@@ -37,7 +37,7 @@ class App:
         self.stationary=StationaryPanel(tabs,self);tabs.add(self.stationary,text='M3-2 (정지 PV · SAC)')
         self.ook=OokPanel(tabs,self);tabs.add(self.ook,text='OOK 속도 (M4-4 · M6-4)')
         self.angle_demo = PointComparisonPanel(tabs, self)
-        tabs.add(self.angle_demo, text='Rx 각도 · 지점 전압 (M6-4)')
+        tabs.add(self.angle_demo, text='Rx 종합 (속도 · 각도 · 전압)')
         row=ttk.Frame(camera_tab,padding=10);row.pack(fill='x');self.values={}
         for i,(name,value) in enumerate([('width','1296'),('height','972'),('fps','30'),('quality','80'),('shutter_speed',''),('analogue_gain','')]):
             ttk.Label(row,text=name).grid(row=0,column=i)
@@ -62,8 +62,11 @@ class App:
         self.preview_area.pack_propagate(False)
         self.preview=ttk.Label(self.preview_area,anchor='center')
         self.preview.pack(expand=True,fill='both')
+        previous_tab = None
         def show_preview(event=None):
-            if tabs.select()!=str(self.ook): self.ook.leave()
+            nonlocal previous_tab
+            if previous_tab == str(self.ook) and tabs.select()!=previous_tab: self.ook.leave()
+            previous_tab = tabs.select()
             if tabs.select() == str(self.angle_demo):
                 self.angle_demo.selected = True
             elif self.angle_demo.selected:
@@ -116,7 +119,7 @@ class App:
         action=cmd.get('cmd')
         demo = getattr(self, 'angle_demo', None)
         if demo is not None and demo.owns_output:
-            own_pattern = demo.token is not None and action == 'laser_pattern' and cmd.get('request_id') == demo.token
+            own_pattern = action == 'laser_pattern' and demo.allows_pattern(cmd.get('request_id'))
             if (action in ('move', 'servo_config', 'preview', 'snap', 'ir_cut')
                     or (action == 'laser_pattern' and not own_pattern)
                     or (action == 'laser' and cmd.get('value') != 0)):

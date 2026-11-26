@@ -4,9 +4,11 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
-from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, VOLTAGE_SETTLE_NS, VOLTAGE_WINDOW_NS
+from common.angle_demo import (BIT_MS, FRAME_LEN, HOME_PAN, HOME_TILT, SYNC, VOLTAGE_SETTLE_NS,
+                               VOLTAGE_WINDOW_NS, encode_angles)
 from Tx.Controller.angle_demo_panel import AngleDemoPanel
 from Tx.Controller.bench_pose import BenchPoseInputs
+from Tx.Controller.final_speed_panel import FinalSpeedPanel
 from Tx.Controller.pv_comparison import ComparisonRun
 
 
@@ -17,6 +19,8 @@ FIXED_LIGHT = dict(bits='1', bit_ms=3000, repeats=1)
 
 
 class PointComparisonPanel(AngleDemoPanel):
+    speed = None
+
     def __init__(self, parent, app):
         super().__init__(parent, app)
         self.run = self.station = self.method = None
@@ -29,6 +33,18 @@ class PointComparisonPanel(AngleDemoPanel):
             text = label + (' 측정' if method == 'baseline' else ' 각도 계산')
             ttk.Button(actions, text=text, command=lambda m=method: self.start_trial(m)).pack(side='left', padx=3)
         ttk.Button(actions, text='계산각 OOK 전송 · 측정', command=self.send_estimate).pack(side='left', padx=4)
+        axis_row = ttk.Frame(self)
+        axis_row.pack(anchor='w')
+        ttk.Label(axis_row, text='축 방향 확인 (원위치 기준)').pack(side='left')
+        for axis in ('Pan', 'Tilt'):
+            for offset in (-1, 1):
+                ttk.Button(axis_row, text=f'{axis} {offset:+d}°', width=8,
+                           command=lambda a=axis, n=offset: self.check_axis(a, n)).pack(side='left', padx=2)
+        self.frame_label = tk.StringVar(self)
+        ttk.Label(self, textvariable=self.frame_label).pack(anchor='w')
+        self.pan.trace_add('write', self.show_frame)
+        self.tilt.trace_add('write', self.show_frame)
+        self.show_frame()
         self.location = tk.StringVar(value='측정 지점을 등록하세요.')
         self.results = {key: tk.StringVar(value=label + ' —') for key, label in METHODS.items()}
         ttk.Label(self, textvariable=self.location).pack(anchor='w')
@@ -36,10 +52,38 @@ class PointComparisonPanel(AngleDemoPanel):
         results.pack(anchor='w')
         for variable in self.results.values():
             ttk.Label(results, textvariable=variable).pack(side='left', padx=(0, 18))
+        self.speed = FinalSpeedPanel(self)
+        self.speed.pack(fill='x', pady=3)
+
+    def show_frame(self, *_):
+        try:
+            bits = encode_angles(HOME_PAN+int(self.pan.get()), HOME_TILT+int(self.tilt.get()))
+        except ValueError:
+            self.frame_label.set('각도 프레임 · 범위 안의 정수 각도를 입력하세요.')
+            return
+        payload = bits[len(SYNC):]
+        self.frame_label.set(f'각도 명령 {FRAME_LEN} bit · {BIT_MS} ms/bit · 시작 {SYNC}  |  '
+                             f'Pan {payload[:8]}  |  Tilt {payload[8:16]}  |  CRC-8 {payload[16:24]}  |  끝 {payload[-1]}')
+
+    def check_axis(self, axis, offset):
+        if self.phase or self.method or self.off_token:
+            self.status.set('진행 중인 동작을 끝낸 후 축 방향을 확인하세요.')
+            return
+        self.pan.set(str(offset if axis == 'Pan' else 0))
+        self.tilt.set(str(offset if axis == 'Tilt' else 0))
+        self.transmit()
 
     @property
     def owns_output(self):
-        return self.method is not None or self.optical or bool(self.off_token)
+        return self.method is not None or self.phase == 'speed' or self.optical or bool(self.off_token)
+
+    def allows_pattern(self, request_id):
+        if not request_id:
+            return False
+        if self.phase == 'speed':
+            ook = self.app.ook
+            return ook.experiment is not None and ook.capture is not None and request_id == ook.trial_id
+        return self.token == request_id and (self.optical or self.method is not None)
 
     def register(self):
         if self.phase or self.off_token:
@@ -142,11 +186,17 @@ class PointComparisonPanel(AngleDemoPanel):
             super().transmit()
 
     def home(self):
+        if self.phase == 'speed':
+            self.status.set('속도 측정을 중지한 뒤 원위치 버튼을 누르세요.')
+            return
         if self.method is not None:
             self.stop('원위치 버튼으로 비교 측정 중단')
         super().home()
 
     def stop(self, reason):
+        if self.phase == 'speed':
+            self.speed.stop()
+            return
         method, self.method = self.method, None
         # Attempt remote cancel/OFF even when logging is the reason we got here.
         if method and not self.optical and self.token:
@@ -186,6 +236,8 @@ class PointComparisonPanel(AngleDemoPanel):
         self.status.set('고정광 ON 응답 대기')
 
     def on_rx(self, event):
+        if event['kind'] in ('started', 'sample', 'stopped'):
+            return  # A late raw-speed reply can follow an operator stop.
         if self.method is None or event.get('token') != self.token:
             # Never pass a late batch of raw samples to the demonstration event log.
             if event['kind'] not in ('voltage', 'measured'):
@@ -263,6 +315,9 @@ class PointComparisonPanel(AngleDemoPanel):
             self.finish_measurement()
 
     def event(self, event):
+        if (self.off_token and event.get('request_id') == self.off_token
+                and event.get('event') == 'laser' and event.get('laser_gpio_level') == 0):
+            self.app.ook.output_requested = False
         try:
             if self.method is not None:
                 kind = event.get('event')
@@ -311,12 +366,29 @@ class PointComparisonPanel(AngleDemoPanel):
                 raise OSError('고정광 상태 조회 실패')
 
     def tick(self):
+        if self.speed is not None:
+            self.speed.tick()
+            if self.speed.running:
+                return
         super().tick()
         if self.selected and self.method is not None:
             try:
                 self.tick_comparison()
             except (ValueError, OSError) as exc:
                 self.stop(str(exc))
+
+    def leave(self):
+        if self.speed is not None and self.speed.running:
+            self.speed.stop()
+            pending = self.app.ook.pending
+            self.speed.release()
+            if pending:
+                self.off_token = pending[0]
+                self.off_status.set('속도 측정 중지 · Tx OFF 확인 대기')
+            else:
+                self.off_token = 'm6-speed-' + self.speed.last_root.name + '-stop'
+                self.stop('속도 측정 중지 · Tx OFF 재확인')
+        super().leave()
 
     def close(self):
         try:

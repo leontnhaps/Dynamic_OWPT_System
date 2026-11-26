@@ -36,6 +36,10 @@ PI_RECEIVER = 'pi_ina219_ssh'
 PI_DECODER = 'ook-header-ls-point-mean-1'
 PI_TRIALS_PER_RATE = 30
 PI_COMPARISON_PRESET = 'm6-4-pi-7rates-30each'
+PI_LIMIT_PRESET = 'm6-4-pi-speed-limit-v1'
+PI_LIMIT_PERIODS = (12, 10, 8, 6, 5)
+PI_LIMIT_SAMPLE_MS = 2
+DEFAULT_SEED = 20261028
 
 
 def interval_value(value):
@@ -64,6 +68,8 @@ def make_plan(bit_times, sample_times, blocks, seed, pattern='random', mode='swe
         raise ValueError('각 비트 시간에 대응하는 반복 횟수가 필요합니다.')
     if not counts or any(type(count) is not int or not 1 <= count <= 1000 for count in counts.values()):
         raise ValueError('조건별 반복은 1~1000회입니다.')
+    if len(sample_times) * sum(counts.values()) > 10000:
+        raise ValueError('한 실험은 최대 10000회입니다. 조건을 나누어 실행하세요.')
     if pattern not in ('random', 'alternating', 'runs') or mode not in ('sweep', 'step'):
         raise ValueError('Unknown experiment mode/pattern')
     rng = random.Random(seed)
@@ -82,8 +88,6 @@ def make_plan(bit_times, sample_times, blocks, seed, pattern='random', mode='swe
                                # not a measured or synchronized phase of Arduino/Pi clocks.
                                launch_delay_ms=100 + rng.random() * max(50, sample_ms)))
     rng.shuffle(trials)
-    if len(trials) > 10000:
-        raise ValueError('한 실험은 최대 10000회입니다. 조건을 나누어 실행하세요.')
     return dict(schema_version=1, rules=RULES, seed=seed, note=note, mode=mode, pattern=pattern,
                 timing_note='Random launch delay does not establish a known Tx/Rx phase.', trials=trials)
 
@@ -92,4 +96,14 @@ def make_pi_comparison_plan(seed, note=''):
     plan = make_plan(list(PRESENTATION_REFERENCE), [5], PI_TRIALS_PER_RATE, seed, note=note)
     plan.update(preset=PI_COMPARISON_PRESET, reference='M4-4 issue #39',
                 receiver=PI_RECEIVER, decoder_version=PI_DECODER)
+    return plan
+
+
+def make_pi_limit_plan(periods, sample_ms, seed=DEFAULT_SEED, note=''):
+    """Vary the transmitter's bit length at one independently specified Rx sampling interval."""
+    text = periods if isinstance(periods, str) else ','.join(str(period) for period in periods)
+    periods = number_list(text)
+    sample_ms = interval_value(sample_ms)
+    plan = make_plan(periods, [sample_ms], PI_TRIALS_PER_RATE, seed, note=note)
+    plan.update(preset=PI_LIMIT_PRESET, receiver=PI_RECEIVER, decoder_version=PI_DECODER)
     return plan

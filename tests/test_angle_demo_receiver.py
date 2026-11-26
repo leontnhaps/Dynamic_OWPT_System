@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles
 from Rx.angle_demo import LISTEN_NS, Receiver, ServoWrites, serve
 from Rx.arc_bench import PanTilt, SAMPLE_MS
-from Rx.ina219_ook_stream import BUS_VOLTAGE, CONFIG, INA219
+from Rx.ina219_ook_stream import BUS_VOLTAGE, CONFIG, INA219, SAMPLE_CONFIG
 
 
 class Sensor(INA219):
@@ -49,6 +49,45 @@ class ReceiverTests(unittest.TestCase):
 
     def arm(self, token='T'):
         self.rx.command(dict(cmd='arm', token=token))
+
+    def test_raw_ina219_speed_capture_matches_stream_and_never_moves_servos(self):
+        self.rx.command(dict(cmd='start', token='S', interval_ms=2))
+        self.assertEqual(self.events, [dict(kind='started', token='S', interval_ms=2, bus=3,
+                                           address=0x40, config=SAMPLE_CONFIG)])
+        self.assertEqual(self.rx.wait_seconds(), .002)
+        self.sensor.registers[BUS_VOLTAGE] = 515 << 3
+        self.now += 2_000_000
+        self.rx.tick()
+        for op in ['stop', 'arm', 'measure', 'home', 'cancel']:
+            with self.assertRaises(ValueError):
+                self.rx.command(dict(cmd=op, token='different'))
+        self.assertTrue(self.sensor_open)
+        self.assertEqual(self.events[-1], dict(kind='sample', token='S', seq=0,
+                                              rx_monotonic_ns=self.now, bus_raw=515))
+        self.rx.command(dict(cmd='stop', token='S'))
+        self.assertEqual(self.events[-1], dict(kind='stopped', token='S'))
+        self.assertIsNone(self.rx.wait_seconds())
+        self.assertEqual(self.sensor.registers[CONFIG], 0x399F)
+        self.assertFalse(self.sensor_open)
+        # A new trial gets its own clock/seq, rather than old samples.
+        self.rx.command(dict(cmd='start', token='S2', interval_ms=5))
+        self.now += 5_000_000
+        self.rx.tick()
+        self.assertEqual((self.events[-1]['token'], self.events[-1]['seq']), ('S2', 0))
+        self.bus.write.assert_not_called()
+
+    def test_speed_capture_rejects_stale_stop_and_restores_config_on_ssh_eof(self):
+        output = Mock(pending=False)
+        output.emit.side_effect = lambda **event: self.events.append(event)
+        chunks = [b'{"cmd":"start","token":"S","interval_ms":2}\n',
+                  b'{"cmd":"stop","token":"old"}\n', b'{"cmd":"home","token":"h"}\n', b'']
+        with patch('Rx.angle_demo.select.select', return_value=([123], [], [])), patch(
+                'Rx.angle_demo.os.read', side_effect=chunks):
+            serve(self.rx, 123, output)
+        self.assertEqual([r['kind'] for r in self.events], ['ready', 'started', 'error', 'error'])
+        self.assertEqual(self.sensor.registers[CONFIG], 0x399F)
+        self.assertFalse(self.sensor_open)
+        self.bus.write.assert_not_called()
 
     def test_one_real_decoder_frame_gives_one_ack_with_servo_writes(self):
         self.arm()

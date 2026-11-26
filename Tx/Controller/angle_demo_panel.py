@@ -74,8 +74,8 @@ class AngleDemoPanel(ttk.Frame):
             self.status.set('진행 중인 OOK 시험을 먼저 종료하세요.')
             return
         try:
-            if old.using_pi_rx:
-                old.disconnect_rx()  # Release the same INA219 before starting the demo worker.
+            if old.arduino is not None:
+                old.disconnect_rx()  # The final tab takes ownership of the selected Rx.
             self.rx = DemoSsh(self.target.get(), self.password.get())
             self.password.set('')
             self.rx_status.set('Rx SSH 연결 중…')

@@ -615,10 +615,11 @@ class AutomaticPreparationTests(unittest.TestCase):
         p.event(self.ready_reply(p))
         self.assertEqual(p.app.servo.limits, p.cfg.limits)
         self.assertEqual(p.preparing, 'frames')
-        received = __import__('time').monotonic()
+        received = p.camera_requested_at + .05
         p.app.current = (b'jpeg', dict(simulated=False, requested=TX_CAMERA_SETTINGS), received, 0)
         p.app.size = (1296, 972)
-        p.prepare_poll()
+        with patch('Tx.Controller.stationary_panel.time.monotonic', return_value=received):
+            p.prepare_poll()
         self.assertTrue(p.hardware_ready)
         self.assertTrue(p.previewing)
         self.assertIsNone(p.preparing)

@@ -29,6 +29,26 @@ class DemoSshTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.rx.send('move 103 20', 'request-1')
 
+    def test_same_connection_accepts_matching_raw_sampler_protocol(self):
+        self.rx._receive(b'{"kind":"ready"}')
+        self.rx.events.get_nowait()
+        self.rx.send('raw 2', 'run1')
+        self.assertEqual(self.rx.commands.get_nowait(), dict(cmd='start', token='run1', interval_ms=2))
+        self.rx._receive(b'{"kind":"started","token":"run1","bus":3,"address":64,"config":8606,"interval_ms":2}')
+        self.rx._receive(b'{"kind":"sample","token":"run1","seq":3,"rx_monotonic_ns":20,"bus_raw":600}')
+        self.rx.send('stop', 'run1')
+        self.assertEqual(self.rx.commands.get_nowait(), dict(cmd='stop', token='run1'))
+        self.rx._receive(b'{"kind":"stopped","token":"run1"}')
+        records = [self.rx.events.get_nowait() for _ in range(3)]
+        self.assertEqual([r['kind'] for r in records], ['started', 'sample', 'stopped'])
+        self.assertEqual(records[1]['rx_monotonic_ns'], 20)
+        self.assertIn('pc_receive_monotonic_ns', records[1])
+        for invalid in ('raw 0', 'raw 1001', 'raw 1.2'):
+            with self.assertRaises(ValueError):
+                self.rx.send(invalid, 'run1')
+        with self.assertRaises(OSError):
+            self.rx._receive(b'{"kind":"started","token":"run1","bus":1,"address":64,"config":8606,"interval_ms":2}')
+
     def test_voltage_stream_preserves_rx_time_and_rejects_malformed_rows(self):
         self.rx._receive(b'{"kind":"ready"}')
         self.rx.events.get_nowait()

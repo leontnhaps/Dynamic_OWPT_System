@@ -129,6 +129,10 @@ class BenchPoseInputs(ttk.Frame):
         self.field(axes, 'tx_p0', 'Tx 정면 Pan°', '0')
         self.field(axes, 'tx_t0', '수평 Tilt°', '0')
         self.field(axes, 'rx_yaw', 'Rx 원위치 방위차°', '0')
+        self.rx_axes_observed = tk.BooleanVar(self, value=False)
+        ttk.Checkbutton(axes, text='Rx 두 축 방향 실물 확인', variable=self.rx_axes_observed).pack(side='left')
+        for key in ('rx_pan_plus', 'rx_tilt_plus'):
+            self.fields[key].trace_add('write', lambda *_: self.rx_axes_observed.set(False))
         ttk.Label(self.detail, text='방향은 각 장치 뒤에서 관찰. 수평 발판이 서로 마주보면 방위차 0°, '
                                     'Rx 원위치가 기준보다 자기 오른쪽이면 양수.').pack(anchor='w')
         lens = ttk.Frame(self.detail)
@@ -167,6 +171,7 @@ class BenchPoseInputs(ttk.Frame):
             raise ValueError('초점거리는 양수, 주점은 기준 영상 내부여야 합니다.')
         return dict(point_id=point_id, rx_minus_tx_m=xyz, room_axes='Tx origin: +X right, +Y front, +Z up',
                     rx_pan_plus=f['rx_pan_plus'], rx_tilt_plus=f['rx_tilt_plus'],
+                    rx_axes_observed=self.rx_axes_observed.get(),
                     tx_pan_plus=f['tx_pan_plus'], tx_tilt_plus=f['tx_tilt_plus'],
                     tx_ref_pan_deg=number(f['tx_p0'], 'Tx 기준 Pan'), tx_ref_tilt_deg=number(f['tx_t0'], 'Tx 기준 Tilt'),
                     rx_home_yaw_deg=number(f['rx_yaw'], 'Rx 원위치 방위차'), camera_intrinsics_px=intrinsics)

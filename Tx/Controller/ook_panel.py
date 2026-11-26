@@ -326,6 +326,10 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
                 continue
             if kind != 'sample':
                 self.write_log(dict(event='pi_rx', **event))
+            if kind == 'error':
+                self.abort_capture('rx_ssh_error')
+                self.rx_status.set('Rx SSH 오류: ' + event.get('message', 'INA219'))
+                return
             if kind == 'started':
                 self.capture.confirm(event)
             elif kind == 'sample':

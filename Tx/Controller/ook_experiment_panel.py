@@ -8,8 +8,8 @@ from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog
-from common.ook_experiment import (PI_DECODER, PI_RECEIVER, PI_TRIALS_PER_RATE, make_pi_comparison_plan,
-                                   make_plan, number_list)
+from common.ook_experiment import (DEFAULT_SEED, PI_DECODER, PI_RECEIVER, PI_TRIALS_PER_RATE,
+                                   make_pi_comparison_plan, make_pi_limit_plan, make_plan, number_list)
 
 
 def analyze_saved_experiment(folder):
@@ -28,6 +28,8 @@ class OokExperimentMixin:
         self.experiment = None
         self.experiment_root = None
         self.last_experiment = None
+        self.last_analysis = None
+        self.analysis_root = None
         self.batch_index = 0
         self.batch_tx_failures = 0
         self.next_trial_at = None
@@ -38,7 +40,7 @@ class OokExperimentMixin:
         self.sweep_bits = tk.StringVar(value='100,50,30,20,15,10,5')
         self.sweep_samples = tk.StringVar(value='5,10')
         self.sweep_count = tk.StringVar(value='10')
-        self.sweep_seed = tk.StringVar(value='20261028')
+        self.sweep_seed = tk.StringVar(value=str(DEFAULT_SEED))
         self.sweep_pattern = tk.StringVar(value='난수32bit')
         self.condition_note = tk.StringVar(value='5m; ambient= ; alignment= ')
         self.experiment_status = tk.StringVar(value='Pi 일괄 시험은 5 ms 간격으로 측정합니다.')
@@ -65,12 +67,12 @@ class OokExperimentMixin:
         ttk.Entry(row, textvariable=self.condition_note).pack(side='left', fill='x', expand=True)
         ttk.Label(box, textvariable=self.experiment_status, wraplength=1100).pack(anchor='w')
 
-    def start_experiment(self, mode):
+    def check_experiment_ready(self, require_pi):
         self.check_ready()
         if self.arduino is None or not self.arduino.connected:
             raise ValueError('선택한 Rx에 먼저 연결하세요.')
-        if mode == 'presentation' and not self.using_pi_rx:
-            raise ValueError('기존 7속도 비교는 Raspberry Pi Rx를 SSH로 연결한 뒤 시작하세요.')
+        if require_pi and not self.using_pi_rx:
+            raise ValueError('Pi 속도 시험은 Raspberry Pi Rx를 SSH로 연결한 뒤 시작하세요.')
         if self.hardware.get('simulated'):
             raise ValueError('실제 장비로 연결하세요. 시뮬레이션 결과는 광학 실험에 사용할 수 없습니다.')
         if 'laser_pattern' not in self.hardware.get('capabilities', []):
@@ -83,6 +85,18 @@ class OokExperimentMixin:
             import matplotlib
         except ImportError as exc:
             raise ValueError('requirements-m4-4.txt의 Python 패키지를 설치하세요.') from exc
+
+    def start_pi_limit(self, periods, sample_ms, note=''):
+        self.check_experiment_ready(require_pi=True)
+        plan = make_pi_limit_plan(periods, sample_ms, note=note)
+        self.start_plan(plan)
+
+    def start_pi_comparison(self, note=''):
+        self.check_experiment_ready(require_pi=True)
+        self.start_plan(make_pi_comparison_plan(DEFAULT_SEED, note))
+
+    def start_experiment(self, mode):
+        self.check_experiment_ready(require_pi=mode == 'presentation')
         if mode == 'presentation':
             plan = make_pi_comparison_plan(int(self.sweep_seed.get()), self.condition_note.get())
         else:
@@ -91,12 +105,16 @@ class OokExperimentMixin:
                              int(self.sweep_count.get()), int(self.sweep_seed.get()),
                              {'난수32bit':'random', '1010 반복':'alternating', '00001111 반복':'runs'}[self.sweep_pattern.get()],
                              mode=mode, note=self.condition_note.get())
+        self.start_plan(plan)
+
+    def start_plan(self, plan):
         if self.using_pi_rx:
             plan.update(receiver=PI_RECEIVER, decoder_version=PI_DECODER)
         root = self.app.stage_dir(self.stage_name) / ('experiment_'+datetime.now().strftime('%Y%m%d_%H%M%S_%f')+'_'+uuid.uuid4().hex[:6])
         root.mkdir()
         (root/'experiment.json').write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
         self.experiment, self.experiment_root, self.last_experiment = plan, root, root
+        self.reset_analysis()
         self.batch_index = 0
         self.batch_tx_failures = 0
         self.next_trial_at = time.monotonic()
@@ -138,6 +156,7 @@ class OokExperimentMixin:
                 ok, result = self.analysis_events.get_nowait()
             except queue.Empty:
                 break
+            self.last_analysis = Path(result) if ok else None
             self.experiment_status.set(('분석 저장: ' if ok else '분석 실패: ') + str(result))
         if not self.experiment or self.next_trial_at is None or time.monotonic() < self.next_trial_at:
             return
@@ -167,9 +186,20 @@ class OokExperimentMixin:
         if folder:
             self.start_analysis(folder)
 
+    def reset_analysis(self):
+        # A completed worker can still have a result waiting for the next GUI tick.
+        self.last_analysis = None
+        while True:
+            try:
+                self.analysis_events.get_nowait()
+            except queue.Empty:
+                return
+
     def start_analysis(self, folder):
         if self.analysis_worker and self.analysis_worker.is_alive():
             raise ValueError('분석 중입니다.')
+        self.reset_analysis()
+        self.analysis_root = Path(folder)
         def run():
             try:
                 self.analysis_events.put((True, analyze_saved_experiment(folder)))

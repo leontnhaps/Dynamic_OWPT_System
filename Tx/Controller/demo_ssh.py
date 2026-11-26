@@ -7,6 +7,8 @@ import zipfile
 from pathlib import Path
 
 from common.angle_demo import HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT
+from common.ook_experiment import interval_value
+from Rx.ina219_ook_stream import SAMPLE_CONFIG
 from Tx.Controller.pi_ook_rx import PiSshReceiver
 
 
@@ -46,9 +48,14 @@ class DemoSsh(PiSshReceiver):
         return 'exec python3 -I -u -c ' + shlex.quote(script)
 
     def send(self, command, token):
-        if command not in ('arm', 'home', 'cancel', 'measure') or not isinstance(token, str) or not token:
+        if not isinstance(command, str) or not isinstance(token, str) or not 1 <= len(token) <= 128:
             raise ValueError('잘못된 Rx 시연 명령 또는 요청 ID입니다.')
-        self._enqueue(dict(cmd=command, token=token))
+        if command.startswith('raw '):
+            self._enqueue(dict(cmd='start', token=token, interval_ms=interval_value(command[4:])))
+        elif command in ('arm', 'home', 'cancel', 'measure', 'stop'):
+            self._enqueue(dict(cmd=command, token=token))
+        else:
+            raise ValueError('잘못된 Rx 시연 명령입니다.')
 
     def _receive(self, line):
         if len(line) > 4096:
@@ -65,11 +72,15 @@ class DemoSsh(PiSshReceiver):
             if not event.get('token'):
                 raise OSError(event['message'])
         elif not self.connected or kind not in ('armed', 'applied', 'home', 'cancelled', 'timeout',
-                                                'voltage', 'measured'):
+                                                'voltage', 'measured', 'started', 'sample', 'stopped'):
             raise OSError('예상하지 못한 Rx 시연 응답입니다.')
         elif not isinstance(event.get('token'), str) or not event['token']:
             raise OSError('Rx 시연 응답에 요청 ID가 없습니다.')
-        elif kind == 'voltage':
+        elif kind == 'started':
+            if ((event.get('bus'), event.get('address'), event.get('config')) != (3, 0x40, SAMPLE_CONFIG)
+                    or type(event.get('interval_ms')) is not int or not 1 <= event['interval_ms'] <= 1000):
+                raise OSError('Rx 속도 측정 설정 응답이 잘못되었습니다.')
+        elif kind in ('voltage', 'sample'):
             if (any(type(event.get(k)) is not int or event[k] < 0 for k in ('seq', 'rx_monotonic_ns', 'bus_raw'))
                     or event['bus_raw'] > 8191):
                 raise OSError('Rx 전압 표본 형식이 잘못되었습니다.')
