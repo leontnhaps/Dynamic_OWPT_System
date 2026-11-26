@@ -10,6 +10,12 @@ from tkinter import ttk
 
 from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, encode_angles
 from Tx.Controller.demo_ssh import DemoSsh
+from Tx.Controller.pi_ook_rx import DEFAULT_RX_TARGET
+
+
+# Each step is relative to the last acknowledged pose. None requests the calibrated home.
+SERVO_CHECK_STEPS = (None, (5, 0), None, (0, 5), None)
+CHECK_DWELL_S = 1.0
 
 
 class AngleDemoPanel(ttk.Frame):
@@ -17,8 +23,9 @@ class AngleDemoPanel(ttk.Frame):
         super().__init__(parent, padding=8)
         self.app = app
         self.rx = self.token = self.phase = self.logpath = self.off_token = None
+        self.last_servo_pose = None
         self.selected = self.prepared = False
-        self.target = tk.StringVar(value='gmlwns@192.168.219.46')
+        self.target = tk.StringVar(value=DEFAULT_RX_TARGET)
         self.password = tk.StringVar()
         self.pan = tk.StringVar(value='0')
         self.tilt = tk.StringVar(value='0')
@@ -34,6 +41,17 @@ class AngleDemoPanel(ttk.Frame):
             ttk.Entry(row, textvariable=variable, width=width, show=mask).pack(side='left')
         ttk.Button(row, text='SSH 연결', command=self.connect).pack(side='left', padx=5)
         ttk.Label(row, textvariable=self.rx_status).pack(side='left', padx=4)
+        check = ttk.Frame(self)
+        check.pack(anchor='w', pady=3)
+        ttk.Label(check, text='Rx 서보 점검 (SSH)').pack(side='left', padx=3)
+        ttk.Button(check, text='두 축 한 번에 확인', command=self.check_both).pack(side='left', padx=3)
+        ttk.Button(check, text='점검 중지', command=self.stop_servo_check).pack(side='left', padx=3)
+        self.jog_size = tk.IntVar(value=1)
+        for step in (1, 5):
+            ttk.Radiobutton(check, text=f'{step}°', variable=self.jog_size, value=step).pack(side='left')
+        for axis, dp, dt in (('Pan −', -1, 0), ('Pan +', 1, 0), ('Tilt −', 0, -1), ('Tilt +', 0, 1)):
+            ttk.Button(check, text=axis, width=7,
+                       command=lambda p=dp, t=dt: self.jog(p, t)).pack(side='left', padx=2)
         row = ttk.Frame(self)
         row.pack(anchor='w', pady=4)
         for label, variable, low, high in [('Pan', self.pan, -HOME_PAN, MAX_PAN-HOME_PAN),
@@ -96,6 +114,47 @@ class AngleDemoPanel(ttk.Frame):
         self.phase = phase
         self.deadline = time.monotonic() + 5
 
+    def check_both(self):
+        self.start_servo_check(SERVO_CHECK_STEPS)
+
+    def jog(self, pan, tilt):
+        step = self.jog_size.get()
+        self.start_servo_check(((pan * step, tilt * step),))
+
+    def start_servo_check(self, steps):
+        if self.phase or self.off_token:
+            self.status.set('현재 동작과 OFF 확인이 끝난 뒤 서보를 점검하세요.')
+            return
+        try:
+            self.ready_rx()
+            if steps[0] is not None and self.last_servo_pose is None:
+                raise ValueError('먼저 원위치 (SSH) 또는 두 축 한 번에 확인을 누르세요.')
+            self.check_steps = list(steps)
+            self.next_check_step()
+        except (ValueError, OSError) as exc:
+            self.stop(str(exc))
+
+    def next_check_step(self):
+        delta = self.check_steps.pop(0)
+        if delta is None:
+            self.check_goal = (HOME_PAN, HOME_TILT)
+            self.begin('check_home')
+            self.rx.send('home', self.token)
+        else:
+            pan, tilt = self.last_servo_pose
+            self.check_goal = (pan + delta[0], tilt + delta[1])
+            if not (0 <= self.check_goal[0] <= MAX_PAN and 0 <= self.check_goal[1] <= MAX_TILT):
+                raise ValueError(f'점검 범위는 Pan 0~{MAX_PAN}°, Tilt 0~{MAX_TILT}°입니다.')
+            self.begin('check_jog')
+            self.rx.jog(self.token, *delta)
+        self.record(dict(event='servo_check_requested', token=self.token, pan=self.check_goal[0],
+                         tilt=self.check_goal[1]))
+        self.status.set(f'SSH 점검 · Pan {self.check_goal[0]}°, Tilt {self.check_goal[1]}° 응답 대기')
+
+    def stop_servo_check(self):
+        if self.phase in ('check_home', 'check_jog', 'check_pause'):
+            self.stop('서보 점검 중지 · 다음 동작을 취소했습니다.')
+
     def transmit(self):
         if self.phase:
             return
@@ -141,6 +200,9 @@ class AngleDemoPanel(ttk.Frame):
 
     def stop(self, reason):
         optical, old_token = self.optical, self.token
+        if self.phase in ('check_home', 'check_jog', 'home', 'optical'):
+            self.last_servo_pose = None
+            self.applied.set('마지막 명령의 적용 여부 미확인 · 원위치 (SSH)로 다시 확인하세요.')
         self.phase = self.token = None  # Late ACKs must not dispatch a frame.
         if optical:
             if self.rx is not None and self.rx.connected:
@@ -157,6 +219,7 @@ class AngleDemoPanel(ttk.Frame):
         self.status.set(reason)
 
     def applied_pose(self, pan, tilt):
+        self.last_servo_pose = (pan, tilt)
         self.applied.set(f'Rx가 적용한 서보 명령 · 기준 대비 Pan {pan-HOME_PAN:+d}°, '
                          f'Tilt {tilt-HOME_TILT:+d}° · 서보 Pan {pan}°, Tilt {tilt}°')
 
@@ -165,6 +228,8 @@ class AngleDemoPanel(ttk.Frame):
         self.record(event)
         if kind == 'ready':
             self.rx_status.set('Rx SSH 연결됨')
+            self.last_servo_pose = None
+            self.applied.set('이 SSH 연결에서 확인된 서보 명령 없음')
             return
         if kind == 'error' and not event.get('token'):
             self.stop('Rx 오류 · ' + event.get('message', ''))
@@ -173,6 +238,19 @@ class AngleDemoPanel(ttk.Frame):
             return
         if kind in ('error', 'timeout', 'cancelled'):
             self.stop(event.get('message') or '유효한 광명령 수신을 확인하지 못했습니다.')
+        elif ((self.phase == 'check_home' and kind == 'home') or
+              (self.phase == 'check_jog' and kind == 'jogged')):
+            if (event.get('pan'), event.get('tilt')) != self.check_goal:
+                self.stop('점검 요청과 Rx가 응답한 서보 각도가 다릅니다.')
+                return
+            self.applied_pose(*self.check_goal)
+            self.token = None
+            if self.check_steps:
+                self.phase = 'check_pause'
+                self.check_due = time.monotonic() + CHECK_DWELL_S
+            else:
+                self.phase = None
+                self.status.set('SSH 점검 완료 · Pan과 Tilt의 서보 명령을 확인했습니다.')
         elif kind == 'home' and self.phase == 'home':
             if (event.get('pan'), event.get('tilt')) != (HOME_PAN, HOME_TILT):
                 self.stop('Rx 원위치 응답 각도 불일치')
@@ -278,7 +356,14 @@ class AngleDemoPanel(ttk.Frame):
                 self.rx_status.set(detail)
                 self.rx.close()
                 self.rx = None
-        if self.phase and time.monotonic() > self.deadline:
+                self.last_servo_pose = None
+                self.applied.set('SSH 연결 종료 · 현재 서보 명령 미확인')
+        if self.phase == 'check_pause' and time.monotonic() >= self.check_due:
+            try:
+                self.next_check_step()
+            except (ValueError, OSError) as exc:
+                self.stop(str(exc))
+        elif self.phase and self.phase != 'check_pause' and time.monotonic() > self.deadline:
             self.stop('응답 시간 초과 · Rx 서보 적용 상태를 확인하세요.')
         elif self.optical and (not self.app.current or time.monotonic()-self.app.current[2] > 2):
             self.stop('Tx 카메라 영상 수신 중단')
@@ -290,4 +375,6 @@ class AngleDemoPanel(ttk.Frame):
         if self.rx:
             self.rx.close()
             self.rx = None
+            self.last_servo_pose = None
+            self.applied.set('Rx 미연결 · 현재 서보 명령 미확인')
             self.rx_status.set('Rx 미연결')

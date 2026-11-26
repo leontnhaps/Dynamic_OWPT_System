@@ -12,7 +12,7 @@ from common.arc_protocol import (ANGLE_TEST_BIT_MS, ANGLE_TEST_FRAMES, ANGLE_TES
                                  DEFAULT_BIT_MS, DEFAULT_PERIOD_S)
 from common.tx_setup import TX_CAMERA_SETTINGS
 from Tx.Controller.arduino_capture import ArduinoSerial, RxCapture, parse_reading, serial_ports
-from Tx.Controller.pi_ook_rx import PI_RECEIVER, PiSshReceiver, PiCapture
+from Tx.Controller.pi_ook_rx import DEFAULT_RX_TARGET, PI_RECEIVER, PiSshReceiver, PiCapture
 from Tx.Controller.ook_experiment_panel import OokExperimentMixin
 from Tx.Controller.arc_sender import ArcSender
 from common.ook_experiment import interval_value
@@ -64,7 +64,7 @@ class OokPanel(OokExperimentMixin, ttk.Frame):
         self.rx_port = tk.StringVar()
         self.rx_save = tk.BooleanVar(value=True)
         ttk.Checkbutton(row, text='Rx 수신 자동 저장', variable=self.rx_save).pack(side='left')
-        self.rx_ssh_target = tk.StringVar(value='gmlwns@192.168.219.45')
+        self.rx_ssh_target = tk.StringVar(value=DEFAULT_RX_TARGET)
         ttk.Entry(row, textvariable=self.rx_ssh_target, width=23).pack(side='left', padx=3)
         ttk.Button(row, text='Pi SSH 연결', command=lambda: self.guard(self.connect_pi_rx)).pack(side='left')
         ttk.Label(row, text='COM 포트').pack(side='left', padx=3)

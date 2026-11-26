@@ -48,6 +48,7 @@ class FinalSpeedPanelTests(unittest.TestCase):
         p.status = panel_fixture.Value()
         p.off_status = panel_fixture.Value()
         p.rx_status = panel_fixture.Value()
+        p.applied = panel_fixture.Value()
 
         speed = p.speed = FinalSpeedPanel.__new__(FinalSpeedPanel)
         speed.panel, speed.engine = p, self.engine

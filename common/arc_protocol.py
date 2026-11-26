@@ -37,9 +37,9 @@ def frame_bits(seq):
     return f'{SYNC}{seq:08b}{crc8(0xb2, seq):08b}'
 
 
-def _bit_seconds(bit_ms):
-    if not math.isfinite(bit_ms) or not 2 * SAMPLE_S * 1000 <= bit_ms <= 1000:
-        raise ValueError('arc bit duration must support two 5 ms samples and be at most 1000 ms')
+def _bit_seconds(bit_ms, sample_s=SAMPLE_S):
+    if not math.isfinite(bit_ms) or not 2 * sample_s * 1000 <= bit_ms <= 1000:
+        raise ValueError(f'bit duration must support two {sample_s * 1000:g} ms samples and be at most 1000 ms')
     return bit_ms / 1000
 
 
@@ -64,10 +64,10 @@ def timing(bit_ms, period_s):
 class VoltageFrameDecoder:
     """Sample bit centres using levels from a known sync word, then validate the payload."""
 
-    def __init__(self, bit_ms, sync, frame_len):
+    def __init__(self, bit_ms, sync, frame_len, *, sample_s=SAMPLE_S):
         self.sync = sync
         self.frame_len = frame_len
-        self.bit_s = _bit_seconds(bit_ms)
+        self.bit_s = _bit_seconds(bit_ms, sample_s)
         self.history = deque()
         self.last = None
         self.next_search = -math.inf

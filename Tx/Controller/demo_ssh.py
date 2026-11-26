@@ -6,7 +6,7 @@ import shlex
 import zipfile
 from pathlib import Path
 
-from common.angle_demo import HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT
+from common.angle_demo import HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, validate_jog
 from common.ook_experiment import interval_value
 from Rx.ina219_ook_stream import SAMPLE_CONFIG
 from Tx.Controller.pi_ook_rx import PiSshReceiver
@@ -57,6 +57,12 @@ class DemoSsh(PiSshReceiver):
         else:
             raise ValueError('잘못된 Rx 시연 명령입니다.')
 
+    def jog(self, token, pan_step, tilt_step):
+        if not isinstance(token, str) or not 1 <= len(token) <= 128:
+            raise ValueError('잘못된 Rx 점검 요청 ID입니다.')
+        validate_jog(pan_step, tilt_step)
+        self._enqueue(dict(cmd='jog', token=token, pan_step=pan_step, tilt_step=tilt_step))
+
     def _receive(self, line):
         if len(line) > 4096:
             raise OSError('너무 긴 Rx 시연 응답입니다.')
@@ -71,7 +77,7 @@ class DemoSsh(PiSshReceiver):
                 raise OSError('Rx 시연 오류 응답에 설명이 없습니다.')
             if not event.get('token'):
                 raise OSError(event['message'])
-        elif not self.connected or kind not in ('armed', 'applied', 'home', 'cancelled', 'timeout',
+        elif not self.connected or kind not in ('armed', 'applied', 'home', 'jogged', 'cancelled', 'timeout',
                                                 'voltage', 'measured', 'started', 'sample', 'stopped'):
             raise OSError('예상하지 못한 Rx 시연 응답입니다.')
         elif not isinstance(event.get('token'), str) or not event['token']:
@@ -89,7 +95,7 @@ class DemoSsh(PiSshReceiver):
                     ('count', 'window_start_ns', 'window_end_ns', 'max_gap_ns'))
                     or not event['count'] or event['window_end_ns'] <= event['window_start_ns']):
                 raise OSError('Rx 전압 측정 결과 형식이 잘못되었습니다.')
-        elif kind in ('applied', 'home'):
+        elif kind in ('applied', 'home', 'jogged'):
             pan, tilt = event.get('pan'), event.get('tilt')
             if (type(pan) is not int or not 0 <= pan <= MAX_PAN
                     or type(tilt) is not int or not 0 <= tilt <= MAX_TILT):

@@ -35,7 +35,7 @@ class PointComparisonPanel(AngleDemoPanel):
         ttk.Button(actions, text='계산각 OOK 전송 · 측정', command=self.send_estimate).pack(side='left', padx=4)
         axis_row = ttk.Frame(self)
         axis_row.pack(anchor='w')
-        ttk.Label(axis_row, text='축 방향 확인 (원위치 기준)').pack(side='left')
+        ttk.Label(axis_row, text='OOK 단일 축 전송 (원위치 기준)').pack(side='left')
         for axis in ('Pan', 'Tilt'):
             for offset in (-1, 1):
                 ttk.Button(axis_row, text=f'{axis} {offset:+d}°', width=8,
@@ -62,7 +62,7 @@ class PointComparisonPanel(AngleDemoPanel):
             self.frame_label.set('각도 프레임 · 범위 안의 정수 각도를 입력하세요.')
             return
         payload = bits[len(SYNC):]
-        self.frame_label.set(f'각도 명령 {FRAME_LEN} bit · {BIT_MS} ms/bit · 시작 {SYNC}  |  '
+        self.frame_label.set(f'각도 명령 {FRAME_LEN} bit · {1000/BIT_MS:g} bit/s ({BIT_MS} ms/bit) · 시작 {SYNC}  |  '
                              f'Pan {payload[:8]}  |  Tilt {payload[8:16]}  |  CRC-8 {payload[16:24]}  |  끝 {payload[-1]}')
 
     def check_axis(self, axis, offset):

@@ -11,6 +11,7 @@ from Rx.ina219_ook_stream import SAMPLE_CONFIG
 
 
 SAMPLER = Path(__file__).resolve().parents[2] / 'Rx' / 'ina219_ook_stream.py'
+DEFAULT_RX_TARGET = 'gmlwns@192.168.219.47'
 
 
 class PiSshReceiver:

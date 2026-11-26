@@ -9,10 +9,10 @@ import time
 from collections import deque
 from contextlib import ExitStack, contextmanager
 
-from common.angle_demo import (AngleDecoder, HOME_PAN, HOME_TILT, EXPECTED_SAMPLES,
+from common.angle_demo import (AngleDecoder, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, EXPECTED_SAMPLES,
                                MIN_VOLTAGE_SAMPLES, MAX_VOLTAGE_GAP_NS, VOLTAGE_SAMPLE_MS,
-                               VOLTAGE_SETTLE_NS, VOLTAGE_WINDOW_NS)
-from Rx.arc_bench import PanTilt, SAMPLE_MS, i2c_bus
+                               VOLTAGE_SETTLE_NS, VOLTAGE_WINDOW_NS, MAX_PAN, MAX_TILT, validate_jog)
+from Rx.arc_bench import PanTilt, i2c_bus
 from Rx.ina219_ook_stream import INA219, JsonPipe, NS_PER_MS, Sampler
 
 
@@ -51,6 +51,7 @@ class Receiver:
         self.window_start_ns = None
         self.servo_initialised = False
         self.servo_touched = False
+        self.last_pose = None
 
     def disarm(self):
         resources, self.resources = self.resources, None
@@ -67,10 +68,17 @@ class Receiver:
                 raise CaptureConflict('속도 측정 중입니다. 해당 측정 ID의 stop 명령이 필요합니다.')
         if not isinstance(cmd, dict):
             raise ValueError('Expected a command object over SSH.')
-        fields = {'cmd', 'token', 'interval_ms'} if cmd.get('cmd') == 'start' else {'cmd', 'token'}
+        op = cmd.get('cmd')
+        fields = {'cmd', 'token'}
+        if op == 'start':
+            fields.add('interval_ms')
+        elif op == 'jog':
+            if self.token is not None:
+                raise CaptureConflict('Rx 수신 또는 전압 측정을 마친 뒤 서보를 점검하세요.')
+            fields.update(('pan_step', 'tilt_step'))
         if set(cmd) != fields:
             raise ValueError('Unexpected Rx command fields.')
-        op, token = cmd['cmd'], cmd['token']
+        token = cmd['token']
         if not isinstance(token, str) or not 1 <= len(token) <= 128:
             raise ValueError('Expected a request token.')
         if op in ('arm', 'measure', 'start'):
@@ -81,7 +89,7 @@ class Receiver:
                 callback = self.emit if op == 'start' else self.on_sample
                 sampler = Sampler(sensor, 3, 0x40, callback, self.clock)
                 stack.callback(sampler.stop)
-                interval_ms = cmd.get('interval_ms', SAMPLE_MS if op == 'arm' else VOLTAGE_SAMPLE_MS)
+                interval_ms = cmd.get('interval_ms', DECODE_SAMPLE_MS if op == 'arm' else VOLTAGE_SAMPLE_MS)
                 sampler.command(dict(cmd='start', token=token, interval_ms=interval_ms))
                 now = self.clock()
                 if op == 'arm':
@@ -103,6 +111,13 @@ class Receiver:
         elif op == 'home':
             self.disarm()
             self.move(HOME_PAN, HOME_TILT, 'home', token)
+        elif op == 'jog':
+            pan_step, tilt_step = cmd['pan_step'], cmd['tilt_step']
+            validate_jog(pan_step, tilt_step)
+            if self.last_pose is None:
+                raise ValueError('현재 Rx 명령각을 알 수 없습니다. 원위치 (SSH)를 먼저 누르세요.')
+            pan, tilt = self.last_pose
+            self.move(pan + pan_step, tilt + tilt_step, 'jogged', token)
         elif op == 'cancel':
             self.disarm()
             self.emit(kind='cancelled', token=token)
@@ -110,6 +125,9 @@ class Receiver:
             raise ValueError('Unknown Rx demo command.')
 
     def move(self, pan, tilt, kind, token):
+        if not (0 <= pan <= MAX_PAN and 0 <= tilt <= MAX_TILT):
+            raise ValueError(f'Rx 명령 범위를 벗어납니다. Pan 0~{MAX_PAN}°, Tilt 0~{MAX_TILT}°.')
+        self.last_pose = None
         try:
             if not self.servo_initialised:
                 self.servo_touched = True
@@ -120,10 +138,12 @@ class Receiver:
         except OSError:
             self.release_servos()
             raise
+        self.last_pose = (pan, tilt)
         self.emit(kind=kind, token=token, pan=pan, tilt=tilt,
                   servo_writes=list(self.servos.commands))
 
     def release_servos(self):
+        self.last_pose = None
         if self.servo_touched:
             self.servo_initialised = False
             self.servos.release()

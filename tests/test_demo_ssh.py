@@ -1,4 +1,5 @@
 import os
+import json
 import queue
 import shlex
 import subprocess
@@ -28,6 +29,23 @@ class DemoSshTests(unittest.TestCase):
             self.assertEqual(self.rx.commands.get_nowait(), {'cmd': command, 'token': 'request-1'})
         with self.assertRaises(ValueError):
             self.rx.send('move 103 20', 'request-1')
+
+    def test_jog_carries_only_bounded_relative_steps_and_checks_reply(self):
+        self.rx._receive(b'{"kind":"ready"}')
+        self.rx.events.get_nowait()
+        self.rx.jog('J', 5, -1)
+        self.assertEqual(self.rx.commands.get_nowait(), dict(cmd='jog', token='J', pan_step=5, tilt_step=-1))
+        for token, pan, tilt in [('J', 103, 20), ('J', 0, 0), ('J', 1, True), ('', 0, 1)]:
+            with self.assertRaises(ValueError):
+                self.rx.jog(token, pan, tilt)
+        self.assertTrue(self.rx.commands.empty())
+        reply = dict(kind='jogged', token='J', pan=108, tilt=19,
+                     servo_writes=[['1.0', '1.1', 0, 108, '', 'jogged'], ['1.1', '1.2', 1, 19, '', 'jogged']])
+        self.rx._receive(json.dumps(reply))
+        self.assertEqual(self.rx.events.get_nowait()['servo_writes'], reply['servo_writes'])
+        for invalid in (dict(tilt=36), dict(pan=True), dict(token='')):
+            with self.assertRaises(OSError):
+                self.rx._receive(json.dumps(dict(reply, **invalid)))
 
     def test_same_connection_accepts_matching_raw_sampler_protocol(self):
         self.rx._receive(b'{"kind":"ready"}')

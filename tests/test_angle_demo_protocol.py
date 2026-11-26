@@ -3,17 +3,19 @@ import unittest
 
 from common.angle_demo import (AngleDecoder, BIT_MS, DISCRIMINATOR, FRAME_LEN,
                                HOME_PAN, HOME_TILT, SYNC, encode_angles)
-from common.arc_protocol import FrameDecoder, crc8, stimulus_bits
+from common.arc_protocol import DEFAULT_BIT_MS, FrameDecoder, crc8, stimulus_bits
 
 
-def receive(bits, *, omit=None, contrast=0.20, receiver=None):
+def receive(bits, *, omit=None, contrast=0.20, receiver=None, bit_ms=BIT_MS):
     receiver = receiver or AngleDecoder()
     rng = random.Random(13)
     found = []
-    period = BIT_MS / 1000
+    period = bit_ms / 1000
     start = 0.274
-    for i in range(int((start + len(bits) * period + 0.12) / 0.005)):
-        t = i * 0.005 + rng.uniform(-0.00035, 0.00035)
+    # At the 1 ms sampling target, the recorded Pi samples were about 2 ms apart.
+    sample_s = 0.002
+    for i in range(int((start + len(bits) * period + 0.12) / sample_s)):
+        t = i * sample_s + rng.uniform(-0.00035, 0.00035)
         if omit is not None and omit[0] < t < omit[1]:
             continue
         index = int((t - start) // period)
@@ -28,6 +30,7 @@ def receive(bits, *, omit=None, contrast=0.20, receiver=None):
 
 class AngleDemoProtocolTest(unittest.TestCase):
     def test_one_command_per_frame_including_both_axis_boundaries(self):
+        self.assertEqual(BIT_MS, 8)
         for pair in ((0, 0), (180, 35), (HOME_PAN, HOME_TILT), (HOME_PAN+1, HOME_TILT-1)):
             with self.subTest(pair=pair):
                 frame = encode_angles(*pair)
@@ -48,13 +51,14 @@ class AngleDemoProtocolTest(unittest.TestCase):
             corrupt = frame[:index] + str(1 - int(frame[index])) + frame[index+1:]
             self.assertEqual(receive(corrupt), [])
         self.assertEqual(receive(frame[:-6]), [])
-        self.assertEqual(receive(frame, omit=(1.18, 1.26)), [])
+        self.assertEqual(receive(frame, omit=(0.42, 0.44)), [])
         self.assertEqual(receive(frame, contrast=0.006), [])
         self.assertEqual(receive('1' * FRAME_LEN), [])
 
     def test_angle_frames_and_legacy_arc_frames_are_distinct(self):
-        self.assertEqual(receive(stimulus_bits(103, BIT_MS)), [])
-        self.assertEqual(receive(encode_angles(103, 20), receiver=FrameDecoder(BIT_MS)), [])
+        self.assertEqual(receive(stimulus_bits(103, DEFAULT_BIT_MS)), [])
+        self.assertEqual(receive(encode_angles(103, 20), receiver=FrameDecoder(DEFAULT_BIT_MS),
+                                 bit_ms=DEFAULT_BIT_MS), [])
 
 
 if __name__ == '__main__':

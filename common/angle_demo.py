@@ -7,7 +7,8 @@ HOME_PAN = 103
 HOME_TILT = 20
 MAX_PAN = 180
 MAX_TILT = 35
-BIT_MS = 50
+BIT_MS = 8
+DECODE_SAMPLE_MS = 1
 VOLTAGE_SAMPLE_MS = 5
 VOLTAGE_SETTLE_NS = 500_000_000
 VOLTAGE_WINDOW_NS = 1_000_000_000
@@ -33,7 +34,7 @@ def encode_angles(pan, tilt):
 
 class AngleDecoder(VoltageFrameDecoder):
     def __init__(self):
-        super().__init__(BIT_MS, SYNC, FRAME_LEN)
+        super().__init__(BIT_MS, SYNC, FRAME_LEN, sample_s=DECODE_SAMPLE_MS / 1000)
 
     def decode_word(self, word, start):
         if not word & 1:
@@ -42,3 +43,10 @@ class AngleDecoder(VoltageFrameDecoder):
         if pan > MAX_PAN or tilt > MAX_TILT or check != crc8(DISCRIMINATOR, pan, tilt):
             return None
         return pan, tilt
+
+
+def validate_jog(pan_step, tilt_step):
+    """Allow only small whole-degree relative moves for the manual Rx check."""
+    if any(type(step) is not int or step not in (-5, -1, 0, 1, 5)
+           for step in (pan_step, tilt_step)) or (pan_step, tilt_step) == (0, 0):
+        raise ValueError('수동 점검은 한 축 이상을 ±1° 또는 ±5° 움직일 수 있습니다.')

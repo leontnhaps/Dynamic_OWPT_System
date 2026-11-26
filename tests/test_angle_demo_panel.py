@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from common.angle_demo import BIT_MS, encode_angles
+from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles
 from Tx.Controller.angle_demo_panel import AngleDemoPanel
 
 
@@ -81,6 +81,70 @@ class DemoTabTests(unittest.TestCase):
         p.app.ook.online = False
         p.home()
         p.rx.send.assert_called_once_with('home', p.token)
+        p.app.send.assert_not_called()
+
+    def test_check_both_steps_wait_for_distinct_acks_without_tx(self):
+        p = self.panel
+        p.app.ook.online = False
+        p.app.current = None
+        p.check_both()
+        poses = [(HOME_PAN, HOME_TILT), (HOME_PAN+5, HOME_TILT), (HOME_PAN, HOME_TILT),
+                 (HOME_PAN, HOME_TILT+5), (HOME_PAN, HOME_TILT)]
+        previous = None
+        for i, (pan, tilt) in enumerate(poses):
+            token = p.token
+            self.assertTrue(token and token != previous)
+            kind = 'home' if i % 2 == 0 else 'jogged'
+            if kind == 'home':
+                p.rx.send.assert_called_with('home', token)
+            else:
+                p.rx.jog.assert_called_with(token, pan - HOME_PAN, tilt - HOME_TILT)
+            p.on_rx(dict(kind=kind, token='old', pan=pan, tilt=tilt))
+            self.assertEqual(p.token, token)
+            p.on_rx(dict(kind=kind, token=token, pan=pan, tilt=tilt))
+            self.assertEqual(p.last_servo_pose, (pan, tilt))
+            if i < len(poses)-1:
+                p.tick()
+                self.assertEqual(p.phase, 'check_pause')
+                p.check_due = 0
+                p.tick()
+            previous = token
+        self.assertIsNone(p.phase)
+        p.app.send.assert_not_called()
+
+    def test_click_jog_uses_acknowledged_pose_and_rejects_out_of_range(self):
+        p = self.panel
+        p.last_servo_pose = None
+        p.jog_size = Mock()
+        p.jog_size.get.return_value = 5
+        p.jog(0, 1)
+        p.rx.jog.assert_not_called()
+        p.applied_pose(180, 25)
+        p.jog(1, 0)
+        p.rx.jog.assert_not_called()
+        p.jog(-1, 0)
+        p.rx.jog.assert_called_once_with(p.token, -5, 0)
+        p.on_rx(dict(kind='jogged', token=p.token, pan=175, tilt=25))
+        self.assertIsNone(p.phase)
+        p.jog(0, 1)
+        p.on_rx(dict(kind='jogged', token=p.token, pan=175, tilt=30))
+        self.assertEqual(p.last_servo_pose, (175, 30))
+        p.app.send.assert_not_called()
+
+    def test_stopped_or_mismatched_check_never_dispatches_another_step(self):
+        p = self.panel
+        p.app.ook.online = False
+        p.check_both()
+        token = p.token
+        p.stop_servo_check()
+        p.on_rx(dict(kind='home', token=token, pan=HOME_PAN, tilt=HOME_TILT))
+        p.tick()
+        p.rx.jog.assert_not_called()
+        p.check_both()
+        p.on_rx(dict(kind='home', token=p.token, pan=HOME_PAN+1, tilt=HOME_TILT))
+        self.assertIsNone(p.phase)
+        self.assertIsNone(p.last_servo_pose)
+        p.rx.jog.assert_not_called()
         p.app.send.assert_not_called()
 
     def test_timeout_and_wrong_pose_never_report_success(self):

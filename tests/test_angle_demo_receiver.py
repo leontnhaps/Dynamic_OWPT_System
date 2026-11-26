@@ -2,9 +2,9 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
-from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles
-from Rx.angle_demo import LISTEN_NS, Receiver, ServoWrites, serve
-from Rx.arc_bench import PanTilt, SAMPLE_MS
+from common.angle_demo import BIT_MS, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, encode_angles
+from Rx.angle_demo import CaptureConflict, LISTEN_NS, Receiver, ServoWrites, serve
+from Rx.arc_bench import PanTilt
 from Rx.ina219_ook_stream import BUS_VOLTAGE, CONFIG, INA219, SAMPLE_CONFIG
 
 
@@ -43,12 +43,62 @@ class ReceiverTests(unittest.TestCase):
     def samples(self, bits):
         for bit in bits:
             self.sensor.registers[BUS_VOLTAGE] = (550 if bit == '1' else 220) << 3
-            for _ in range(BIT_MS // SAMPLE_MS):
-                self.now += SAMPLE_MS * 1_000_000
+            for _ in range(BIT_MS // DECODE_SAMPLE_MS):
+                self.now += DECODE_SAMPLE_MS * 1_000_000
                 self.rx.tick()
 
     def arm(self, token='T'):
         self.rx.command(dict(cmd='arm', token=token))
+
+    def jog(self, pan_step, tilt_step):
+        self.rx.command(dict(cmd='jog', token='J', pan_step=pan_step, tilt_step=tilt_step))
+
+    def test_jog_uses_both_last_commanded_axes_and_returns_write_records(self):
+        with self.assertRaisesRegex(ValueError, '원위치'):
+            self.jog(1, 0)
+        self.bus.write.assert_not_called()
+        self.rx.command(dict(cmd='home', token='home'))
+        self.jog(5, -1)
+        self.jog(0, -5)
+        last = self.events[-1]
+        self.assertEqual((last['kind'], last['token'], last['pan'], last['tilt']),
+                         ('jogged', 'J', HOME_PAN + 5, HOME_TILT - 6))
+        self.assertEqual([(r[2], r[3]) for r in last['servo_writes']],
+                         [(0, HOME_PAN + 5), (1, HOME_TILT - 6)])
+        self.rx.release_servos()
+        self.bus.write.reset_mock()
+        with self.assertRaisesRegex(ValueError, '원위치'):
+            self.jog(0, 1)
+        self.bus.write.assert_not_called()
+
+    def test_jog_from_optical_position_checks_both_limits_before_writing(self):
+        self.arm()
+        self.samples('00' + encode_angles(175, 35) + '00')
+        self.assertEqual(self.events[-1]['kind'], 'applied')
+        self.bus.write.reset_mock()
+        for delta in [(5, 1), (0, 0), (True, 0), (1, 2), (1, 1.0)]:
+            with self.subTest(delta=delta), self.assertRaises(ValueError):
+                self.jog(*delta)
+        self.bus.write.assert_not_called()
+        self.jog(5, -1)
+        self.assertEqual(self.rx.last_pose, (180, 34))
+        self.bus.write.reset_mock()
+        with self.assertRaises(ValueError):
+            self.jog(1, -5)
+        self.bus.write.assert_not_called()
+
+    def test_jog_during_capture_preserves_each_capture_and_never_writes(self):
+        for op in ('arm', 'measure', 'start'):
+            command = dict(cmd=op, token=op)
+            if op == 'start':
+                command['interval_ms'] = 1
+            self.rx.command(command)
+            with self.assertRaises(CaptureConflict):
+                self.jog(1, -1)
+            self.assertEqual(self.rx.token, op)
+            self.assertTrue(self.sensor_open)
+            self.rx.disarm()
+        self.bus.write.assert_not_called()
 
     def test_raw_ina219_speed_capture_matches_stream_and_never_moves_servos(self):
         self.rx.command(dict(cmd='start', token='S', interval_ms=2))
@@ -91,6 +141,7 @@ class ReceiverTests(unittest.TestCase):
 
     def test_one_real_decoder_frame_gives_one_ack_with_servo_writes(self):
         self.arm()
+        self.assertEqual(self.rx.wait_seconds(), 0.001)
         self.assertEqual(self.events, [])  # Wait for an actual ADC sample before arming Tx.
         self.assertFalse(self.bus.write.called)
         bits = encode_angles(104, 19)
@@ -201,12 +252,17 @@ class ReceiverTests(unittest.TestCase):
                 raise OSError('tilt write failed')
             return len(data)
 
+        self.rx.command(dict(cmd='home', token='H'))
         self.bus.write.side_effect = fail_on_tilt
         with self.assertRaisesRegex(OSError, 'tilt write failed'):
-            self.rx.command(dict(cmd='home', token='H'))
-        self.assertEqual(self.events, [])
+            self.jog(1, 1)
+        self.assertEqual([e['kind'] for e in self.events], ['home'])
         self.assertEqual([c.args[0] for c in self.bus.write.call_args_list[-2:]],
                          [bytes((0x09, 0x10)), bytes((0x0D, 0x10))])
+        self.bus.write.reset_mock()
+        with self.assertRaisesRegex(ValueError, '원위치'):
+            self.jog(1, -1)
+        self.bus.write.assert_not_called()
 
     def test_failed_initialisation_releases_both_and_reinitialises_on_next_home(self):
         def fail_on_prescale(data):
