@@ -7,7 +7,8 @@ import shlex
 import zipfile
 from pathlib import Path
 
-from common.angle_demo import HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, validate_jog
+from common.angle_demo import (DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT,
+                               validate_angle_bit_ms, validate_jog)
 from common.ook_experiment import PAYLOAD_BITS, interval_value
 from Rx.ina219_ook_stream import SAMPLE_CONFIG
 from Tx.Controller.pi_ook_rx import PiSshReceiver
@@ -92,6 +93,11 @@ class DemoSsh(PiSshReceiver):
         validate_jog(pan_step, tilt_step)
         self._enqueue(dict(cmd='jog', token=token, pan_step=pan_step, tilt_step=tilt_step))
 
+    def arm_angle(self, token, bit_ms):
+        if not isinstance(token, str) or not 1 <= len(token) <= 128:
+            raise ValueError('잘못된 Rx 각도 수신 요청 ID입니다.')
+        self._enqueue(dict(cmd='arm', token=token, bit_ms=validate_angle_bit_ms(bit_ms)))
+
     def _receive(self, line):
         if len(line) > 4096:
             raise OSError('너무 긴 Rx 시연 응답입니다.')
@@ -107,10 +113,31 @@ class DemoSsh(PiSshReceiver):
             if not event.get('token'):
                 raise OSError(event['message'])
         elif not self.connected or kind not in ('armed', 'decoded', 'applied', 'home', 'jogged', 'cancelled', 'timeout',
-                                                'voltage', 'measured', 'started', 'sample', 'stopped'):
+                                                'angle_samples', 'angle_samples_end', 'voltage', 'measured',
+                                                'started', 'sample', 'stopped'):
             raise OSError('예상하지 못한 Rx 시연 응답입니다.')
         elif not isinstance(event.get('token'), str) or not event['token']:
             raise OSError('Rx 시연 응답에 요청 ID가 없습니다.')
+        elif kind == 'armed' and ('bit_ms' in event or 'sample_ms' in event):
+            try:
+                validate_angle_bit_ms(event.get('bit_ms'))
+            except ValueError as exc:
+                raise OSError('Rx 각도 OOK 비트 시간 확인 실패') from exc
+            if (type(event.get('sample_ms')) is not int or type(event.get('interval_ms')) is not int
+                    or (event['sample_ms'], event['interval_ms']) != (DECODE_SAMPLE_MS, DECODE_SAMPLE_MS)
+                    or (event.get('bus'), event.get('address'), event.get('config')) != (3, 0x40, SAMPLE_CONFIG)):
+                raise OSError('Rx 각도 OOK INA219 설정 확인 실패')
+        elif kind == 'angle_samples':
+            rows = event.get('rows')
+            if not isinstance(rows, list) or not rows:
+                raise OSError('Rx 각도 OOK 전압 표본 묶음이 비어 있습니다.')
+            for row in rows:
+                if (not isinstance(row, list) or len(row) != 3 or
+                        any(type(x) is not int or x < 0 for x in row) or row[2] > 8191):
+                    raise OSError('Rx 각도 OOK 전압 표본 형식이 잘못되었습니다.')
+        elif kind == 'angle_samples_end':
+            if type(event.get('count')) is not int or event['count'] < 0:
+                raise OSError('Rx 각도 OOK 전체 표본 수가 잘못되었습니다.')
         elif kind == 'started':
             if ((event.get('bus'), event.get('address'), event.get('config')) != (3, 0x40, SAMPLE_CONFIG)
                     or type(event.get('interval_ms')) is not int or not 1 <= event['interval_ms'] <= 1000):

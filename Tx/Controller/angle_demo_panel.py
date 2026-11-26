@@ -8,8 +8,10 @@ import uuid
 from datetime import datetime
 from tkinter import ttk
 
-from common.angle_demo import (BIT_MS, HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, RX_VIEWPOINT,
-                               encode_angles, payload_from_frame)
+from common.angle_demo import (ANGLE_BIT_PERIODS, BIT_MS, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT,
+                               MAX_PAN, MAX_TILT, RX_VIEWPOINT, encode_angles, payload_from_frame)
+from Rx.ina219_ook_stream import SAMPLE_CONFIG
+from Tx.Controller.angle_waveform import AngleWaveform, WaveformReview
 from Tx.Controller.demo_ssh import DemoSsh, optical_servo_writes
 from Tx.Controller.pi_ook_rx import DEFAULT_RX_TARGET
 
@@ -17,9 +19,13 @@ from Tx.Controller.pi_ook_rx import DEFAULT_RX_TARGET
 # Each step is relative to the last acknowledged pose. None requests the calibrated home.
 SERVO_CHECK_STEPS = (None, (5, 0), None, (0, 5), None)
 CHECK_DWELL_S = 1.0
+RATE_LABELS = {ms: f'{1000/ms:.2f}'.rstrip('0').rstrip('.') + f' bit/s  ({ms} ms/bit)'
+               for ms in ANGLE_BIT_PERIODS}
 
 
 class AngleDemoPanel(ttk.Frame):
+    wave = wave_review = draining_rx = None
+
     def __init__(self, parent, app):
         super().__init__(parent, padding=8)
         self.app = app
@@ -50,6 +56,14 @@ class AngleDemoPanel(ttk.Frame):
         readout.pack(anchor='w')
         ttk.Label(readout, text='Rx 마지막 확인 명령각').pack(side='left', padx=3)
         ttk.Label(readout, textvariable=self.applied, font='TkHeadingFont').pack(side='left', padx=6)
+        rates = ttk.Frame(self)
+        rates.pack(anchor='w', fill='x')
+        ttk.Label(rates, text='각도 OOK 속도').pack(side='left', padx=3)
+        self.rate_box = ttk.Combobox(rates, width=26, values=tuple(RATE_LABELS.values()), state='readonly')
+        self.rate_box.set(RATE_LABELS[BIT_MS])
+        self.rate_box.pack(side='left', padx=3)
+        self.wave_review = WaveformReview(rates)
+        self.wave_review.pack(side='left', padx=4)
         self.diagnostic_slot = ttk.Frame(self)
         self.diagnostic_slot.pack(fill='x')
         self.diagnostics = ttk.Frame(self.diagnostic_slot)
@@ -105,6 +119,9 @@ class AngleDemoPanel(ttk.Frame):
             self.rx_status.set(f'시연 기록 저장 오류 · {exc}')
 
     def connect(self):
+        if self.draining_rx is not None:
+            self.status.set('이전 Rx 파형을 저장한 뒤 다시 연결하세요.')
+            return
         if self.rx is not None:
             self.status.set('Rx SSH 연결 상태를 확인하세요.')
             return
@@ -176,11 +193,23 @@ class AngleDemoPanel(ttk.Frame):
         if self.phase in ('check_home', 'check_jog', 'check_pause'):
             self.stop('서보 점검 중지 · 다음 동작을 취소했습니다.')
 
+    def selected_period(self):
+        index = self.rate_box.current()
+        if index < 0:
+            raise ValueError('목록에서 실험한 각도 OOK 속도를 선택하세요.')
+        return ANGLE_BIT_PERIODS[index]
+
+    def waveform_context(self):
+        return dict(method='manual', rx_ssh_target=self.target.get().strip(),
+                    pan=self.goal[0], tilt=self.goal[1])
+
     def transmit(self):
         if self.phase:
             return
         try:
             self.ready_rx()
+            if self.wave is not None:
+                raise ValueError('이전 송신의 Rx 파형을 저장하고 있습니다.')
             if self.off_token:
                 raise ValueError('이전 송신 OFF 미확인 · 송신 중지를 눌러 OFF를 다시 확인하세요.')
             try:
@@ -198,16 +227,33 @@ class AngleDemoPanel(ttk.Frame):
             self.tx_payload = payload_from_frame(self.bits)
             self.decoded_payload = self.decoded_pose = self.write_pose = self.servo_rows = None
             self.tx_done = self.rx_done = self.commit_sent = False
+            self.bit_ms = self.selected_period()
             self.show_verification()
             self.off_status.set('')
             self.begin('off')
-            self.record(dict(event='requested', token=self.token, pan=pan, tilt=tilt, bit_ms=BIT_MS,
-                             tx_frame_bits=self.bits, tx_payload_bits=self.tx_payload))
+            self.arm_sent = False
+            self.wave_outcome = None
+            try:
+                self.wave = AngleWaveform(self.app.stage_dir('M6-4'), self.token, self.bit_ms, self.bits,
+                                          context=self.waveform_context())
+            except (ValueError, OSError):
+                self.phase = self.token = None
+                raise
+            self.rate_box.state(['disabled'])
+            self.wave_review.recording(self.wave.folder)
+            requested = dict(event='requested', token=self.token, pan=pan, tilt=tilt, bit_ms=self.bit_ms,
+                             tx_frame_bits=self.bits, tx_payload_bits=self.tx_payload,
+                             waveform_folder=str(self.wave.folder))
+            self.record(requested)
+            self.wave.tx_event(requested)
             self.status.set('Tx OFF 확인 중…')
             if not self.app.send(dict(cmd='laser', value=0, request_id=self.token)):
                 self.stop('Tx OFF 요청 실패')
         except (ValueError, OSError) as exc:
-            self.status.set(str(exc))
+            if self.optical:
+                self.stop(str(exc))
+            else:
+                self.status.set(str(exc))
 
     def home(self):
         if self.phase == 'home':
@@ -260,11 +306,41 @@ class AngleDemoPanel(ttk.Frame):
         self.record(event)
 
     def log_verification(self, token, success, reason):
-        self.record_verification(dict(event='angle_verification', token=token, success=success, reason=reason,
-                                      tx_completed=self.tx_done, tx_payload_bits=self.tx_payload,
-                                      tx_angles=self.goal, rx_payload_bits=self.decoded_payload,
-                                      rx_angles=self.decoded_pose, commit_sent=self.commit_sent,
-                                      servo_angles=self.write_pose, servo_writes=self.servo_rows))
+        report = dict(event='angle_verification', token=token, success=success, reason=reason,
+                      bit_ms=self.bit_ms, tx_completed=self.tx_done, tx_payload_bits=self.tx_payload,
+                      tx_angles=self.goal, rx_payload_bits=self.decoded_payload,
+                      rx_angles=self.decoded_pose, commit_sent=self.commit_sent,
+                      servo_angles=self.write_pose, servo_writes=self.servo_rows)
+        if self.wave is not None and token == self.wave.token:
+            report['waveform_folder'] = str(self.wave.folder)
+            self.wave_outcome = (success, reason)
+            self.drain_until = time.monotonic() + 3
+            try:
+                self.wave.tx_event(report)
+            except (ValueError, OSError) as exc:
+                self.rx_status.set(f'Rx 파형 결과 기록 오류 · {exc}')
+            if not self.arm_sent or self.wave.end_received:
+                self.finish_wave()
+        self.record_verification(report)
+
+    def finish_wave(self):
+        wave, self.wave = self.wave, None
+        self.rate_box.state(['!disabled'])
+        try:
+            wave.finish(*self.wave_outcome)
+            self.wave_review.analyze(wave.folder)
+        except (ValueError, OSError) as exc:
+            self.rx_status.set(f'Rx 파형 저장 오류 · {exc}')
+
+    def wave_packet(self, event):
+        if self.wave is None or self.wave.token != event.get('token'):
+            return
+        if event['kind'] == 'angle_samples':
+            self.wave.samples(event)
+        else:
+            self.wave.end_samples(event)
+            if self.wave_outcome is not None:
+                self.finish_wave()
 
     def applied_pose(self, pan, tilt):
         self.last_servo_pose = (pan, tilt)
@@ -277,7 +353,19 @@ class AngleDemoPanel(ttk.Frame):
 
     def on_rx(self, event):
         kind = event['kind']
+        if kind in ('angle_samples', 'angle_samples_end'):
+            self.wave_packet(event)
+            return
         self.record(event)
+        if kind == 'armed' and self.wave is not None and self.wave.token == event.get('token'):
+            try:
+                self.wave.tx_event(event)
+            except (ValueError, OSError) as exc:
+                if self.optical:
+                    self.stop(str(exc))
+                else:
+                    self.rx_status.set(str(exc))
+                return
         if kind == 'ready':
             self.rx_status.set('Rx SSH 연결됨')
             self.clear_servo_pose('원위치 또는 두 축 확인을 눌러 시작하세요.')
@@ -319,14 +407,22 @@ class AngleDemoPanel(ttk.Frame):
             self.phase = self.token = None
             self.status.set('원위치 · Rx 서보 명령 적용 확인 (SSH)')
         elif kind == 'armed' and self.phase == 'arming':
+            if (event.get('bit_ms'), event.get('sample_ms'), event.get('interval_ms'),
+                    event.get('bus'), event.get('address'), event.get('config')) != (
+                    self.bit_ms, DECODE_SAMPLE_MS, DECODE_SAMPLE_MS, 3, 0x40, SAMPLE_CONFIG):
+                self.stop('Rx가 확인한 각도 OOK 속도 또는 INA219 설정이 요청과 다릅니다.')
+                return
             self.app.ook.check_ready()
             self.phase = 'optical'
-            self.deadline = time.monotonic() + 9
+            self.deadline = time.monotonic() + 9 + len(self.bits) * self.bit_ms / 1000
             self.status.set('OOK 전송 중 · Rx 광복호 대기')
             if not self.app.send(dict(cmd='laser_pattern', request_id=self.token,
-                                      bits=self.bits, bit_ms=BIT_MS, repeats=1)):
+                                      bits=self.bits, bit_ms=self.bit_ms, repeats=1)):
                 self.stop('광프레임 송신 요청 실패')
         elif kind == 'decoded' and self.phase == 'optical':
+            if not self.wave.end_received:
+                self.stop('Rx 각도 파형 종료 응답 전에 복호 결과가 도착했습니다.')
+                return
             self.decoded_payload = event['rx_payload_bits']
             self.decoded_pose = (event['pan'], event['tilt'])
             self.show_verification()
@@ -405,6 +501,8 @@ class AngleDemoPanel(ttk.Frame):
             return
         self.record(event)
         try:
+            if self.wave is not None and kind == 'laser_pattern':
+                self.wave.tx_event(event)
             if kind == 'error':
                 self.stop('Tx 오류 · ' + event.get('message', ''))
             elif kind == 'laser' and self.phase == 'off':
@@ -413,13 +511,14 @@ class AngleDemoPanel(ttk.Frame):
                     return
                 self.phase = 'arming'
                 self.deadline = time.monotonic() + 5
-                self.rx.send('arm', self.token)
+                self.rx.arm_angle(self.token, self.bit_ms)
+                self.arm_sent = True
                 self.status.set('Rx 광수신 준비 중…')
             elif kind == 'laser_pattern' and self.phase == 'optical' and event.get('state') != 'started':
                 off = event.get('off_call_done_ms')
                 if (event.get('state') != 'completed' or event.get('simulated') is not False
-                        or type(off) not in (int, float) or not math.isfinite(off) or off < len(self.bits) * BIT_MS
-                        or event.get('settings') != dict(bits=self.bits, bit_ms=BIT_MS, repeats=1)):
+                        or type(off) not in (int, float) or not math.isfinite(off) or off < len(self.bits) * self.bit_ms
+                        or event.get('settings') != dict(bits=self.bits, bit_ms=self.bit_ms, repeats=1)):
                     self.stop('Tx 송신 완료 또는 종료 OFF를 확인하지 못했습니다.')
                     return
                 trace = event.get('trace')
@@ -434,7 +533,35 @@ class AngleDemoPanel(ttk.Frame):
         except (ValueError, OSError) as exc:
             self.stop(str(exc))
 
+    def drain_samples(self, rx):
+        # After the operator stops, only consume telemetry for the old request.
+        # Late decode/approval events cannot resume servo commands.
+        for _ in range(rx.events.qsize()):
+            event = rx.events.get_nowait()
+            if event.get('kind') in ('armed', 'angle_samples', 'angle_samples_end'):
+                try:
+                    if event['kind'] == 'armed':
+                        if self.wave is not None and self.wave.token == event.get('token'):
+                            self.wave.tx_event(event)
+                    else:
+                        self.wave_packet(event)
+                except (OSError, ValueError) as exc:
+                    self.rx_status.set(f'Rx 파형 저장 오류 · {exc}')
+
+    def release_wave(self, *, closing=False):
+        if self.draining_rx is not None:
+            rx = self.draining_rx
+            self.drain_samples(rx)
+            if self.wave is not None and (closing or rx.terminal_error or time.monotonic() >= self.drain_until):
+                self.finish_wave()
+            if self.wave is None:
+                rx.close()
+                self.draining_rx = None
+
     def tick(self):
+        if self.wave_review is not None:
+            self.wave_review.poll()
+        self.release_wave()
         if not self.selected:
             return
         ook = self.app.ook
@@ -460,6 +587,9 @@ class AngleDemoPanel(ttk.Frame):
                 self.rx.close()
                 self.rx = None
                 self.clear_servo_pose('SSH 연결 종료')
+        if self.wave is not None and self.wave_outcome is not None and (
+                not self.rx or time.monotonic() >= self.drain_until):
+            self.finish_wave()
         if self.phase == 'check_pause' and time.monotonic() >= self.check_due:
             try:
                 self.next_check_step()
@@ -475,7 +605,10 @@ class AngleDemoPanel(ttk.Frame):
         if self.phase:
             self.stop('탭을 닫아 시연 중지')
         if self.rx:
-            self.rx.close()
+            if self.wave is not None and self.wave_outcome is not None:
+                self.draining_rx = self.rx
+            else:
+                self.rx.close()
             self.rx = None
             self.clear_servo_pose('Rx 미연결')
             self.rx_status.set('Rx 미연결')

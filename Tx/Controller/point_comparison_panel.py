@@ -3,7 +3,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
-from common.angle_demo import BIT_MS, FRAME_LEN, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
+from common.angle_demo import FRAME_LEN, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
 from common.ook_experiment import SYNC_WORD, THRESHOLD_BITS, TRAILING_ZEROS
 from Tx.Controller.angle_demo_panel import AngleDemoPanel
 from Tx.Controller.bench_pose import BenchPoseInputs, frame_pose
@@ -76,6 +76,7 @@ class PointComparisonPanel(AngleDemoPanel):
                            command=lambda a=name, d=offset: self.check_axis(a, d)).pack(side='left')
         self.pan.trace_add('write', self.show_frame)
         self.tilt.trace_add('write', self.show_frame)
+        self.rate_box.bind('<<ComboboxSelected>>', self.show_frame)
         self.show_frame()
 
     def toggle_extra(self):
@@ -93,7 +94,8 @@ class PointComparisonPanel(AngleDemoPanel):
             self.frame_label.set('각도 프레임 · 범위 안의 정수 각도를 입력하세요.')
             return
         payload = payload_from_frame(bits)
-        self.frame_label.set(f'{FRAME_LEN} bit · {1000/BIT_MS:g} bit/s ({BIT_MS} ms/bit) · '
+        bit_ms = self.selected_period()
+        self.frame_label.set(f'{FRAME_LEN} bit · {1000/bit_ms:g} bit/s ({bit_ms} ms/bit) · '
                              f'레벨 {THRESHOLD_BITS} | 동기 {SYNC_WORD} | Pan {payload[:16]} | '
                              f'Tilt {payload[16:]} | 끝 {TRAILING_ZEROS}')
 
@@ -228,6 +230,8 @@ class PointComparisonPanel(AngleDemoPanel):
         started = False
         try:
             self.ready_action()
+            if self.wave is not None:
+                raise ValueError('이전 송신의 Rx 파형을 저장하고 있습니다.')
             if self.tx_controls.light_level():
                 raise ValueError('Laser OFF를 누른 뒤 계산각을 OOK로 전송하세요.')
             self.app.ook.check_ready()
@@ -263,7 +267,14 @@ class PointComparisonPanel(AngleDemoPanel):
         if self.phase != 'off':
             raise ValueError(self.status.get())
         self.run.log_station(dict(event='optical_angle_command', token=self.token, method=self.method,
-                                  pan=pan, tilt=tilt))
+                                  pan=pan, tilt=tilt, bit_ms=self.bit_ms, waveform_folder=str(self.wave.folder)))
+
+    def waveform_context(self):
+        context = super().waveform_context()
+        if self.method in ('xyz', 'yolo'):
+            context.update(method=self.method, station=self.station, point_id=self.station['point_id'],
+                           station_folder=str(self.run.folder))
+        return context
 
     def transmit(self):
         if self.phase or self.off_token:
@@ -482,4 +493,6 @@ class PointComparisonPanel(AngleDemoPanel):
         try:
             self.leave()
         finally:
+            self.release_wave(closing=True)
+            self.wave_review.close()
             self.inputs.close()

@@ -9,16 +9,17 @@ import time
 from collections import deque
 from contextlib import ExitStack, contextmanager
 
-from common.angle_demo import (BIT_MS, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, EXPECTED_SAMPLES,
+from common.angle_demo import (BIT_MS, DECODE_SAMPLE_MS, FRAME_LEN, HOME_PAN, HOME_TILT, EXPECTED_SAMPLES,
                                MIN_VOLTAGE_SAMPLES, MAX_VOLTAGE_GAP_NS, VOLTAGE_SAMPLE_MS,
                                VOLTAGE_SETTLE_NS, VOLTAGE_WINDOW_NS, decode_angles, validate_angles,
-                               validate_jog)
+                               validate_angle_bit_ms, validate_jog)
 from common.ook_frame_decode import PayloadDecoder
 from Rx.arc_bench import PanTilt, i2c_bus
 from Rx.ina219_ook_stream import INA219, JsonPipe, NS_PER_MS, Sampler
 
 
 LISTEN_NS = 7_000_000_000
+ANGLE_BATCH_ROWS = 48
 
 
 @contextmanager
@@ -48,6 +49,8 @@ class Receiver:
         self.sampler = None
         self.decoder = None
         self.pending_payload = None
+        self.angle_rows = None
+        self.angle_count = 0
         self.token = None
         self.armed = False
         self.expires = None
@@ -58,13 +61,21 @@ class Receiver:
 
     def disarm(self):
         resources, self.resources = self.resources, None
+        token, rows = self.token, self.angle_rows
+        self.angle_rows = None
         self.sampler = self.decoder = self.token = None
         self.pending_payload = None
         self.armed = False
         self.expires = None
         self.window_start_ns = None
-        if resources is not None:
-            resources.close()
+        try:
+            if rows is not None:
+                if rows:
+                    self.emit(kind='angle_samples', token=token, rows=rows)
+                self.emit(kind='angle_samples_end', token=token, count=self.angle_count)
+        finally:
+            if resources is not None:
+                resources.close()
 
     def command(self, cmd):
         if self.sampler is not None and self.expires is None:
@@ -74,8 +85,12 @@ class Receiver:
             raise ValueError('Expected a command object over SSH.')
         op = cmd.get('cmd')
         fields = {'cmd', 'token'}
+        bit_ms = BIT_MS
         if op == 'start':
             fields.add('interval_ms')
+        elif op == 'arm' and 'bit_ms' in cmd:
+            fields.add('bit_ms')
+            bit_ms = validate_angle_bit_ms(cmd['bit_ms'])
         elif op == 'jog':
             if self.token is not None:
                 raise CaptureConflict('Rx 수신 또는 전압 측정을 마친 뒤 서보를 점검하세요.')
@@ -97,8 +112,13 @@ class Receiver:
                 sampler.command(dict(cmd='start', token=token, interval_ms=interval_ms))
                 now = self.clock()
                 if op == 'arm':
-                    self.decoder = PayloadDecoder(BIT_MS)
-                    self.expires = now + LISTEN_NS
+                    self.decoder = PayloadDecoder(bit_ms)
+                    self.angle_bit_ms = bit_ms
+                    # A legacy arm without bit_ms expects the original control-only replies.
+                    if 'bit_ms' in cmd:
+                        self.angle_rows = []
+                        self.angle_count = 0
+                    self.expires = now + max(LISTEN_NS, (FRAME_LEN * bit_ms + 2000) * NS_PER_MS)
                 elif op == 'measure':
                     self.window_start_ns = now + VOLTAGE_SETTLE_NS
                     self.expires = self.window_start_ns + VOLTAGE_WINDOW_NS
@@ -163,6 +183,9 @@ class Receiver:
             self.servo_touched = False  # A failed release can still be retried on shutdown.
 
     def on_sample(self, **sample):
+        if sample['kind'] == 'started':
+            self.sampler_settings = {key: sample[key] for key in ('bus', 'address', 'config', 'interval_ms')}
+            return
         if sample['kind'] != 'sample' or self.token is None:
             return
         if self.window_start_ns is not None:
@@ -176,15 +199,24 @@ class Receiver:
                 if sample['bus_raw'] == 8191:
                     raise ValueError('INA219 전압이 포화됐습니다.')
             return
+        code = sample['bus_raw']
+        if self.angle_rows is not None:
+            self.angle_rows.append([sample['seq'], sample['rx_monotonic_ns'], code])
+            self.angle_count += 1
+            if len(self.angle_rows) == ANGLE_BATCH_ROWS:
+                self.emit(kind='angle_samples', token=self.token, rows=self.angle_rows)
+                self.angle_rows = []
         if self.clock() >= self.expires:
             self.timeout()
             return
-        code = sample['bus_raw']
         if code == 8191:
             raise ValueError('INA219 전압이 포화됐습니다.')
         if not self.armed:
             self.armed = True
-            self.emit(kind='armed', token=self.token)
+            settings = (dict(self.sampler_settings, bit_ms=self.angle_bit_ms,
+                             sample_ms=self.sampler_settings['interval_ms'])
+                        if self.angle_rows is not None else {})
+            self.emit(kind='armed', token=self.token, **settings)
         payload = self.decoder.feed(sample['rx_monotonic_ns'] / 1e9, code * 0.004)
         if payload is not None:
             token = self.token

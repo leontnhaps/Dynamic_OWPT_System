@@ -1,3 +1,4 @@
+import json
 import unittest
 from contextlib import contextmanager
 from unittest.mock import Mock, patch
@@ -5,7 +6,7 @@ from unittest.mock import Mock, patch
 from common.angle_demo import (BIT_MS, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, encode_angles,
                                payload_from_frame)
 from common.ook_experiment import make_frame
-from Rx.angle_demo import CaptureConflict, LISTEN_NS, Receiver, ServoWrites, serve
+from Rx.angle_demo import ANGLE_BATCH_ROWS, CaptureConflict, LISTEN_NS, Receiver, ServoWrites, serve
 from Rx.arc_bench import PanTilt
 from Rx.ina219_ook_stream import BUS_VOLTAGE, CONFIG, INA219, SAMPLE_CONFIG
 
@@ -42,10 +43,10 @@ class ReceiverTests(unittest.TestCase):
                            sensor_context, lambda: self.now)
         self.addCleanup(self.rx.disarm)
 
-    def samples(self, bits):
+    def samples(self, bits, bit_ms=BIT_MS):
         for bit in bits:
             self.sensor.registers[BUS_VOLTAGE] = (550 if bit == '1' else 220) << 3
-            for _ in range(BIT_MS // DECODE_SAMPLE_MS):
+            for _ in range(bit_ms // DECODE_SAMPLE_MS):
                 self.now += DECODE_SAMPLE_MS * 1_000_000
                 self.rx.tick()
 
@@ -168,6 +169,75 @@ class ReceiverTests(unittest.TestCase):
             self.rx.command(dict(cmd='commit', token='T'))
         angle_writes = [c for c in self.bus.write.call_args_list if len(c.args[0]) == 5]
         self.assertEqual(len(angle_writes), 2)
+
+    def test_selected_rate_reports_all_actual_sample_times_and_codes_before_decode(self):
+        start = self.now
+        token = '광' * 128
+        bit_ms = 6
+        bits = '000' + encode_angles(103, 24) + '000'
+        self.rx.command(dict(cmd='arm', token=token, bit_ms=bit_ms))
+        self.samples(bits, bit_ms)
+        self.assertEqual(self.events[0], dict(kind='armed', token=token, bit_ms=6, sample_ms=1,
+                                              bus=3, address=0x40, config=SAMPLE_CONFIG, interval_ms=1))
+        self.assertEqual([e['kind'] for e in self.events[-2:]], ['angle_samples_end', 'decoded'])
+        batches = self.events[1:-2]
+        self.assertTrue(all(b['kind'] == 'angle_samples' and 1 <= len(b['rows']) <= ANGLE_BATCH_ROWS
+                            and b['token'] == token and len(json.dumps(b).encode()) < 4096 for b in batches))
+        rows = [r for b in batches for r in b['rows']]
+        self.assertGreaterEqual(len(rows), 65 * bit_ms)
+        self.assertEqual(self.events[-2]['count'], len(rows))
+        for i, (seq, ns, code) in enumerate(rows):
+            self.assertEqual((seq, ns, code), (i, start+(i+1)*1_000_000, 550 if bits[i//bit_ms]=='1' else 220))
+        self.assertEqual(self.events[-1]['rx_payload_bits'], payload_from_frame(encode_angles(103, 24)))
+        self.assertFalse(self.bus.write.called)
+        self.rx.command(dict(cmd='commit', token=token))
+        self.assertEqual(self.events[-1]['kind'], 'applied')
+        self.assertEqual(sum(e['kind'] == 'angle_samples_end' for e in self.events), 1)
+
+    def test_timeout_and_cancel_keep_partial_rows_and_acquisition_gaps(self):
+        for op in ('timeout', 'cancel'):
+            with self.subTest(op=op):
+                self.events.clear()
+                self.rx.command(dict(cmd='arm', token='capture', bit_ms=8))
+                self.samples('00000000')
+                self.now += 12_000_000
+                gap_ns = self.now
+                self.rx.tick()
+                if op == 'timeout':
+                    self.now += LISTEN_NS
+                    self.rx.tick()
+                else:
+                    self.rx.command(dict(cmd='cancel', token='capture'))
+                rows = [r for e in self.events if e['kind'] == 'angle_samples' for r in e['rows']]
+                self.assertEqual(rows[-1], [75, gap_ns, 220])
+                self.assertEqual(self.events[-2], dict(kind='angle_samples_end', token='capture', count=65))
+                self.assertEqual(self.events[-1]['kind'], 'timeout' if op == 'timeout' else 'cancelled')
+                self.assertFalse(self.bus.write.called)
+                self.assertFalse(self.sensor_open)
+
+    def test_slowest_selected_frame_has_listen_margin_and_invalid_rate_never_arms(self):
+        for bad in (True, 7, 8.5):
+            with self.assertRaises(ValueError):
+                self.rx.command(dict(cmd='arm', token='bad', bit_ms=bad))
+            self.assertFalse(self.sensor_open)
+        self.rx.command(dict(cmd='arm', token='slow', bit_ms=100))
+        self.assertGreaterEqual(self.rx.expires - self.now, (65 * 100 + 2000) * 1_000_000)
+        self.assertEqual(self.rx.wait_seconds(), .001)
+        self.assertFalse(self.bus.write.called)
+
+    def test_sampler_error_preserves_first_saturated_sample_without_arming_tx(self):
+        self.rx.command(dict(cmd='arm', token='T', bit_ms=8))
+        self.sensor.registers[BUS_VOLTAGE] = 8191 << 3
+        self.now += 1_000_000
+        out = Mock(pending=False)
+        out.emit.side_effect = lambda **event: self.events.append(event)
+        with patch('Rx.angle_demo.select.select', side_effect=[([],[],[]), ([123],[],[])]), patch(
+                'Rx.angle_demo.os.read', return_value=b''):
+            serve(self.rx, 123, out)
+        self.assertEqual([e['kind'] for e in self.events], ['ready', 'angle_samples', 'angle_samples_end', 'error'])
+        self.assertEqual(self.events[1]['rows'], [[0, self.now, 8191]])
+        self.assertEqual(self.events[-1]['token'], 'T')
+        self.assertFalse(self.bus.write.called)
 
     def test_decoded_pose_cannot_move_after_cancel_or_expiry(self):
         for outcome in ('cancel', 'tick', 'late_commit', 'disconnect'):

@@ -1,20 +1,50 @@
+import csv
+import json
 import queue
+import tempfile
 import time
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import Mock
 
-from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
+from common.angle_demo import ANGLE_BIT_PERIODS, BIT_MS, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
+from Rx.ina219_ook_stream import SAMPLE_CONFIG
 from Tx.Controller.angle_demo_panel import AngleDemoPanel
+
+
+def init_wave_test(case, panel):
+    panel.rate_box, panel.wave_review, panel.target = Mock(), Mock(), Mock()
+    panel.target.get.return_value = 'unit@loopback'
+    panel.rate_box.current.return_value = ANGLE_BIT_PERIODS.index(BIT_MS)
+    def cleanup():
+        if panel.wave is not None and not panel.wave.closed:
+            panel.wave.file.close()
+    case.addCleanup(cleanup)
+
+
+def armed(token, period=BIT_MS):
+    return dict(kind='armed', token=token, bit_ms=period, sample_ms=1, interval_ms=1,
+                bus=3, address=0x40, config=SAMPLE_CONFIG)
+
+
+def waveform_receipt(panel, token):
+    panel.on_rx(dict(kind='angle_samples', token=token, rows=[[0, 1000000, 100], [2, 3000000, 200]],
+                     pc_receive_monotonic_ns=590000, pc_receive_unix_ns=900000))
+    panel.on_rx(dict(kind='angle_samples_end', token=token, count=2))
 
 
 class DemoTabTests(unittest.TestCase):
     def setUp(self):
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(work.cleanup)
         self.panel = p = AngleDemoPanel.__new__(AngleDemoPanel)
         p.rx = Mock(connected=True, terminal_error=None, events=queue.Queue())
         p.app = SimpleNamespace(send=Mock(return_value=True), ook=Mock(
             online=True, hardware={'simulated': False, 'capabilities': ['laser_pattern']}),
             current=(None, None, time.monotonic()))
+        p.app.stage_dir = lambda stage: Path(work.name) / stage
+        init_wave_test(self, p)
         p.record = Mock()
         p.phase = p.token = None
         p.pan, p.tilt = Mock(), Mock()
@@ -23,19 +53,21 @@ class DemoTabTests(unittest.TestCase):
         p.applied, p.status, p.rx_status, p.off_status, p.verification = (Mock() for _ in range(5))
         p.selected = p.prepared = True
 
-    def start(self):
+    def start(self, period=BIT_MS):
         p = self.panel
+        p.rate_box.current.return_value = ANGLE_BIT_PERIODS.index(period)
         p.transmit()
         token = p.token
         self.assertEqual(p.phase, 'off')
         p.event(dict(event='laser', request_id=token, laser_gpio_level=0))
-        p.rx.send.assert_called_once_with('arm', token)
-        p.on_rx(dict(kind='armed', token=token))
+        p.rx.arm_angle.assert_called_once_with(token, period)
+        p.on_rx(armed(token, period))
         p.app.send.assert_called_with(dict(cmd='laser_pattern', request_id=token,
-                                           bits=encode_angles(108, 19), bit_ms=BIT_MS, repeats=1))
+                                           bits=encode_angles(108, 19), bit_ms=period, repeats=1))
         return token
 
     def optical_receipts(self, token):
+        waveform_receipt(self.panel, token)
         bits = encode_angles(108, 19)
         decoded = dict(kind='decoded', token=token, pan=108, tilt=19, rx_payload_bits=payload_from_frame(bits))
         applied = dict(decoded, kind='applied', servo_writes=[
@@ -55,15 +87,15 @@ class DemoTabTests(unittest.TestCase):
                 complete, decoded, applied = self.optical_receipts(token)
                 if optical_first:
                     p.on_rx(decoded)
-                    p.rx.send.assert_called_once_with('arm', token)
+                    p.rx.send.assert_not_called()
                     p.event(complete)
                 else:
                     p.event(complete)
-                    p.rx.send.assert_called_once_with('arm', token)
+                    p.rx.send.assert_not_called()
                     p.on_rx(decoded)
                 p.on_rx(decoded)
                 p.event(complete)
-                self.assertEqual(p.rx.send.call_count, 2)
+                self.assertEqual(p.rx.send.call_count, 1)
                 p.rx.send.assert_called_with('commit', token)
                 self.assertEqual(p.phase, 'optical')
                 p.on_rx(applied)
@@ -74,6 +106,46 @@ class DemoTabTests(unittest.TestCase):
                 self.assertEqual(report['rx_payload_bits'], report['tx_payload_bits'])
                 self.assertEqual(report['rx_angles'], report['servo_angles'])
                 self.assertIn('32/32비트 일치', p.verification.set.call_args.args[0])
+
+    def test_selected_rate_is_immutable_until_recording_finishes(self):
+        p = self.panel
+        token = self.start(20)
+        folder = p.wave.folder
+        p.rate_box.current.return_value = ANGLE_BIT_PERIODS.index(8)
+        self.assertEqual(p.bit_ms, 20)
+        self.assertEqual(p.app.send.call_args.args[0]['bit_ms'], 20)
+        waveform_receipt(p, token)
+        p.on_rx(dict(kind='timeout', token=token))
+        p.wave_review.analyze.assert_called_with(folder)
+        summary = json.loads((folder / 'summary.json').read_text(encoding='utf-8'))
+        self.assertFalse(summary['angle_verified'])
+        self.assertTrue(summary['waveform_complete'])
+        self.assertEqual(summary['bit_ms'], 20)
+        with (folder / 'rx.csv').open(encoding='utf-8', newline='') as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual([int(row['rx_monotonic_ns']) for row in rows], [1000000, 3000000])
+        self.assertEqual([float(row['pv_V']) for row in rows], [.4, .8])
+
+    def test_stop_preserves_cancelled_capture_until_tail_and_ignores_foreign_samples(self):
+        p = self.panel
+        token = self.start()
+        folder = p.wave.folder
+        p.stop('사용자 중지')
+        self.assertIsNotNone(p.wave)
+        waveform_receipt(p, 'other')
+        waveform_receipt(p, token)
+        p.wave_review.analyze.assert_called_once_with(folder)
+        self.assertIsNone(p.wave)
+        self.assertFalse(json.loads((folder/'summary.json').read_text(encoding='utf-8'))['angle_verified'])
+
+    def test_rate_mismatch_blocks_optical_transmission(self):
+        p = self.panel
+        p.transmit()
+        token = p.token
+        p.event(dict(event='laser', request_id=token, laser_gpio_level=0))
+        p.on_rx(armed(token, 5))
+        self.assertIsNone(p.phase)
+        self.assertNotIn('laser_pattern', [call.args[0]['cmd'] for call in p.app.send.call_args_list])
 
     def test_payload_mismatch_or_bad_tx_trace_prevents_commit(self):
         for problem in ('bits', 'pose', 'trace', 'short'):

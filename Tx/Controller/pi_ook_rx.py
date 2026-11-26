@@ -176,8 +176,14 @@ class PiCapture:
         self._write_config()
 
     def write_sample(self, event):
+        if not self.config['interval_confirmed']:
+            self.invalid_lines += 1
+            raise OSError('INA219 sample received before configuration confirmation')
+        self._write_raw_sample(event)
+
+    def _write_raw_sample(self, event):
         seq, ns, code = (event.get(k) for k in ('seq', 'rx_monotonic_ns', 'bus_raw'))
-        if (not self.config['interval_confirmed'] or any(type(value) is not int for value in (seq, ns, code))
+        if (any(type(value) is not int for value in (seq, ns, code))
                 or seq < 0 or ns < 0 or not 0 <= code <= 8191
                 or (self.last_seq is not None and (seq <= self.last_seq or ns <= self.last_ns))):
             self.invalid_lines += 1

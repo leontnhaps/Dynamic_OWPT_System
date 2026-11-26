@@ -10,6 +10,7 @@ from unittest.mock import Mock
 from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
 from Tx.Controller.point_comparison_panel import METHODS, PointComparisonPanel
 from Tx.Controller.station_tx_controls import StationTxControls
+from tests.test_angle_demo_panel import armed, init_wave_test, waveform_receipt
 from tests.test_ook_panel import Value
 
 
@@ -26,6 +27,7 @@ class StationaryPointFlow(unittest.TestCase):
             stage_dir=lambda stage: self.root / stage, send=Mock(return_value=True),
             ook=Mock(online=True, hardware={'simulated': False, 'capabilities': ['laser_pattern']}))
         p.rx = Mock(connected=True, terminal_error=None, events=queue.Queue())
+        init_wave_test(self, p)
         p.phase = p.token = p.off_token = p.logpath = None
         p.run = p.station = p.method = p.station_view = None
         p.pose_method = p.pose_source = p.pose_frame = p.last_servo_pose = None
@@ -94,13 +96,14 @@ class StationaryPointFlow(unittest.TestCase):
         self.assertEqual(p.phase, 'off', p.status.get())
         token = p.token
         p.event(dict(event='laser', request_id=token, laser_gpio_level=0))
-        p.rx.send.assert_called_with('arm', token)
-        p.on_rx(dict(kind='armed', token=token))
+        p.rx.arm_angle.assert_called_with(token, BIT_MS)
+        p.on_rx(armed(token))
         goal = (103, 24) if method == 'xyz' else (108, 21)
         bits = encode_angles(*goal)
         pattern = dict(bits=bits, bit_ms=BIT_MS, repeats=1)
         p.app.send.assert_called_with(dict(cmd='laser_pattern', request_id=token, **pattern))
         decoded = dict(kind='decoded', token=token, pan=goal[0], tilt=goal[1], rx_payload_bits=payload_from_frame(bits))
+        waveform_receipt(p, token)
         p.on_rx(decoded)
         p.event(dict(event='laser_pattern', request_id=token, state='completed', simulated=False,
                      settings=pattern, off_call_done_ms=len(bits)*BIT_MS + .1,
@@ -227,7 +230,8 @@ class StationaryPointFlow(unittest.TestCase):
         p.move_to('xyz')
         token = p.token
         p.event(dict(event='laser', request_id=token, laser_gpio_level=0))
-        p.on_rx(dict(kind='armed', token=token))
+        p.on_rx(armed(token))
+        waveform_receipt(p, token)
         p.on_rx(dict(kind='decoded', token=token, pan=104, tilt=24,
                      rx_payload_bits=payload_from_frame(encode_angles(104, 24))))
         self.assertIsNone(p.phase)

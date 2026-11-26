@@ -43,6 +43,32 @@ class DemoSshTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.rx._receive(json.dumps(dict(event, **override)))
 
+    def test_selected_rate_and_raw_angle_chunks_round_trip_without_pose_fields(self):
+        self.rx._receive(b'{"kind":"ready"}')
+        self.rx.events.get_nowait()
+        self.rx.arm_angle('A', 8)
+        self.assertEqual(self.rx.commands.get_nowait(), dict(cmd='arm', token='A', bit_ms=8))
+        for invalid in (0, 7, True, 2.1):
+            with self.assertRaises(ValueError):
+                self.rx.arm_angle('A', invalid)
+        with self.assertRaises(ValueError):
+            self.rx.arm_angle('', 8)
+        armed = dict(kind='armed', token='A', sample_ms=1, bit_ms=8, interval_ms=1,
+                     bus=3, address=0x40, config=8606)
+        batch = dict(kind='angle_samples', token='A', rows=[[0, 5_000_000, 410], [4, 9_000_000, 450]])
+        end = dict(kind='angle_samples_end', token='A', count=2)
+        for event in (armed, batch, end):
+            self.rx._receive(json.dumps(event))
+            got = self.rx.events.get_nowait()
+            self.assertEqual({key: got[key] for key in event}, event)
+            self.assertIn('pc_receive_monotonic_ns', got)
+        for event in (dict(armed, sample_ms=2), dict(armed, bit_ms=False), dict(armed, config=0),
+                      dict(batch, rows=[]), dict(batch, rows=[[0, 5, 8192]]),
+                      dict(batch, rows=[[True, 5, 1]]), dict(batch, rows=[[0, 1]]),
+                      dict(end, count=False), dict(end, count=-1)):
+            with self.assertRaises(OSError):
+                self.rx._receive(json.dumps(event))
+
     def test_jog_carries_only_bounded_relative_steps_and_checks_reply(self):
         self.rx._receive(b'{"kind":"ready"}')
         self.rx.events.get_nowait()

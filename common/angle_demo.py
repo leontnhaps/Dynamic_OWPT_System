@@ -9,6 +9,8 @@ RX_VIEWPOINT = '셀 뒤에서 빛이 오는 쪽을 보는 기준'
 MAX_PAN = 180
 MAX_TILT = 35
 BIT_MS = 8
+# Bit periods actually exercised in the Pi reference and limit runs at M6-4.
+ANGLE_BIT_PERIODS = (100, 50, 30, 20, 15, 14, 12, 10, 8, 6, 5, 4, 3, 2, 1)
 DECODE_SAMPLE_MS = 1
 VOLTAGE_SAMPLE_MS = 5
 VOLTAGE_SETTLE_NS = 500_000_000
@@ -17,6 +19,12 @@ EXPECTED_SAMPLES = VOLTAGE_WINDOW_NS // (VOLTAGE_SAMPLE_MS * 1_000_000)
 MIN_VOLTAGE_SAMPLES = EXPECTED_SAMPLES * 9 // 10
 MAX_VOLTAGE_GAP_NS = 50_000_000
 FRAME_LEN = len(HEADER) + PAYLOAD_BITS + len(TRAILING_ZEROS)
+
+
+def validate_angle_bit_ms(value):
+    if type(value) is not int or value not in ANGLE_BIT_PERIODS:
+        raise ValueError('각도 OOK는 속도 시험에서 측정한 비트 길이를 선택하세요.')
+    return value
 
 
 def validate_angles(pan, tilt):
