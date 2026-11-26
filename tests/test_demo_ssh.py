@@ -24,13 +24,15 @@ class DemoSshTests(unittest.TestCase):
 
     def test_command_channel_cannot_carry_a_pose(self):
         self.rx._receive(b'{"kind":"ready"}')
-        for command in ('arm', 'home', 'cancel', 'measure', 'commit'):
+        for command in ('arm', 'home', 'cancel', 'measure', 'finish_angle', 'commit'):
             self.rx.send(command, 'request-1')
             self.assertEqual(self.rx.commands.get_nowait(), {'cmd': command, 'token': 'request-1'})
         with self.assertRaises(ValueError):
             self.rx.send('move 103 20', 'request-1')
         with self.assertRaises(ValueError):
             self.rx.send('commit 103 20', 'request-1')
+        with self.assertRaises(ValueError):
+            self.rx.send('finish_angle 103 20', 'request-1')
 
     def test_decoded_can_report_corrupted_uint16_but_applied_must_be_in_range(self):
         self.rx._receive(b'{"kind":"ready"}')

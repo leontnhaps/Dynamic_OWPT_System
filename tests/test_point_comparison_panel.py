@@ -10,7 +10,7 @@ from unittest.mock import Mock
 from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
 from Tx.Controller.point_comparison_panel import METHODS, PointComparisonPanel
 from Tx.Controller.station_tx_controls import StationTxControls
-from tests.test_angle_demo_panel import armed, init_wave_test, waveform_receipt
+from tests.test_angle_demo_panel import armed, completed_pattern, decoded_frame, init_wave_test, waveform_receipt
 from tests.test_ook_panel import Value
 
 
@@ -102,12 +102,11 @@ class StationaryPointFlow(unittest.TestCase):
         bits = encode_angles(*goal)
         pattern = dict(bits=bits, bit_ms=BIT_MS, repeats=1)
         p.app.send.assert_called_with(dict(cmd='laser_pattern', request_id=token, **pattern))
-        decoded = dict(kind='decoded', token=token, pan=goal[0], tilt=goal[1], rx_payload_bits=payload_from_frame(bits))
+        decoded = decoded_frame(token, *goal)
+        p.event(completed_pattern(token, bits))
+        p.rx.send.assert_called_with('finish_angle', token)
         waveform_receipt(p, token)
         p.on_rx(decoded)
-        p.event(dict(event='laser_pattern', request_id=token, state='completed', simulated=False,
-                     settings=pattern, off_call_done_ms=len(bits)*BIT_MS + .1,
-                     trace=[dict(index=i, level=int(bit)) for i, bit in enumerate(bits)]))
         p.rx.send.assert_called_with('commit', token)
         self.assertIsNone(p.pose_method)
         p.on_rx(dict(decoded, kind='applied', servo_writes=[
@@ -231,9 +230,9 @@ class StationaryPointFlow(unittest.TestCase):
         token = p.token
         p.event(dict(event='laser', request_id=token, laser_gpio_level=0))
         p.on_rx(armed(token))
+        p.event(completed_pattern(token, encode_angles(103, 24)))
         waveform_receipt(p, token)
-        p.on_rx(dict(kind='decoded', token=token, pan=104, tilt=24,
-                     rx_payload_bits=payload_from_frame(encode_angles(104, 24))))
+        p.on_rx(decoded_frame(token, 104, 24))
         self.assertIsNone(p.phase)
         self.assertIsNone(p.pose_method)
         self.assertNotIn('commit', [c.args[0] for c in p.rx.send.call_args_list])

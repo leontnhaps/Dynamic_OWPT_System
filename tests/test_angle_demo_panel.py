@@ -6,7 +6,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 from common.angle_demo import ANGLE_BIT_PERIODS, BIT_MS, HOME_PAN, HOME_TILT, encode_angles, payload_from_frame
 from Rx.ina219_ook_stream import SAMPLE_CONFIG
@@ -25,7 +25,21 @@ def init_wave_test(case, panel):
 
 def armed(token, period=BIT_MS):
     return dict(kind='armed', token=token, bit_ms=period, sample_ms=1, interval_ms=1,
-                bus=3, address=0x40, config=SAMPLE_CONFIG)
+                bus=3, address=0x40, config=SAMPLE_CONFIG, capture_mode='post_tx')
+
+
+def decoded_frame(token, pan, tilt):
+    payload = payload_from_frame(encode_angles(pan, tilt))
+    return dict(kind='decoded', token=token, pan=pan, tilt=tilt, rx_payload_bits=payload,
+                frame_check=dict(verified=True, header_verified=True, payload_bits=payload,
+                                 tail_bits='0000', reason=''))
+
+
+def completed_pattern(token, bits, bit_ms=BIT_MS):
+    return dict(event='laser_pattern', state='completed', simulated=False, request_id=token,
+                off_call_done_ms=len(bits)*bit_ms + 0.1,
+                trace=[dict(index=i, level=int(bit)) for i, bit in enumerate(bits)],
+                settings=dict(bits=bits, bit_ms=bit_ms, repeats=1))
 
 
 def waveform_receipt(panel, token):
@@ -67,45 +81,73 @@ class DemoTabTests(unittest.TestCase):
         return token
 
     def optical_receipts(self, token):
-        waveform_receipt(self.panel, token)
         bits = encode_angles(108, 19)
-        decoded = dict(kind='decoded', token=token, pan=108, tilt=19, rx_payload_bits=payload_from_frame(bits))
+        decoded = decoded_frame(token, 108, 19)
         applied = dict(decoded, kind='applied', servo_writes=[
             ['1.00', '1.01', 0, 108, '', 'applied'], ['1.01', '1.02', 1, 19, '', 'applied']])
-        tx = dict(event='laser_pattern', state='completed', simulated=False, request_id=token,
-                  off_call_done_ms=len(bits)*BIT_MS + 0.1,
-                  trace=[dict(index=i, level=int(bit)) for i, bit in enumerate(bits)],
-                  settings=dict(bits=bits, bit_ms=BIT_MS, repeats=1))
-        return tx, decoded, applied
+        return completed_pattern(token, bits), decoded, applied
 
-    def test_success_requires_verified_tx_decode_and_matching_writes_in_either_order(self):
-        for optical_first in (False, True):
-            with self.subTest(optical_first=optical_first):
+    def test_verified_tx_finishes_capture_once_and_only_matching_decode_approves(self):
+        p = self.panel
+        token = self.start()
+        complete, decoded, applied = self.optical_receipts(token)
+        p.rx.send.assert_not_called()
+        p.event(complete)
+        p.event(complete)
+        p.rx.send.assert_called_once_with('finish_angle', token)
+        waveform_receipt(p, token)
+        p.on_rx(decoded)
+        p.on_rx(decoded)
+        p.event(complete)
+        self.assertEqual(p.rx.send.call_args_list, [call('finish_angle', token), call('commit', token)])
+        self.assertEqual(p.phase, 'optical')
+        p.on_rx(applied)
+        self.assertIsNone(p.phase)
+        self.assertIn('OOK 수신 성공', p.status.set.call_args.args[0])
+        report = p.record.call_args.args[0]
+        self.assertTrue(report['success'])
+        self.assertEqual(report['rx_payload_bits'], report['tx_payload_bits'])
+        self.assertEqual(report['rx_angles'], report['servo_angles'])
+        self.assertEqual(report['frame_check'], decoded['frame_check'])
+        self.assertIn('32/32비트 일치', p.verification.set.call_args.args[0])
+
+    def test_missing_tail_reports_observed_payload_but_cannot_move(self):
+        p = self.panel
+        token = self.start()
+        folder = p.wave.folder
+        complete, decoded, applied = self.optical_receipts(token)
+        p.event(complete)
+        waveform_receipt(p, token)
+        frame_check = dict(decoded['frame_check'], verified=False, tail_bits='000?',
+                           reason='끝 비트의 표본이 없습니다.')
+        p.on_rx(dict(kind='error', token=token, frame_check=frame_check, message=frame_check['reason']))
+        p.on_rx(decoded)
+        p.on_rx(applied)
+        self.assertEqual(p.rx.send.call_args_list, [call('finish_angle', token), call('cancel', token)])
+        self.assertIn('32/32비트 일치', p.verification.set.call_args.args[0])
+        self.assertIn('000?', p.verification.set.call_args.args[0])
+        self.assertIn('끝 비트', p.status.set.call_args.args[0])
+        self.assertIsNone(p.decoded_pose)
+        self.assertIsNone(p.write_pose)
+        summary = json.loads((folder / 'summary.json').read_text(encoding='utf-8'))
+        self.assertFalse(summary['angle_verified'])
+        self.assertEqual(summary['frame_check'], frame_check)
+
+    def test_early_decode_before_finish_or_capture_end_cannot_move(self):
+        for sent_finish in (False, True):
+            with self.subTest(sent_finish=sent_finish):
                 self.setUp()
                 p = self.panel
                 token = self.start()
                 complete, decoded, applied = self.optical_receipts(token)
-                if optical_first:
-                    p.on_rx(decoded)
-                    p.rx.send.assert_not_called()
+                if sent_finish:
                     p.event(complete)
-                else:
-                    p.event(complete)
-                    p.rx.send.assert_not_called()
-                    p.on_rx(decoded)
                 p.on_rx(decoded)
                 p.event(complete)
-                self.assertEqual(p.rx.send.call_count, 1)
-                p.rx.send.assert_called_with('commit', token)
-                self.assertEqual(p.phase, 'optical')
+                waveform_receipt(p, token)
                 p.on_rx(applied)
+                self.assertFalse(p.commit_sent)
                 self.assertIsNone(p.phase)
-                self.assertIn('OOK 수신 성공', p.status.set.call_args.args[0])
-                report = p.record.call_args.args[0]
-                self.assertTrue(report['success'])
-                self.assertEqual(report['rx_payload_bits'], report['tx_payload_bits'])
-                self.assertEqual(report['rx_angles'], report['servo_angles'])
-                self.assertIn('32/32비트 일치', p.verification.set.call_args.args[0])
 
     def test_selected_rate_is_immutable_until_recording_finishes(self):
         p = self.panel
@@ -164,6 +206,7 @@ class DemoTabTests(unittest.TestCase):
                 else:
                     complete['off_call_done_ms'] = 0
                 p.event(complete)
+                waveform_receipt(p, token)
                 p.on_rx(decoded)
                 self.assertFalse(p.commit_sent)
                 self.assertIsNone(p.phase)
@@ -179,6 +222,7 @@ class DemoTabTests(unittest.TestCase):
                 complete, decoded, applied = self.optical_receipts(token)
                 p.on_rx(dict(decoded, token='stale'))
                 p.event(complete)
+                waveform_receipt(p, token)
                 self.assertFalse(p.commit_sent)
                 if problem != 'early':
                     p.on_rx(decoded)

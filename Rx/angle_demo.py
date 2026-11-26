@@ -13,7 +13,7 @@ from common.angle_demo import (BIT_MS, DECODE_SAMPLE_MS, FRAME_LEN, HOME_PAN, HO
                                MIN_VOLTAGE_SAMPLES, MAX_VOLTAGE_GAP_NS, VOLTAGE_SAMPLE_MS,
                                VOLTAGE_SETTLE_NS, VOLTAGE_WINDOW_NS, decode_angles, validate_angles,
                                validate_angle_bit_ms, validate_jog)
-from common.ook_frame_decode import PayloadDecoder
+from common.ook_frame_decode import PayloadDecoder, decode_captured_frame
 from Rx.arc_bench import PanTilt, i2c_bus
 from Rx.ina219_ook_stream import INA219, JsonPipe, NS_PER_MS, Sampler
 
@@ -50,7 +50,7 @@ class Receiver:
         self.decoder = None
         self.pending_payload = None
         self.angle_rows = None
-        self.angle_count = 0
+        self.finish_after_ns = None
         self.token = None
         self.armed = False
         self.expires = None
@@ -63,19 +63,21 @@ class Receiver:
         resources, self.resources = self.resources, None
         token, rows = self.token, self.angle_rows
         self.angle_rows = None
+        self.finish_after_ns = None
         self.sampler = self.decoder = self.token = None
         self.pending_payload = None
         self.armed = False
         self.expires = None
         self.window_start_ns = None
         try:
-            if rows is not None:
-                if rows:
-                    self.emit(kind='angle_samples', token=token, rows=rows)
-                self.emit(kind='angle_samples_end', token=token, count=self.angle_count)
-        finally:
             if resources is not None:
                 resources.close()
+        finally:
+            if rows is not None:
+                remainder = len(rows) % ANGLE_BATCH_ROWS
+                if remainder:
+                    self.emit(kind='angle_samples', token=token, rows=rows[-remainder:])
+                self.emit(kind='angle_samples_end', token=token, count=len(rows))
 
     def command(self, cmd):
         if self.sampler is not None and self.expires is None:
@@ -112,12 +114,12 @@ class Receiver:
                 sampler.command(dict(cmd='start', token=token, interval_ms=interval_ms))
                 now = self.clock()
                 if op == 'arm':
-                    self.decoder = PayloadDecoder(bit_ms)
                     self.angle_bit_ms = bit_ms
-                    # A legacy arm without bit_ms expects the original control-only replies.
                     if 'bit_ms' in cmd:
                         self.angle_rows = []
-                        self.angle_count = 0
+                    else:
+                        # Older controllers wait for an unsolicited decode and never send finish_angle.
+                        self.decoder = PayloadDecoder(bit_ms)
                     self.expires = now + max(LISTEN_NS, (FRAME_LEN * bit_ms + 2000) * NS_PER_MS)
                 elif op == 'measure':
                     self.window_start_ns = now + VOLTAGE_SETTLE_NS
@@ -127,6 +129,20 @@ class Receiver:
                     self.voltage_count = 0
                 self.sampler, self.token = sampler, token
                 self.resources = stack.pop_all()
+        elif op == 'finish_angle':
+            if token != self.token or self.angle_rows is None or not self.armed:
+                raise CaptureConflict('종료할 각도 OOK 수신 요청이 없습니다.')
+            now = self.clock()
+            if now >= self.expires:
+                self.timeout()
+                return
+            earliest_end = self.angle_rows[0][1] + FRAME_LEN * self.angle_bit_ms * NS_PER_MS
+            if now < earliest_end:
+                raise CaptureConflict('각도 프레임 길이보다 일찍 송신 종료 요청이 도착했습니다.')
+            if self.finish_after_ns is None:
+                # Tx has reported final OFF. Keep reading until an actual post-frame
+                # sample is available; no PC/Rx clock synchronization is assumed.
+                self.finish_after_ns = now + 2 * DECODE_SAMPLE_MS * NS_PER_MS
         elif op == 'commit':
             if token != self.token or self.pending_payload is None:
                 raise CaptureConflict('대응하는 광복호 결과가 없습니다.')
@@ -153,6 +169,8 @@ class Receiver:
             pan, tilt = self.last_pose
             self.move(pan + pan_step, tilt + tilt_step, 'jogged', token)
         elif op == 'cancel':
+            if (self.angle_rows is not None or self.pending_payload is not None) and self.token != token:
+                raise CaptureConflict('취소 요청 ID가 현재 각도 수신과 다릅니다.')
             self.disarm()
             self.emit(kind='cancelled', token=token)
         else:
@@ -202,10 +220,8 @@ class Receiver:
         code = sample['bus_raw']
         if self.angle_rows is not None:
             self.angle_rows.append([sample['seq'], sample['rx_monotonic_ns'], code])
-            self.angle_count += 1
-            if len(self.angle_rows) == ANGLE_BATCH_ROWS:
-                self.emit(kind='angle_samples', token=self.token, rows=self.angle_rows)
-                self.angle_rows = []
+            if len(self.angle_rows) % ANGLE_BATCH_ROWS == 0:
+                self.emit(kind='angle_samples', token=self.token, rows=self.angle_rows[-ANGLE_BATCH_ROWS:])
         if self.clock() >= self.expires:
             self.timeout()
             return
@@ -213,19 +229,32 @@ class Receiver:
             raise ValueError('INA219 전압이 포화됐습니다.')
         if not self.armed:
             self.armed = True
-            settings = (dict(self.sampler_settings, bit_ms=self.angle_bit_ms,
+            settings = (dict(self.sampler_settings, bit_ms=self.angle_bit_ms, capture_mode='post_tx',
                              sample_ms=self.sampler_settings['interval_ms'])
                         if self.angle_rows is not None else {})
             self.emit(kind='armed', token=self.token, **settings)
-        payload = self.decoder.feed(sample['rx_monotonic_ns'] / 1e9, code * 0.004)
-        if payload is not None:
-            token = self.token
-            self.disarm()
-            self.token = token
-            self.pending_payload = payload
-            self.expires = self.clock() + LISTEN_NS
-            pan, tilt = decode_angles(payload)
-            self.emit(kind='decoded', token=token, rx_payload_bits=payload, pan=pan, tilt=tilt)
+        if self.decoder is not None:  # Legacy control-only stream.
+            payload = self.decoder.feed(sample['rx_monotonic_ns'] / 1e9, code * 0.004)
+            if payload is not None:
+                token = self.token
+                self.disarm()
+                self.report_decoded(token, payload)
+
+    def finish_angle(self):
+        token, rows, bit_ms = self.token, self.angle_rows, self.angle_bit_ms
+        self.disarm()
+        result = decode_captured_frame([(ns, code) for _, ns, code in rows], bit_ms)
+        if result['verified']:
+            self.report_decoded(token, result['payload_bits'], frame_check=result)
+        else:
+            self.emit(kind='error', token=token, message=result['reason'], frame_check=result)
+
+    def report_decoded(self, token, payload, **evidence):
+        self.token = token
+        self.pending_payload = payload
+        self.expires = self.clock() + LISTEN_NS
+        pan, tilt = decode_angles(payload)
+        self.emit(kind='decoded', token=token, rx_payload_bits=payload, pan=pan, tilt=tilt, **evidence)
 
     def timeout(self):
         token = self.token
@@ -255,6 +284,8 @@ class Receiver:
             self.timeout()
         elif self.sampler is not None:
             self.sampler.sample_due()
+            if self.finish_after_ns is not None and self.angle_rows[-1][1] >= self.finish_after_ns:
+                self.finish_angle()
 
 
 def serve(receiver, input_fd, output):

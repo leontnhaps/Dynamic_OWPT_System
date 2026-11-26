@@ -50,6 +50,16 @@ class WaveformFiles(unittest.TestCase):
         self.assertFalse(summary['waveform_complete'])
         self.assertEqual((summary['clipped_rows'], summary['pc_rows'], summary['rx_reported_rows']), (1, 1, 2))
 
+    def test_missing_trailer_sample_is_saved_alongside_observed_payload(self):
+        w = self.wave
+        check = dict(verified=False, header_verified=True, payload_bits=f'{103:016b}{24:016b}',
+                     tail_bits='000?', origin_ms=60.0, reason='끝 신호 4번째 비트에 전압 표본이 없습니다.')
+        w.tx_event(dict(event='angle_verification', token='trial', frame_check=check))
+        w.finish(False, check['reason'])
+        summary = json.loads((w.folder / 'summary.json').read_text(encoding='utf-8'))
+        self.assertFalse(summary['angle_verified'])
+        self.assertEqual(summary['frame_check'], check)
+
     def test_wrong_sampling_or_bitrate_never_confirms_settings(self):
         w = self.wave
         with self.assertRaises(ValueError):

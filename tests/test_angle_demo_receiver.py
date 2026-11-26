@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 from common.angle_demo import (BIT_MS, DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, encode_angles,
                                payload_from_frame)
 from common.ook_experiment import make_frame
+from common.ook_frame_decode import decode_captured_frame
 from Rx.angle_demo import ANGLE_BATCH_ROWS, CaptureConflict, LISTEN_NS, Receiver, ServoWrites, serve
 from Rx.arc_bench import PanTilt
 from Rx.ina219_ook_stream import BUS_VOLTAGE, CONFIG, INA219, SAMPLE_CONFIG
@@ -176,9 +177,26 @@ class ReceiverTests(unittest.TestCase):
         bit_ms = 6
         bits = '000' + encode_angles(103, 24) + '000'
         self.rx.command(dict(cmd='arm', token=token, bit_ms=bit_ms))
-        self.samples(bits, bit_ms)
+
+        def decode_after_close(rows, bit_ms):
+            self.assertFalse(self.sensor_open)
+            self.assertEqual(self.events[-1]['kind'], 'angle_samples_end')
+            return decode_captured_frame(rows, bit_ms)
+
+        with patch('Rx.angle_demo.decode_captured_frame', side_effect=decode_after_close) as fit:
+            self.samples(bits, bit_ms)
+            self.assertIsNone(self.rx.decoder)
+            fit.assert_not_called()
+            self.assertFalse(any(e['kind'] == 'decoded' for e in self.events))
+            self.rx.command(dict(cmd='finish_angle', token=token))
+            self.assertTrue(self.sensor_open)
+            self.samples('0', bit_ms=DECODE_SAMPLE_MS)
+            fit.assert_not_called()
+            self.samples('0', bit_ms=DECODE_SAMPLE_MS)
+            fit.assert_called_once()
         self.assertEqual(self.events[0], dict(kind='armed', token=token, bit_ms=6, sample_ms=1,
-                                              bus=3, address=0x40, config=SAMPLE_CONFIG, interval_ms=1))
+                                              bus=3, address=0x40, config=SAMPLE_CONFIG, interval_ms=1,
+                                              capture_mode='post_tx'))
         self.assertEqual([e['kind'] for e in self.events[-2:]], ['angle_samples_end', 'decoded'])
         batches = self.events[1:-2]
         self.assertTrue(all(b['kind'] == 'angle_samples' and 1 <= len(b['rows']) <= ANGLE_BATCH_ROWS
@@ -187,12 +205,51 @@ class ReceiverTests(unittest.TestCase):
         self.assertGreaterEqual(len(rows), 65 * bit_ms)
         self.assertEqual(self.events[-2]['count'], len(rows))
         for i, (seq, ns, code) in enumerate(rows):
-            self.assertEqual((seq, ns, code), (i, start+(i+1)*1_000_000, 550 if bits[i//bit_ms]=='1' else 220))
+            self.assertEqual((seq, ns, code), (i, start+(i+1)*1_000_000, 550 if (bits+'0')[i//bit_ms]=='1' else 220))
         self.assertEqual(self.events[-1]['rx_payload_bits'], payload_from_frame(encode_angles(103, 24)))
         self.assertFalse(self.bus.write.called)
         self.rx.command(dict(cmd='commit', token=token))
         self.assertEqual(self.events[-1]['kind'], 'applied')
         self.assertEqual(sum(e['kind'] == 'angle_samples_end' for e in self.events), 1)
+
+    def test_finish_requires_armed_matching_token_and_complete_transmission_time(self):
+        self.rx.command(dict(cmd='arm', token='T', bit_ms=8))
+        with self.assertRaises(CaptureConflict):
+            self.rx.command(dict(cmd='finish_angle', token='T'))
+        self.samples('0000')
+        for cmd, token in [('finish_angle','old'), ('finish_angle','T'), ('cancel','old'), ('commit','T')]:
+            with self.assertRaises(CaptureConflict):
+                self.rx.command(dict(cmd=cmd, token=token))
+        self.assertTrue(self.sensor_open)
+        self.assertIsNone(self.rx.finish_after_ns)
+        self.samples(encode_angles(103, 24))
+        self.rx.command(dict(cmd='finish_angle', token='T'))
+        cutoff = self.rx.finish_after_ns
+        self.rx.command(dict(cmd='finish_angle', token='T'))
+        self.assertEqual(self.rx.finish_after_ns, cutoff)
+        self.rx.command(dict(cmd='cancel', token='T'))
+        self.samples('00')
+        self.assertFalse(any(e['kind'] == 'decoded' for e in self.events))
+        self.assertFalse(self.sensor_open)
+        self.bus.write.assert_not_called()
+
+    def test_rejected_post_capture_frame_never_grants_a_commit(self):
+        self.rx.command(dict(cmd='arm', token='T', bit_ms=8))
+        self.samples('000' + encode_angles(103, 24)[:-1])
+        self.now += BIT_MS * 1_000_000
+        self.samples('000')
+        self.rx.command(dict(cmd='finish_angle', token='T'))
+        self.samples('0')
+        rejection = self.events[-1]
+        self.assertEqual(rejection['kind'], 'error')
+        self.assertTrue(rejection['message'])
+        self.assertFalse(rejection['frame_check']['verified'])
+        self.assertEqual(rejection['frame_check']['payload_bits'], payload_from_frame(encode_angles(103, 24)))
+        self.assertIn('?', rejection['frame_check']['tail_bits'])
+        self.assertEqual(self.events[-2]['kind'], 'angle_samples_end')
+        with self.assertRaises(CaptureConflict):
+            self.rx.command(dict(cmd='commit', token='T'))
+        self.bus.write.assert_not_called()
 
     def test_timeout_and_cancel_keep_partial_rows_and_acquisition_gaps(self):
         for op in ('timeout', 'cancel'):

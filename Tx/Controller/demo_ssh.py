@@ -9,7 +9,7 @@ from pathlib import Path
 
 from common.angle_demo import (DECODE_SAMPLE_MS, HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT,
                                validate_angle_bit_ms, validate_jog)
-from common.ook_experiment import PAYLOAD_BITS, interval_value
+from common.ook_experiment import PAYLOAD_BITS, TRAILING_ZEROS, interval_value
 from Rx.ina219_ook_stream import SAMPLE_CONFIG
 from Tx.Controller.pi_ook_rx import PiSshReceiver
 
@@ -82,7 +82,7 @@ class DemoSsh(PiSshReceiver):
             raise ValueError('잘못된 Rx 시연 명령 또는 요청 ID입니다.')
         if command.startswith('raw '):
             self._enqueue(dict(cmd='start', token=token, interval_ms=interval_value(command[4:])))
-        elif command in ('arm', 'commit', 'home', 'cancel', 'measure', 'stop'):
+        elif command in ('arm', 'finish_angle', 'commit', 'home', 'cancel', 'measure', 'stop'):
             self._enqueue(dict(cmd=command, token=token))
         else:
             raise ValueError('잘못된 Rx 시연 명령입니다.')
@@ -163,4 +163,19 @@ class DemoSsh(PiSshReceiver):
                 raise OSError('Rx 시연 응답의 적용 각도가 잘못되었습니다.')
             if kind == 'home' and (pan, tilt) != (HOME_PAN, HOME_TILT):
                 raise OSError('Rx 원위치 응답의 각도가 일치하지 않습니다.')
+        if kind in ('decoded', 'error') and 'frame_check' in event:
+            check = event['frame_check']
+            if (not isinstance(check, dict) or type(check.get('header_verified')) is not bool
+                    or check.get('verified') is not (kind == 'decoded')):
+                raise OSError('Rx 프레임 확인 상태가 잘못되었습니다.')
+            payload, tail = check.get('payload_bits'), check.get('tail_bits')
+            if payload is not None and (not isinstance(payload, str) or len(payload) != PAYLOAD_BITS
+                                        or set(payload) - {'0', '1'}):
+                raise OSError('Rx가 관측한 payload 형식이 잘못되었습니다.')
+            if tail is not None and (not isinstance(tail, str) or len(tail) != len(TRAILING_ZEROS)
+                                     or set(tail) - {'0', '1', '?'}):
+                raise OSError('Rx가 관측한 끝 비트 형식이 잘못되었습니다.')
+            if kind == 'decoded' and (not check['header_verified'] or tail != TRAILING_ZEROS
+                                      or payload != event['rx_payload_bits']):
+                raise OSError('Rx 프레임 확인 결과와 복호 응답이 다릅니다.')
         self._publish(event)

@@ -14,6 +14,9 @@ from common.angle_demo import DECODE_SAMPLE_MS, payload_from_frame, validate_ang
 from Tx.Controller.pi_ook_rx import PiCapture
 
 
+ANGLE_DECODER_VERSION = 'ook-angle-postcapture-v1'
+
+
 class AngleWaveform(PiCapture):
     """Use the speed-test CSV format. PC arrival times are shared by a batch."""
 
@@ -22,6 +25,7 @@ class AngleWaveform(PiCapture):
         self.token = token
         self.end_received = self.closed = False
         self.end_count = None
+        self.frame_check = None
         self.gaps_over_bit = 0
         context = dict(context or {})
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -30,12 +34,15 @@ class AngleWaveform(PiCapture):
                         bit_ms=bit_ms, bitrate_bps=1000 / bit_ms, repeats=1)
         folder.mkdir(parents=True)
         super().__init__(folder, settings, context.get('rx_ssh_target'), token, DECODE_SAMPLE_MS,
-                         dict(kind='angle_ook', context=context, pc_start_unix_ns=time.time_ns(),
+                         dict(kind='angle_ook', decoder=ANGLE_DECODER_VERSION,
+                              context=context, pc_start_unix_ns=time.time_ns(),
                               pc_receive_timing='Time at receipt of this sample batch, common to its rows.'))
 
     def tx_event(self, event):
         if self.closed or self.token not in (event.get('token'), event.get('request_id')):
             return
+        if isinstance(event.get('frame_check'), dict):
+            self.frame_check = event['frame_check']
         with (self.folder / 'events.jsonl').open('a', encoding='utf-8') as stream:
             stream.write(json.dumps(dict(event, pc_recorded_unix_ns=time.time_ns()),
                                     ensure_ascii=False, allow_nan=False) + '\n')
@@ -74,7 +81,8 @@ class AngleWaveform(PiCapture):
         self.file.close()
         # A decode timeout can still have a complete, useful waveform.
         complete = self.end_received and self.end_count == self.rows and not self.invalid_lines
-        summary = dict(schema_version=1, token=self.token, bit_ms=self.bit_ms, sample_ms=self.sample_ms,
+        summary = dict(schema_version=2, decoder=ANGLE_DECODER_VERSION, frame_check=self.frame_check,
+                       token=self.token, bit_ms=self.bit_ms, sample_ms=self.sample_ms,
                        angle_verified=bool(success), end_reason=reason, waveform_complete=bool(complete),
                        interval_confirmed=self.config['interval_confirmed'],
                        pc_rows=self.rows, rx_reported_rows=self.end_count, missing_sample_slots=self.missing_records,

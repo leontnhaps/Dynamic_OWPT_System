@@ -31,7 +31,7 @@ def bit_decisions(counts, sums, threshold):
 
 
 def fit_header(times, values, bit, lo, hi):
-    """Find the best header origin in a short live window using the speed test's SSE/SST rule."""
+    """Find the best header origin within the supplied range using the speed test's SSE/SST rule."""
     offsets = [i * bit for i in HEADER_EDGES]
     # A sample can change header assignment only when it crosses a run boundary.
     cuts = {lo, hi}
@@ -68,6 +68,74 @@ def fit_header(times, values, bit, lo, hi):
     while end < len(matched) and matched[end]:
         end += 1
     return (cuts[first] + cuts[end]) / 2
+
+
+def decode_captured_frame(rows, bit_ms):
+    """Read the observed angle frame after acquisition. No requested angle is an input."""
+    if not math.isfinite(bit_ms) or bit_ms <= 0:
+        raise ValueError('Invalid bit period.')
+    result = dict(verified=False, header_verified=False, payload_bits=None,
+                  tail_bits=None, origin_ms=None, reason='시작 신호 판독에 필요한 전압 표본이 부족합니다.')
+    times, values = [], []
+    first_ns = last_ns = None
+    for ns, code in rows:
+        if (type(ns) is not int or ns < 0 or (last_ns is not None and ns <= last_ns)
+                or type(code) is not int or not 0 <= code <= 8191):
+            raise ValueError('Rx 표본 시각 또는 전압값이 유효하지 않습니다.')
+        if code == 8191:
+            result['reason'] = 'INA219 전압 표본이 포화되어 각도를 확인할 수 없습니다.'
+            return result
+        if first_ns is None:
+            first_ns = ns
+        times.append((ns-first_ns) / 1e6)
+        values.append(code * .004)
+        last_ns = ns
+    if not times:
+        return result
+
+    # Match the reference test's search interval and fit only the known header.
+    limit = times[-1] - (len(HEADER) + PAYLOAD_BITS) * bit_ms
+    if limit < 0:
+        return result
+    result['reason'] = 'Rx 전압에서 시작 신호를 확인하지 못했습니다.'
+    if max(values) - min(values) < MIN_CONTRAST_V:
+        return result
+    origin = fit_header(times, values, bit_ms, 0, limit) if limit else 0
+    if origin is None:
+        return result
+    edges = [bisect_left(times, origin + i * bit_ms) for i in range(FRAME_BITS+1)]
+    counts = [b-a for a, b in zip(edges, edges[1:])]
+    if not all(counts[:len(HEADER)]):
+        return result
+    sums = [sum(values[a:b]) for a, b in zip(edges, edges[1:])]
+
+    def header_level(symbol):
+        cells = [i for i, bit in enumerate(HEADER) if bit == symbol]
+        return sum(sums[i] for i in cells) / sum(counts[i] for i in cells)
+
+    low, high = header_level('0'), header_level('1')
+    if high-low < MIN_CONTRAST_V:
+        return result
+    decisions = bit_decisions(counts, sums, (low+high)/2)
+    bits = ''.join(cell['decision'] for cell in decisions)
+    if not bits.startswith(HEADER):
+        return result
+    data = bits[len(HEADER):len(HEADER)+PAYLOAD_BITS]
+    tail = bits[len(HEADER)+PAYLOAD_BITS:]
+    result.update(header_verified=True, origin_ms=origin, tail_bits=tail)
+    if '?' in data:
+        result['reason'] = f'각도 데이터 {data.index("?")+1}번째 비트에 전압 표본이 없습니다.'
+        return result
+    result['payload_bits'] = data
+    if '?' in tail:
+        result['reason'] = f'끝 신호 {tail.index("?")+1}번째 비트에 전압 표본이 없습니다.'
+    elif tail != TRAILING_ZEROS:
+        result['reason'] = f'끝 신호가 {tail}로 읽혔습니다 (기대값 {TRAILING_ZEROS}).'
+    elif times[-1] < origin + FRAME_BITS * bit_ms:
+        result['reason'] = '끝 신호 구간이 끝나기 전에 전압 기록이 종료됐습니다.'
+    else:
+        result.update(verified=True, reason='')
+    return result
 
 
 class PayloadDecoder:

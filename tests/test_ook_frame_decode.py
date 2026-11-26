@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from common.ook_experiment import HEADER, PAYLOAD_BITS, SYNC_WORD, THRESHOLD_BITS, TRAILING_ZEROS, make_frame
-from common.ook_frame_decode import PayloadDecoder, fit_header
+from common.ook_frame_decode import PayloadDecoder, decode_captured_frame, fit_header
 from Tx.Controller.ook_pi_analysis import decode, find_header
 
 
@@ -66,3 +66,52 @@ class PiFrameDecoderTests(unittest.TestCase):
         damaged = make_frame(a)
         damaged = damaged[:22]+str(1-int(damaged[22]))+damaged[23:]
         self.assertEqual(received(samples(damaged+'0'*3+make_frame(a)+make_frame(b))), [a,b])
+
+
+class CapturedFrameTests(unittest.TestCase):
+    payload = f'{103:016b}{24:016b}'
+    phase_ms = 20.5
+
+    def capture(self, bit_ms, missing=None, bits=None):
+        frame = make_frame(self.payload) if bits is None else bits
+        samples = []
+        for ms in range(math.ceil(self.phase_ms + len(frame)*bit_ms + 25)):
+            relative = ms - self.phase_ms
+            if missing is not None and missing[0] <= relative < missing[1]:
+                continue
+            index = math.floor(relative / bit_ms)
+            on = 0 <= index < len(frame) and frame[index] == '1'
+            samples.append((1_000_000_000_000 + ms*1_000_000, 1050 if on else 350))
+        return samples
+
+    def test_gap_crossing_boundary_is_valid_if_each_bit_was_measured(self):
+        for bit_ms in (1, 8, 10, 100):
+            with self.subTest(bit_ms=bit_ms):
+                gap = None if bit_ms == 1 else (63.6*bit_ms, 64.6*bit_ms)
+                result = decode_captured_frame(self.capture(bit_ms, missing=gap), bit_ms)
+                self.assertTrue(result['verified'], result)
+                self.assertEqual(result['payload_bits'], self.payload)
+                self.assertEqual(result['tail_bits'], '0000')
+
+    def test_confirmed_payload_preserved_but_absent_or_wrong_last_stop_bit_rejects(self):
+        result = decode_captured_frame(self.capture(8, missing=(511,521)), 8)
+        self.assertTrue(result['header_verified'])
+        self.assertFalse(result['verified'])
+        self.assertEqual((result['payload_bits'], result['tail_bits']), (self.payload, '000?'))
+        self.assertIn('4번째', result['reason'])
+        result = decode_captured_frame(self.capture(8, bits=make_frame(self.payload)[:-1]+'1'), 8)
+        self.assertFalse(result['verified'])
+        self.assertEqual((result['payload_bits'], result['tail_bits']), (self.payload, '0001'))
+
+    def test_payload_gap_or_unobserved_header_never_produces_a_valid_command(self):
+        gap_start = (len(HEADER)+3)*8
+        result = decode_captured_frame(self.capture(8, missing=(gap_start-1, gap_start+9)), 8)
+        self.assertTrue(result['header_verified'])
+        self.assertFalse(result['verified'])
+        self.assertIsNone(result['payload_bits'])
+        flat = [(ns, 200) for ns,_ in self.capture(8)]
+        for rows in ([], flat, self.capture(8)[:50]):
+            result = decode_captured_frame(rows, 8)
+            self.assertFalse(result['header_verified'])
+            self.assertFalse(result['verified'])
+            self.assertIsNone(result['payload_bits'])
