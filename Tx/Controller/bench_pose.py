@@ -5,7 +5,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
-from common.angle_demo import HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT
+from common.angle_demo import HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, RX_VIEWPOINT
 from common.model_paths import resolve_yolo_path
 from common.pv_detection import TARGET_SELECTION, fresh
 from common.tx_tracking import TrackingConfig
@@ -124,7 +124,7 @@ class BenchPoseInputs(ttk.Frame):
         axes.pack(anchor='w')
         for key, label, default, options in [
                 ('tx_pan_plus','Tx Pan+', '선택', PAN_SIGN), ('tx_tilt_plus','Tx Tilt+', '선택', TILT_SIGN),
-                ('rx_pan_plus','Rx Pan+', '오른쪽', PAN_SIGN), ('rx_tilt_plus','Rx Tilt+', '아래', TILT_SIGN)]:
+                ('rx_pan_plus','Rx Pan+', '왼쪽', PAN_SIGN), ('rx_tilt_plus','Rx Tilt+', '아래', TILT_SIGN)]:
             self.field(axes, key, label, default, 6, options)
         self.field(axes, 'tx_p0', 'Tx 정면 Pan°', '0')
         self.field(axes, 'tx_t0', '수평 Tilt°', '0')
@@ -170,6 +170,7 @@ class BenchPoseInputs(ttk.Frame):
                            or not 0 <= intrinsics[3] < CAMERA.height):
             raise ValueError('초점거리는 양수, 주점은 기준 영상 내부여야 합니다.')
         return dict(point_id=point_id, rx_minus_tx_m=xyz, room_axes='Tx origin: +X right, +Y front, +Z up',
+                    rx_viewpoint=RX_VIEWPOINT,
                     rx_pan_plus=f['rx_pan_plus'], rx_tilt_plus=f['rx_tilt_plus'],
                     rx_axes_observed=self.rx_axes_observed.get(),
                     tx_pan_plus=f['tx_pan_plus'], tx_tilt_plus=f['tx_tilt_plus'],

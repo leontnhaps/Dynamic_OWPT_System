@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from tkinter import ttk
 
-from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, encode_angles
+from common.angle_demo import BIT_MS, HOME_PAN, HOME_TILT, MAX_PAN, MAX_TILT, RX_VIEWPOINT, encode_angles
 from Tx.Controller.demo_ssh import DemoSsh
 from Tx.Controller.pi_ook_rx import DEFAULT_RX_TARGET
 
@@ -41,7 +41,7 @@ class AngleDemoPanel(ttk.Frame):
             ttk.Entry(row, textvariable=variable, width=width, show=mask).pack(side='left')
         ttk.Button(row, text='SSH 연결', command=self.connect).pack(side='left', padx=5)
         ttk.Label(row, textvariable=self.rx_status).pack(side='left', padx=4)
-        check_box = ttk.LabelFrame(self, text='Rx 서보 점검 (SSH)', padding=4)
+        check_box = ttk.LabelFrame(self, text=f'Rx 서보 점검 (SSH) · {RX_VIEWPOINT}', padding=4)
         check_box.pack(anchor='w', pady=3)
         readout = ttk.Frame(check_box)
         readout.pack(anchor='w')
@@ -153,7 +153,7 @@ class AngleDemoPanel(ttk.Frame):
             self.begin('check_jog')
             self.rx.jog(self.token, *delta)
         self.record(dict(event='servo_check_requested', token=self.token, pan=self.check_goal[0],
-                         tilt=self.check_goal[1]))
+                         tilt=self.check_goal[1], rx_viewpoint=RX_VIEWPOINT))
         self.status.set(f'SSH 점검 · Pan {self.check_goal[0]}°, Tilt {self.check_goal[1]}° 응답 대기')
 
     def stop_servo_check(self):

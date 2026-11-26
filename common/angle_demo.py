@@ -5,6 +5,7 @@ from common.arc_protocol import VoltageFrameDecoder, crc8
 
 HOME_PAN = 103
 HOME_TILT = 20
+RX_VIEWPOINT = '셀 뒤에서 빛이 오는 쪽을 보는 기준'
 MAX_PAN = 180
 MAX_TILT = 35
 BIT_MS = 8
